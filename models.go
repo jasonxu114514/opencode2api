@@ -165,6 +165,35 @@ func (c *modelCatalog) keyTierOrderLocked(model string, hasZenKeys, hasGoKeys bo
 	return result
 }
 
+func (c *modelCatalog) RouteForTier(model string, requested Protocol, tier Tier, hasZenKeys, hasGoKeys bool) (modelRoute, error) {
+	if tier != TierZen && tier != TierGo {
+		return modelRoute{}, fmt.Errorf("selected key tier must be zen or go")
+	}
+	c.mu.RLock()
+	protocol := c.protocols[model]
+	catalogPending := len(c.zen) == 0 && len(c.goModels) == 0
+	available := catalogPending
+	if tier == TierZen {
+		available = available || c.zen[model]
+		if !hasZenKeys {
+			available = false
+		}
+	} else {
+		available = available || c.goModels[model]
+		if !hasGoKeys {
+			available = false
+		}
+	}
+	c.mu.RUnlock()
+	if protocol == "" {
+		protocol = inferProtocol(model)
+	}
+	if !available {
+		return modelRoute{}, fmt.Errorf("model %q is not available in the selected %s key tier", model, tier)
+	}
+	return modelRoute{ID: model, Tier: tier, Protocol: protocol, KeyTiers: []Tier{tier}}, nil
+}
+
 func (c *modelCatalog) anonymousDecision(model string) AnonymousDecision {
 	if c.metadata != nil {
 		return c.metadata.Decide(model)
