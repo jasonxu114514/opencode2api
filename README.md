@@ -96,7 +96,9 @@ lifetime 从当前进程启动开始；last hour 使用 60 个一分钟 Bucket�
 }
 ```
 
-`protocol` 可为 `chat`、`responses` 或 `anthropic`。服务端无条件把内层 `stream` 改为 `false`。诊断结果统一包含 `ok`、真实 `http_status`、`duration_ms`、`request_id`、`route` 和原始协议 `response`。一旦诊断调用已执行，管理接口本身返回 HTTP `200`，即使上游结果是 4xx/5xx；因此错误正文、路由和 Request ID 仍可一起查看。外层请求格式、Session、CSRF 或限速错误仍使用相应管理 HTTP 状态。
+`protocol` 可为 `chat`、`responses` 或 `anthropic`。Playground 的 `key` 字段支持 `{"mode":"auto"}`，也支持按配置响应中的脱敏 ID 指定上游 Key，例如 `{"mode":"selected","tier":"zen","id":"a1b2c3d4e5"}`。指定 Key 时只进行一次该 Key 的真实上游尝试，不使用匿名通道，也不会回退到其他 Key 或 Tier；因此可以区分可用、认证拒绝、限流和上游异常。浏览器和管理 API 始终只传递掩码与稳定短指纹，不传递完整 Key。
+
+服务端无条件把内层 `stream` 改为 `false`。诊断结果统一包含 `ok`、真实 `http_status`、`duration_ms`、`request_id`、`route` 和原始协议 `response`；指定 Key 时还包含 `selected_key` 与 `key_test`。一旦诊断调用已执行，管理接口本身返回 HTTP `200`，即使上游结果是 4xx/5xx；因此错误正文、路由和 Request ID 仍可一起查看。外层请求格式、Session、CSRF 或限速错误仍使用相应管理 HTTP 状态。
 
 诊断响应不会包含本地 Server Key、上游 Key、Cookie、密码、Authorization 或代理凭据；响应中同名敏感字段及已配置敏感值会在返回浏览器前清除。最近一次结果只保存在当前管理进程内。
 

@@ -311,6 +311,57 @@ func (m *RuntimeManager) DebugRoute(model string, requested Protocol) ModelRoute
 	return gateway.catalog.Diagnostic(model, requested, len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0, gateway.cfg.Anonymous)
 }
 
+func (m *RuntimeManager) DebugRouteForTier(model string, requested Protocol, tier Tier) (ModelRouteDiagnostic, error) {
+	runtime := m.current.Load()
+	if runtime == nil {
+		return ModelRouteDiagnostic{Model: model, RequestedProtocol: requested, RouteError: "gateway runtime is unavailable"}, fmt.Errorf("gateway runtime is unavailable")
+	}
+	gateway := runtime.gateway
+	route, err := gateway.catalog.RouteForTier(model, requested, tier, len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0)
+	diagnostic := gateway.catalog.Diagnostic(model, requested, len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0, false)
+	if err != nil {
+		diagnostic.RouteError = err.Error()
+		return diagnostic, err
+	}
+	diagnostic.RouteError = ""
+	diagnostic.Tier = route.Tier
+	diagnostic.Anonymous = false
+	diagnostic.KeyTiers = []Tier{tier}
+	return diagnostic, nil
+}
+
+func (m *RuntimeManager) DebugKeys() map[string][]DebugKeyView {
+	runtime := m.current.Load()
+	result := map[string][]DebugKeyView{"zen": {}, "go": {}}
+	if runtime == nil {
+		return result
+	}
+	appendKeys := func(tier Tier, nodes []*upstreamNode) {
+		for _, node := range nodes {
+			view := DebugKeyView{ID: secretFingerprint(node.key), Tier: tier, Display: maskValue(node.key), Index: node.index, Failures: node.failures.Load()}
+			if until := node.cooldownUntil.Load(); until > time.Now().UnixNano() {
+				value := time.Unix(0, until).UTC()
+				view.CooldownUntil = &value
+			}
+			result[string(tier)] = append(result[string(tier)], view)
+		}
+	}
+	appendKeys(TierZen, runtime.gateway.zenNodes.nodes)
+	appendKeys(TierGo, runtime.gateway.goNodes.nodes)
+	return result
+}
+
+func (m *RuntimeManager) DebugKey(tier Tier, id string) *DebugKeyView {
+	keys := m.DebugKeys()
+	for _, key := range keys[string(tier)] {
+		if key.ID == id {
+			copy := key
+			return &copy
+		}
+	}
+	return nil
+}
+
 func keyStatuses(tier string, pool *nodePool) []KeyStatus {
 	result := make([]KeyStatus, 0, len(pool.nodes))
 	for _, node := range pool.nodes {

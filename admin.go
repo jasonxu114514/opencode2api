@@ -400,27 +400,46 @@ func (a *AdminServer) handleMonitor(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+type DebugKeySelection struct {
+	Mode string `json:"mode,omitempty"`
+	Tier Tier   `json:"tier,omitempty"`
+	ID   string `json:"id,omitempty"`
+}
+
 type DebugInferenceRequest struct {
-	Protocol Protocol       `json:"protocol"`
-	Request  map[string]any `json:"request"`
+	Protocol Protocol          `json:"protocol"`
+	Key      DebugKeySelection `json:"key,omitempty"`
+	Request  map[string]any    `json:"request"`
 }
 
 type DebugInferenceResult struct {
-	OK         bool                 `json:"ok"`
-	HTTPStatus int                  `json:"http_status"`
-	DurationMS int64                `json:"duration_ms"`
-	RequestID  string               `json:"request_id,omitempty"`
-	Route      ModelRouteDiagnostic `json:"route"`
-	Response   any                  `json:"response"`
+	OK          bool                 `json:"ok"`
+	HTTPStatus  int                  `json:"http_status"`
+	DurationMS  int64                `json:"duration_ms"`
+	RequestID   string               `json:"request_id,omitempty"`
+	Route       ModelRouteDiagnostic `json:"route"`
+	SelectedKey *DebugKeyView        `json:"selected_key,omitempty"`
+	KeyTest     string               `json:"key_test,omitempty"`
+	Response    any                  `json:"response"`
+}
+
+type DebugKeyView struct {
+	ID            string     `json:"id"`
+	Tier          Tier       `json:"tier"`
+	Display       string     `json:"display"`
+	Index         int        `json:"index"`
+	Failures      uint32     `json:"failures"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 }
 
 func (a *AdminServer) handleDebugModels(w http.ResponseWriter, _ *http.Request) {
 	models, metadata := a.manager.DebugModels()
+	keys := a.manager.DebugKeys()
 	a.mu.Lock()
 	last := a.lastInference
 	a.mu.Unlock()
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"models": models, "metadata": metadata, "last_inference": last})
+	writeJSON(w, http.StatusOK, map[string]any{"models": models, "keys": keys, "metadata": metadata, "last_inference": last})
 }
 
 func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Request) {
@@ -441,6 +460,21 @@ func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Reques
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "request must be a JSON object")
 		return
 	}
+	if input.Key.Mode == "" {
+		input.Key.Mode = "auto"
+	}
+	if input.Key.Mode != "auto" && input.Key.Mode != "selected" {
+		writeAdminError(w, http.StatusBadRequest, "invalid_key_mode", "key.mode must be auto or selected")
+		return
+	}
+	var selectedKey *DebugKeyView
+	if input.Key.Mode == "selected" {
+		selectedKey = a.manager.DebugKey(input.Key.Tier, input.Key.ID)
+		if selectedKey == nil {
+			writeAdminError(w, http.StatusBadRequest, "unknown_key_id", "selected key is not configured")
+			return
+		}
+	}
 	payload := cloneMap(input.Request)
 	payload["stream"] = false
 	model := stringAt(payload, "model")
@@ -449,6 +483,14 @@ func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	route := a.manager.DebugRoute(model, input.Protocol)
+	if selectedKey != nil {
+		var routeErr error
+		route, routeErr = a.manager.DebugRouteForTier(model, input.Protocol, selectedKey.Tier)
+		if routeErr != nil {
+			writeAdminError(w, http.StatusBadRequest, "model_unavailable_for_key_tier", routeErr.Error())
+			return
+		}
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "request contains unsupported JSON values")
@@ -466,6 +508,9 @@ func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.ServerKeys[0])
+	if selectedKey != nil {
+		request = request.WithContext(withDebugKeyOverride(request.Context(), debugKeyOverride{Tier: selectedKey.Tier, KeyID: selectedKey.ID}))
+	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	recorder := newDebugResponseRecorder()
@@ -473,12 +518,15 @@ func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Reques
 	a.manager.Handler().ServeHTTP(recorder, request)
 	duration := time.Since(started)
 	requestID := recorder.Header().Get("x-request-id")
+	var matchedAttempt *UpstreamAttempt
 	if requestID != "" {
 		upstream := a.monitor.Snapshot().Upstream.Recent
 		for index := len(upstream) - 1; index >= 0; index-- {
 			if upstream[index].RequestID == requestID {
-				route.Anonymous = upstream[index].Anonymous
-				route.Tier = Tier(upstream[index].Tier)
+				attempt := upstream[index]
+				matchedAttempt = &attempt
+				route.Anonymous = attempt.Anonymous
+				route.Tier = Tier(attempt.Tier)
 				break
 			}
 		}
@@ -488,9 +536,31 @@ func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Reques
 		raw = recorder.body.String()
 	}
 	raw = sanitizeDebugValue(raw, a.manager.redactor)
+	keyTest := ""
+	if selectedKey != nil {
+		if current := a.manager.DebugKey(selectedKey.Tier, selectedKey.ID); current != nil {
+			selectedKey = current
+		}
+		switch {
+		case matchedAttempt != nil && matchedAttempt.Outcome == "transport_error":
+			keyTest = "transport_error"
+		case recorder.status >= 200 && recorder.status < 300:
+			keyTest = "usable"
+		case recorder.status == http.StatusUnauthorized || recorder.status == http.StatusForbidden:
+			keyTest = "rejected"
+		case recorder.status == http.StatusTooManyRequests:
+			keyTest = "rate_limited"
+		case matchedAttempt == nil:
+			keyTest = "unavailable"
+		case recorder.status >= 500:
+			keyTest = "upstream_error"
+		default:
+			keyTest = "request_error"
+		}
+	}
 	result := DebugInferenceResult{
 		OK: recorder.status >= 200 && recorder.status < 300, HTTPStatus: recorder.status,
-		DurationMS: max(duration.Milliseconds(), 0), RequestID: requestID, Route: route, Response: raw,
+		DurationMS: max(duration.Milliseconds(), 0), RequestID: requestID, Route: route, SelectedKey: selectedKey, KeyTest: keyTest, Response: raw,
 	}
 	a.mu.Lock()
 	a.lastInference = &result
