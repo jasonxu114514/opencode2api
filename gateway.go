@@ -25,6 +25,22 @@ const (
 	proxyHealthCheckTimeout  = 10 * time.Second
 )
 
+type debugKeyOverride struct {
+	Tier  Tier
+	KeyID string
+}
+
+type debugKeyOverrideContextKey struct{}
+
+func withDebugKeyOverride(ctx context.Context, override debugKeyOverride) context.Context {
+	return context.WithValue(ctx, debugKeyOverrideContextKey{}, override)
+}
+
+func debugKeyOverrideFromContext(ctx context.Context) (debugKeyOverride, bool) {
+	override, ok := ctx.Value(debugKeyOverrideContextKey{}).(debugKeyOverride)
+	return override, ok && override.KeyID != ""
+}
+
 type Gateway struct {
 	cfg        Config
 	logger     *slog.Logger
@@ -234,7 +250,13 @@ func (g *Gateway) handleInference(external Protocol) http.HandlerFunc {
 			writeAPIError(w, external, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
 			return
 		}
-		route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+		override, selected := debugKeyOverrideFromContext(r.Context())
+		var route modelRoute
+		if selected {
+			route, err = g.catalog.RouteForTier(model, external, override.Tier, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0)
+		} else {
+			route, err = g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+		}
 		if err != nil {
 			writeAPIError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 			return
@@ -332,6 +354,9 @@ func (g *Gateway) handleInference(external Protocol) http.HandlerFunc {
 }
 
 func (g *Gateway) doUpstream(ctx context.Context, route modelRoute, body []byte, ids requestIDs) (*http.Response, error) {
+	if override, selected := debugKeyOverrideFromContext(ctx); selected {
+		return g.doSelectedKeyUpstream(ctx, route, body, ids, override)
+	}
 	var lastResponse *http.Response
 	var lastErr error
 	attempts := 0
@@ -516,6 +541,55 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route modelRoute, body []by
 		return lastResponse, nil, attempts
 	}
 	return nil, lastErr, attempts
+}
+
+func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route modelRoute, body []byte, ids requestIDs, override debugKeyOverride) (*http.Response, error) {
+	nodes := g.zenNodes
+	baseURL := g.cfg.Upstream.Zen
+	if override.Tier == TierGo {
+		nodes = g.goNodes
+		baseURL = g.cfg.Upstream.Go
+	}
+	node := nodes.NodeByID(override.KeyID)
+	if node == nil {
+		return nil, fmt.Errorf("selected %s key is no longer configured", override.Tier)
+	}
+	if meta, _ := ctx.Value(requestMetaKey{}).(*requestMeta); meta != nil {
+		meta.Attempts = 1
+		meta.Tier = string(route.Tier)
+	}
+	req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
+	if err != nil {
+		return nil, err
+	}
+	proxy := nodes.Proxy(node)
+	if proxy == nil {
+		return nil, errors.New("selected upstream key has no proxy binding")
+	}
+	started := time.Now()
+	resp, err := proxy.client.Do(req)
+	duration := time.Since(started)
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	proxyFailed := g.syncProxyResult(ctx, proxy, status, err)
+	g.recordUpstreamAttempt(route, ids, 1, secretFingerprint(node.key), "key", false, proxy, resp, err, duration)
+	if err == nil && resp != nil && resp.StatusCode/100 == 2 {
+		nodes.MarkSuccess(node)
+		return resp, nil
+	}
+	if proxyFailed {
+		if nodes.Proxy(node) == proxy {
+			nodes.MarkFailure(node, resp, err)
+		}
+	} else {
+		nodes.MarkFailure(node, resp, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func extractResponseUsage(protocol Protocol, body []byte) (bridgeUsage, bool) {
