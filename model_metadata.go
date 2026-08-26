@@ -55,14 +55,15 @@ type modelMetadataCache struct {
 }
 
 type modelMetadataStore struct {
-	mu        sync.RWMutex
-	models    map[string]ModelPrice
-	updatedAt time.Time
-	lastError string
-	cachePath string
-	endpoint  string
-	client    *http.Client
-	logger    *slog.Logger
+	mu             sync.RWMutex
+	models         map[string]ModelPrice
+	updatedAt      time.Time
+	lastError      string
+	cachePath      string
+	endpoint       string
+	client         *http.Client
+	clientProvider func() []*http.Client
+	logger         *slog.Logger
 }
 
 func newModelMetadataStore(configPath string, logger *slog.Logger) *modelMetadataStore {
@@ -78,6 +79,29 @@ func newModelMetadataStore(configPath string, logger *slog.Logger) *modelMetadat
 		store.lastError = "load metadata cache: " + err.Error()
 	}
 	return store
+}
+
+// SetClientProvider supplies candidate HTTP clients for refresh attempts, most
+// preferred first. It lets the periodic models.dev refresh ride the proxy
+// transports exposed by whichever gateway runtime is currently active.
+func (store *modelMetadataStore) SetClientProvider(provider func() []*http.Client) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.clientProvider = provider
+}
+
+func (store *modelMetadataStore) refreshClients() []*http.Client {
+	store.mu.RLock()
+	provider := store.clientProvider
+	store.mu.RUnlock()
+	if provider == nil {
+		return []*http.Client{store.client}
+	}
+	clients := provider()
+	if len(clients) == 0 {
+		return []*http.Client{store.client}
+	}
+	return clients
 }
 
 func (store *modelMetadataStore) Start(ctx context.Context) {
@@ -109,41 +133,53 @@ func (store *modelMetadataStore) refreshAndLog(ctx context.Context) {
 }
 
 func (store *modelMetadataStore) Refresh(ctx context.Context) error {
+	var lastErr error
+	for _, client := range store.refreshClients() {
+		data, err := store.fetch(ctx, client)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		models, err := decodeModelsDev(data)
+		if err != nil {
+			return store.recordError(err)
+		}
+		now := time.Now().UTC()
+		cache := modelMetadataCache{UpdatedAt: now, Models: models}
+		if store.cachePath != "" {
+			if err := saveMetadataCache(store.cachePath, cache); err != nil {
+				return store.recordError(err)
+			}
+		}
+		store.mu.Lock()
+		store.models, store.updatedAt, store.lastError = models, now, ""
+		store.mu.Unlock()
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no HTTP client available for models.dev refresh")
+	}
+	return store.recordError(lastErr)
+}
+
+func (store *modelMetadataStore) fetch(ctx context.Context, client *http.Client) ([]byte, error) {
 	refreshCtx, cancel := context.WithTimeout(ctx, modelsDevTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(refreshCtx, http.MethodGet, store.endpoint, nil)
 	if err != nil {
-		return store.recordError(err)
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", opencodeUserAgent())
-	resp, err := store.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return store.recordError(err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return store.recordError(fmt.Errorf("models.dev returned HTTP %d", resp.StatusCode))
+		return nil, fmt.Errorf("models.dev returned HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		return store.recordError(err)
-	}
-	models, err := decodeModelsDev(data)
-	if err != nil {
-		return store.recordError(err)
-	}
-	now := time.Now().UTC()
-	cache := modelMetadataCache{UpdatedAt: now, Models: models}
-	if store.cachePath != "" {
-		if err := saveMetadataCache(store.cachePath, cache); err != nil {
-			return store.recordError(err)
-		}
-	}
-	store.mu.Lock()
-	store.models, store.updatedAt, store.lastError = models, now, ""
-	store.mu.Unlock()
-	return nil
+	return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 }
 
 func (store *modelMetadataStore) recordError(err error) error {

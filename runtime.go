@@ -52,6 +52,21 @@ func NewRuntimeManager(root context.Context, configPath string, cfg Config, logg
 		effective: effectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
 	manager.metadata = newModelMetadataStore(configPath, logger)
+	// models.dev refreshes ride the active runtime's healthy proxy transports
+	// and fall back to the store's direct client when none are available.
+	manager.metadata.SetClientProvider(func() []*http.Client {
+		runtime := manager.current.Load()
+		if runtime == nil || runtime.gateway == nil || runtime.gateway.transports == nil {
+			return nil
+		}
+		clients := make([]*http.Client, 0, len(runtime.gateway.transports.items))
+		for _, proxy := range runtime.gateway.transports.items {
+			if proxy != nil && proxy.healthy.Load() {
+				clients = append(clients, proxy.client)
+			}
+		}
+		return clients
+	})
 	if cfg.WebUI.Password != "" {
 		hash, err := hashPassword(cfg.WebUI.Password)
 		if err != nil {
