@@ -480,12 +480,28 @@ func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Reques
 	duration := time.Since(started)
 	requestID := recorder.Header().Get("x-request-id")
 	if requestID != "" {
-		upstream := a.monitor.Snapshot().Upstream.Recent
-		for index := len(upstream) - 1; index >= 0; index-- {
-			if upstream[index].RequestID == requestID {
-				route.Anonymous = upstream[index].Anonymous
-				route.Tier = Tier(upstream[index].Tier)
+		snapshot := a.monitor.Snapshot().Upstream
+		for index := len(snapshot.Requests) - 1; index >= 0; index-- {
+			if snapshot.Requests[index].RequestID == requestID {
+				requestRoute := snapshot.Requests[index]
+				route.Anonymous = requestRoute.Anonymous
+				route.Tier = Tier(requestRoute.Tier)
+				route.KeyID = requestRoute.KeyID
+				route.Channel = requestRoute.Channel
+				route.Attempts = requestRoute.Attempts
 				break
+			}
+		}
+		if route.KeyID == "" {
+			for index := len(snapshot.Recent) - 1; index >= 0; index-- {
+				if snapshot.Recent[index].RequestID == requestID {
+					attempt := snapshot.Recent[index]
+					route.Anonymous = attempt.Anonymous
+					route.Tier = Tier(attempt.Tier)
+					route.KeyID = attempt.KeyID
+					route.Channel = attempt.Channel
+					break
+				}
 			}
 		}
 	}
@@ -655,10 +671,10 @@ func maskSecrets(values []string, proxy bool) []SecretView {
 
 func maskValue(value string) string {
 	runes := []rune(value)
-	if len(runes) <= 4 {
+	if len(runes) <= 5 {
 		return "••••"
 	}
-	return "••••" + string(runes[len(runes)-4:])
+	return "••••" + string(runes[len(runes)-5:])
 }
 
 func resolveSecrets(inputs []SecretInput, existing []string) ([]string, error) {

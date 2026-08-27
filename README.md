@@ -67,14 +67,14 @@ Token 页面展示用量覆盖率、每分钟趋势、模型排行与 Zen/Go Tie
 | `version` | 当前程序版本。 |
 | `metrics` | 原有请求统计：进程启动时间、活跃请求/流、lifetime 与最近一小时成功率/延迟、端点/模型/Tier/状态码聚合，以及 60 个每分钟序列点。 |
 | `usage` | Token 的 `lifetime` 与 `last_hour` 统计。包含 `requests`、`reported`、`coverage`、总 Token 和按模型/Tier 聚合。 |
-| `upstream` | 上游尝试的 `lifetime`、`last_hour` 与 `recent`。按 Tier、匿名/Key 通道、Key 指纹聚合。 |
+| `upstream` | 上游请求级路由 `requests`、尝试级 `lifetime`、`last_hour` 与 `recent`。按 Tier、匿名/Key 通道、Key 尾码聚合。 |
 | `resources` | 模型目录、Key 冷却、脱敏代理节点、匿名开关和 models.dev metadata 状态。 |
 
 `usage.*.tokens` 与模型/Tier 项均包含 `input_tokens`、`output_tokens`、`cached_tokens`、`reasoning_tokens`、`total_tokens`。其中 `input_tokens` 统一表示包含缓存读写的总输入，`cached_tokens` 单独表示缓存读取量。`metrics.series` 的每分钟点也包含这些 Token 字段和 `usage_reported`。普通 JSON、同协议 SSE 与跨协议 SSE 响应都会解析上游 usage；`coverage` 是收到 usage 的推理请求数除以已建立上游路由的推理请求数。上游未提供 usage 时不会估算 Token。
 
-每个 `upstream.recent` 项包含时间、Request ID、模型、Tier、尝试序号、匿名标记、通道、Key 指纹、`proxy_node`、HTTP 状态、耗时、成功标记和结果分类。匿名请求的 Key ID 固定显示为 `anonymous`；真实 Key 只显示 SHA-256 稳定短指纹。代理 URL 的认证信息会被移除，字段名称明确为代理节点而非出口 IP。
+每个 `upstream.requests` 项对应一个已完成的推理请求，包含最终实际使用的 Tier、通道、Key 尾码（或 `anonymous`）、尝试次数、HTTP 状态、耗时、成功标记和结果分类。每个 `upstream.recent` 项则对应一次上游尝试，包含时间、Request ID、模型、Tier、尝试序号、匿名标记、通道、Key 尾码、`proxy_node`、HTTP 状态、耗时、成功标记和结果分类。真实 Key 在日志和 WebUI 中只显示最后 5 个字符；配置接口的内部 secret ID 仍使用 SHA-256 稳定指纹。代理 URL 的认证信息会被移除，字段名称明确为代理节点而非出口 IP。
 
-lifetime 从当前进程启动开始；last hour 使用 60 个一分钟 Bucket。管理响应最多返回最近 500 次一小时内上游尝试，WebUI 默认显示最后 100 次。数据不会写入配置、metadata 快取或其他数据库。
+lifetime 从当前进程启动开始；last hour 使用 60 个一分钟 Bucket。管理响应最多返回最近 500 个请求路由和 500 次上游尝试，WebUI 默认各显示最后 100 条。数据不会写入配置、metadata 快取或其他数据库。
 
 ### Playground 与诊断 API
 
@@ -350,7 +350,7 @@ socks5://127.0.0.1:1080  # 备用代理
 | `logging.level` | 日志级别，支持 `debug`、`info`、`warn` 和 `error`，可通过 WebUI 热切换。 |
 | `logging.ring_size` | WebUI 最近日志环容量，范围 100–50000，默认 2000。stdout 不受此容量限制。 |
 
-每条 stdout 日志都是单行 JSON，包含时间、级别、组件、事件以及适用的 request ID、模型、tier、状态码、耗时和重试次数。普通“请求完成”事件使用 `debug` 级别，避免 `info` 日志被每个成功请求淹没；警告和错误仍按原级别输出。日志不会输出完整上游 key、本地 key、Authorization、Cookie、代理认证信息或请求消息正文。
+每条 stdout 日志都是单行 JSON，包含时间、级别、组件、事件以及适用的 request ID、模型、tier、状态码、耗时、重试次数和实际使用的 Key 尾码。已建立上游路由的请求会以 `info` 级别记录 `request_routed` 事件；真实 Key 只显示最后 5 个字符，anonymous 请求显示为 `anonymous`。普通“请求完成”事件仍使用 `debug` 级别；警告和错误按原级别输出。日志不会输出完整上游 key、本地 key、Authorization、Cookie、代理认证信息或请求消息正文。
 
 ### `webui`
 
@@ -363,7 +363,7 @@ socks5://127.0.0.1:1080  # 备用代理
 | `webui.password_hash` | 自动生成的 Argon2id 哈希，不应手动编辑，也不会由 WebUI API 返回。 |
 | `webui.session_ttl_minutes` | 登录 session 有效时间，范围 5–10080 分钟。 |
 
-WebUI 中普通配置响应只包含 key 尾码/指纹及脱敏 proxy。需要查看完整值时必须再次输入管理密码，敏感响应禁止浏览器缓存。
+WebUI 中普通配置响应只包含 key 尾码/指纹及脱敏 proxy；运行桌面和路由诊断会显示每个请求最终使用的 Key 最后 5 个字符或 `anonymous`。需要查看完整值时必须再次输入管理密码，敏感响应禁止浏览器缓存。
 
 ### 配置保存与热重载
 

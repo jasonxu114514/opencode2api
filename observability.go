@@ -291,6 +291,10 @@ type requestMeta struct {
 	Model         string
 	Tier          string
 	Request       string
+	KeyID         string
+	Channel       string
+	Anonymous     bool
+	Proxy         string
 	Attempts      int
 	Stream        bool
 	Usage         bridgeUsage
@@ -382,6 +386,25 @@ type UpstreamAttempt struct {
 	Outcome    string    `json:"outcome"`
 }
 
+// UpstreamRequest is the credential route that was actually used for one
+// client inference request. It is kept separately from UpstreamAttempt,
+// because a single request can try several keys before it succeeds.
+type UpstreamRequest struct {
+	Time       time.Time `json:"time"`
+	RequestID  string    `json:"request_id"`
+	Model      string    `json:"model"`
+	Tier       string    `json:"tier,omitempty"`
+	KeyID      string    `json:"key_id,omitempty"`
+	Channel    string    `json:"channel"`
+	Anonymous  bool      `json:"anonymous"`
+	Proxy      string    `json:"proxy_node,omitempty"`
+	Attempts   int       `json:"attempts"`
+	Status     int       `json:"status"`
+	DurationMS int64     `json:"duration_ms"`
+	Success    bool      `json:"success"`
+	Outcome    string    `json:"outcome"`
+}
+
 type attemptBucket struct {
 	minute    int64
 	aggregate AttemptAggregate
@@ -390,6 +413,7 @@ type attemptBucket struct {
 type UpstreamSnapshot struct {
 	Lifetime AttemptAggregate  `json:"lifetime"`
 	Window   AttemptAggregate  `json:"last_hour"`
+	Requests []UpstreamRequest `json:"requests"`
 	Recent   []UpstreamAttempt `json:"recent"`
 }
 
@@ -405,6 +429,7 @@ type Monitor struct {
 	lifetimeUsage   UsagePeriod
 	attemptLifetime AttemptAggregate
 	attemptBuckets  [60]attemptBucket
+	recentRequests  []UpstreamRequest
 	recentAttempts  []UpstreamAttempt
 }
 
@@ -469,8 +494,49 @@ func (m *Monitor) Record(endpoint string, status int, duration time.Duration, me
 			addTokenMap(m.lifetimeUsage.Models, meta.Model, tokens)
 			addTokenMap(m.lifetimeUsage.Tiers, meta.Tier, tokens)
 		}
+		if meta.Request != "" && meta.Model != "" {
+			request := UpstreamRequest{
+				Time: time.Now().UTC(), RequestID: meta.Request, Model: meta.Model, Tier: meta.Tier,
+				KeyID: meta.KeyID, Channel: meta.Channel, Anonymous: meta.Anonymous, Proxy: meta.Proxy,
+				Attempts: meta.Attempts, Status: status, DurationMS: max(duration.Milliseconds(), 0),
+				Success: status >= 200 && status < 400,
+			}
+			if request.Channel == "" {
+				request.Channel = "not_routed"
+			}
+			if request.Anonymous {
+				request.KeyID = "anonymous"
+			}
+			request.Outcome = requestOutcome(status, request.Channel)
+			m.recentRequests = append(m.recentRequests, request)
+			cutoff := request.Time.Add(-time.Hour)
+			first := 0
+			for first < len(m.recentRequests) && m.recentRequests[first].Time.Before(cutoff) {
+				first++
+			}
+			if first > 0 {
+				copy(m.recentRequests, m.recentRequests[first:])
+				m.recentRequests = m.recentRequests[:len(m.recentRequests)-first]
+			}
+		}
 	}
 	m.mu.Unlock()
+}
+
+func requestOutcome(status int, channel string) string {
+	if channel == "" || channel == "not_routed" {
+		return "not_routed"
+	}
+	if status >= 200 && status < 400 {
+		return "success"
+	}
+	if status >= 400 && status < 500 {
+		return "client_error"
+	}
+	if status >= 500 {
+		return "server_error"
+	}
+	return "unknown"
 }
 
 func (m *Monitor) RecordAttempt(attempt UpstreamAttempt) {
@@ -548,6 +614,7 @@ func (m *Monitor) Snapshot() MonitorSnapshot {
 	series := make([]MetricSeries, 0, 60)
 	usageWindow := newUsagePeriod()
 	upstreamWindow := newAttemptAggregate()
+	var recentRequests []UpstreamRequest
 	var recentAttempts []UpstreamAttempt
 	m.mu.Lock()
 	for offset := int64(59); offset >= 0; offset-- {
@@ -585,6 +652,14 @@ func (m *Monitor) Snapshot() MonitorSnapshot {
 	usageLifetime := cloneUsagePeriod(m.lifetimeUsage)
 	upstreamLifetime := cloneAttemptAggregate(m.attemptLifetime)
 	cutoff := time.Now().Add(-time.Hour)
+	for _, request := range m.recentRequests {
+		if !request.Time.Before(cutoff) {
+			recentRequests = append(recentRequests, request)
+		}
+	}
+	if len(recentRequests) > 500 {
+		recentRequests = recentRequests[len(recentRequests)-500:]
+	}
 	for _, attempt := range m.recentAttempts {
 		if !attempt.Time.Before(cutoff) {
 			recentAttempts = append(recentAttempts, attempt)
@@ -614,7 +689,7 @@ func (m *Monitor) Snapshot() MonitorSnapshot {
 		ActiveStreams: m.activeStreams.Load(), Lifetime: lifetime, Window: window, Series: series,
 		Endpoints: endpoints, Models: models, Tiers: tiers, Statuses: statuses,
 		Usage:    UsageSnapshot{Lifetime: usageLifetime, Window: usageWindow},
-		Upstream: UpstreamSnapshot{Lifetime: upstreamLifetime, Window: upstreamWindow, Recent: recentAttempts},
+		Upstream: UpstreamSnapshot{Lifetime: upstreamLifetime, Window: upstreamWindow, Requests: recentRequests, Recent: recentAttempts},
 	}
 }
 
@@ -797,9 +872,16 @@ func monitorMiddleware(monitor *Monitor, logger *slog.Logger, next http.Handler)
 			}
 			duration := time.Since(started)
 			monitor.Record(r.URL.Path, status, duration, meta)
+			if meta.Channel != "" {
+				logger.Info("request routed", "component", "http", "event", "request_routed", "method", r.Method,
+					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
+					"model", meta.Model, "tier", meta.Tier, "key_id", meta.KeyID, "channel", meta.Channel,
+					"anonymous", meta.Anonymous, "attempts", meta.Attempts, "stream", meta.Stream)
+			}
 			logger.Debug("request completed", "component", "http", "event", "request_complete", "method", r.Method,
 				"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "bytes", writer.bytes,
-				"request_id", meta.Request, "model", meta.Model, "tier", meta.Tier, "attempts", meta.Attempts, "stream", meta.Stream)
+				"request_id", meta.Request, "model", meta.Model, "tier", meta.Tier, "key_id", meta.KeyID,
+				"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "stream", meta.Stream)
 		}()
 		next.ServeHTTP(writer, r)
 	})

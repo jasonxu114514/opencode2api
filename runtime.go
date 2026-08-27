@@ -326,7 +326,7 @@ func (m *RuntimeManager) DebugRoute(model string, requested Protocol) ModelRoute
 func keyStatuses(tier string, pool *nodePool) []KeyStatus {
 	result := make([]KeyStatus, 0, len(pool.nodes))
 	for _, node := range pool.nodes {
-		status := KeyStatus{ID: secretFingerprint(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), Failures: node.failures.Load()}
+		status := KeyStatus{ID: keyDisplayID(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), Failures: node.failures.Load()}
 		if until := node.cooldownUntil.Load(); until > time.Now().UnixNano() {
 			value := time.Unix(0, until).UTC()
 			status.CooldownUntil = &value
@@ -339,4 +339,15 @@ func keyStatuses(tier string, pool *nodePool) []KeyStatus {
 func secretFingerprint(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])[:10]
+}
+
+// keyDisplayID is intentionally separate from secretFingerprint. The latter
+// is an internal stable identifier used by session/config bookkeeping; this
+// value is safe for logs and the operator UI and shows only the key suffix.
+func keyDisplayID(value string) string {
+	runes := []rune(value)
+	if len(runes) <= 5 {
+		return string(runes)
+	}
+	return string(runes[len(runes)-5:])
 }

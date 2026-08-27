@@ -68,6 +68,9 @@ type ModelRouteDiagnostic struct {
 	AvailableGo          bool              `json:"available_go"`
 	Tier                 Tier              `json:"tier,omitempty"`
 	Anonymous            bool              `json:"anonymous"`
+	KeyID                string            `json:"key_id,omitempty"`
+	Channel              string            `json:"channel,omitempty"`
+	Attempts             int               `json:"attempts,omitempty"`
 	KeyTiers             []Tier            `json:"key_tiers,omitempty"`
 	AnonymousEligibility AnonymousDecision `json:"anonymous_eligibility"`
 	RouteError           string            `json:"route_error,omitempty"`
