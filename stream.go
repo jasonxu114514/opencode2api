@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,16 @@ import (
 )
 
 var errStreamUpstreamFailure = errors.New("upstream stream failure delivered")
+var errStreamNormalTermination = errors.New("upstream stream terminated normally")
+var errSSEUnexpectedEOF = errors.New("unexpected end of SSE stream")
+
+type streamTermination uint8
+
+const (
+	streamOpen streamTermination = iota
+	streamNormalTermination
+	streamErrorTermination
+)
 
 type bridgeStreamEvent struct {
 	Kind       string
@@ -47,6 +58,13 @@ func transcodeStream(w http.ResponseWriter, reader io.Reader, from, to Protocol,
 }
 
 func transcodeStreamWithUsage(w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (bridgeUsage, bool, error) {
+	return transcodeStreamWithUsageContext(context.Background(), w, reader, from, to, model)
+}
+
+// transcodeStreamWithUsageContext is the request-aware form used by the
+// gateway. A cancelled client must not receive a synthetic upstream error
+// after its connection has gone away.
+func transcodeStreamWithUsageContext(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (bridgeUsage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return bridgeUsage{}, false, fmt.Errorf("response writer does not support streaming")
@@ -60,24 +78,124 @@ func transcodeStreamWithUsage(w http.ResponseWriter, reader io.Reader, from, to 
 		responseReasoning: map[string]bool{},
 	}
 	emitter := newBridgeStreamEmitter(w, flusher, to, model)
-	if err := readSSE(reader, func(eventName, data string) error {
+	termination := streamOpen
+	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
 		if err != nil {
-			return emitter.Emit(bridgeStreamEvent{Kind: "error", Error: err.Error(), ErrorType: "upstream_error"})
+			termination = streamErrorTermination
+			if emitErr := emitter.Emit(bridgeStreamEvent{Kind: "error", Error: err.Error(), ErrorType: "upstream_error"}); emitErr != nil {
+				return emitErr
+			}
+			return errStreamUpstreamFailure
 		}
 		for _, event := range events {
+			switch event.Kind {
+			case "done":
+				termination = streamNormalTermination
+			case "error":
+				termination = streamErrorTermination
+			}
 			if err := emitter.Emit(event); err != nil {
 				return err
 			}
+			if event.Kind == "done" {
+				return errStreamNormalTermination
+			}
 		}
 		return nil
-	}); err != nil {
-		if errors.Is(err, errStreamUpstreamFailure) {
+	})
+	if readErr != nil {
+		if errors.Is(readErr, errStreamNormalTermination) || errors.Is(readErr, errStreamUpstreamFailure) {
 			return emitter.usage, emitter.usageReported, nil
 		}
+		if streamClientCancelled(ctx, readErr) {
+			return emitter.usage, emitter.usageReported, readErr
+		}
+		if termination == streamOpen {
+			if emitErr := emitUnexpectedStreamError(emitter, readErr); emitErr != nil {
+				return emitter.usage, emitter.usageReported, emitErr
+			}
+		}
+		return emitter.usage, emitter.usageReported, readErr
+	}
+	if termination == streamNormalTermination || termination == streamErrorTermination {
+		return emitter.usage, emitter.usageReported, nil
+	}
+	if streamClientCancelled(ctx, nil) {
+		return emitter.usage, emitter.usageReported, ctx.Err()
+	}
+	if err := emitUnexpectedStreamError(emitter, errSSEUnexpectedEOF); err != nil {
 		return emitter.usage, emitter.usageReported, err
 	}
-	return emitter.usage, emitter.usageReported, emitter.Finish()
+	return emitter.usage, emitter.usageReported, nil
+}
+
+func emitUnexpectedStreamError(emitter *bridgeStreamEmitter, cause error) error {
+	message := "upstream SSE stream ended before a terminal event"
+	if cause != nil && !errors.Is(cause, errSSEUnexpectedEOF) {
+		message = fmt.Sprintf("upstream SSE stream failed: %v", cause)
+	}
+	err := emitter.Emit(bridgeStreamEvent{Kind: "error", Error: message, ErrorType: "upstream_error"})
+	if errors.Is(err, errStreamUpstreamFailure) {
+		return nil
+	}
+	return err
+}
+
+func streamClientCancelled(ctx context.Context, streamErr error) bool {
+	if errors.Is(streamErr, context.Canceled) {
+		return true
+	}
+	return ctx != nil && ctx.Err() != nil
+}
+
+// sseFlushWriter preserves an upstream SSE byte stream while making each
+// successful write visible to the client immediately. io.Copy is free to
+// choose large writes, so flushing in Write is the only reliable place to
+// keep same-protocol streams live.
+type sseFlushWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (writer *sseFlushWriter) Write(data []byte) (int, error) {
+	n, err := writer.writer.Write(data)
+	if n > 0 {
+		writer.flusher.Flush()
+	}
+	return n, err
+}
+
+func forwardSSEWithUsage(w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (bridgeUsage, bool, error) {
+	return forwardSSEWithUsageContext(context.Background(), w, reader, protocol, model)
+}
+
+func forwardSSEWithUsageContext(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (bridgeUsage, bool, error) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return bridgeUsage{}, false, fmt.Errorf("response writer does not support streaming")
+	}
+	observer := newStreamUsageObserver(protocol)
+	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
+	usage := observer.Finish()
+	if observer.ErrorTermination() || observer.NormalTermination() && observer.ParseError() == nil {
+		return usage, observer.Reported(), copyErr
+	}
+	if streamClientCancelled(ctx, copyErr) {
+		return usage, observer.Reported(), copyErr
+	}
+	cause := observer.ParseError()
+	if copyErr != nil {
+		cause = copyErr
+	}
+	if cause == nil {
+		cause = errSSEUnexpectedEOF
+	}
+	emitter := newBridgeStreamEmitter(w, flusher, protocol, model)
+	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
+		return usage, observer.Reported(), err
+	}
+	return usage, observer.Reported(), copyErr
 }
 
 type streamUsageObserver struct {
@@ -85,6 +203,9 @@ type streamUsageObserver struct {
 	buffer   []byte
 	usage    bridgeUsage
 	reported bool
+	normal   bool
+	error    bool
+	parseErr error
 }
 
 func newStreamUsageObserver(protocol Protocol) *streamUsageObserver {
@@ -109,22 +230,36 @@ func (observer *streamUsageObserver) Write(data []byte) (int, error) {
 }
 
 func (observer *streamUsageObserver) Finish() bridgeUsage {
-	if len(observer.buffer) > 0 {
-		observer.consume(observer.buffer)
-		observer.buffer = nil
-	}
+	// An unterminated final line is not an SSE frame. In particular, do not
+	// count a usage object from a response that was cut off at EOF.
+	observer.buffer = nil
 	return observer.usage
 }
 
 func (observer *streamUsageObserver) Reported() bool { return observer.reported }
 
+func (observer *streamUsageObserver) NormalTermination() bool { return observer.normal }
+
+func (observer *streamUsageObserver) ErrorTermination() bool { return observer.error }
+
+func (observer *streamUsageObserver) ParseError() error { return observer.parseErr }
+
 func (observer *streamUsageObserver) consume(frame []byte) {
 	_ = readSSE(strings.NewReader(string(frame)), func(eventName, data string) error {
 		events, err := observer.parser.Parse(eventName, data)
 		if err != nil {
+			if observer.parseErr == nil {
+				observer.parseErr = err
+			}
 			return nil
 		}
 		for _, event := range events {
+			switch event.Kind {
+			case "done":
+				observer.normal = true
+			case "error":
+				observer.error = true
+			}
 			if event.Usage != nil {
 				observer.reported = true
 				mergeBridgeUsage(&observer.usage, *event.Usage)
@@ -186,11 +321,20 @@ func readSSE(reader io.Reader, handler func(eventName, data string) error) error
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	return flush()
+	if len(dataLines) > 0 {
+		// A blank line is the SSE record delimiter. Do not parse a final
+		// unterminated record as a complete frame; an EOF without a terminal
+		// event is handled by the caller as a truncated stream.
+		return errSSEUnexpectedEOF
+	}
+	return nil
 }
 
 func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamEvent, error) {
 	if data == "[DONE]" {
+		if parser.protocol != ProtocolChat {
+			return nil, fmt.Errorf("unexpected [DONE] terminator for %s stream", parser.protocol)
+		}
 		return []bridgeStreamEvent{{Kind: "done"}}, nil
 	}
 	var value map[string]any
@@ -199,9 +343,9 @@ func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamE
 	}
 	switch parser.protocol {
 	case ProtocolChat:
-		return parser.parseChat(value), nil
+		return parser.parseChatEvent(eventName, value), nil
 	case ProtocolAnthropic:
-		return parser.parseAnthropic(value)
+		return parser.parseAnthropicEvent(eventName, value)
 	case ProtocolResponses:
 		return parser.parseResponses(eventName, value), nil
 	default:
@@ -210,7 +354,17 @@ func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamE
 }
 
 func (parser *bridgeStreamParser) parseChat(value map[string]any) []bridgeStreamEvent {
+	return parser.parseChatEvent("", value)
+}
+
+func (parser *bridgeStreamParser) parseChatEvent(eventName string, value map[string]any) []bridgeStreamEvent {
 	events := make([]bridgeStreamEvent, 0, 4)
+	if eventName == "error" {
+		return []bridgeStreamEvent{{Kind: "error", Error: streamErrorMessage(value, "upstream Chat stream error"), ErrorType: streamErrorType(value)}}
+	}
+	if rawError, exists := value["error"]; exists && rawError != nil {
+		return []bridgeStreamEvent{{Kind: "error", Error: streamErrorMessage(value, "upstream Chat stream error"), ErrorType: streamErrorType(value)}}
+	}
 	if !parser.started {
 		if id := stringAt(value, "id"); id != "" {
 			parser.started = true
@@ -271,7 +425,15 @@ func (parser *bridgeStreamParser) parseChat(value map[string]any) []bridgeStream
 }
 
 func (parser *bridgeStreamParser) parseAnthropic(value map[string]any) ([]bridgeStreamEvent, error) {
-	switch stringAt(value, "type") {
+	return parser.parseAnthropicEvent("", value)
+}
+
+func (parser *bridgeStreamParser) parseAnthropicEvent(eventName string, value map[string]any) ([]bridgeStreamEvent, error) {
+	typeName := stringAt(value, "type")
+	if typeName == "" {
+		typeName = eventName
+	}
+	switch typeName {
 	case "message_start":
 		message := mapAt(value, "message")
 		events := []bridgeStreamEvent{{Kind: "start", ResponseID: stringAt(message, "id"), Model: stringAt(message, "model")}}
@@ -323,6 +485,10 @@ func (parser *bridgeStreamParser) parseAnthropic(value map[string]any) ([]bridge
 			events = append(events, bridgeStreamEvent{Kind: "usage", Usage: &usage})
 		}
 		if stop := stringAt(value, "delta", "stop_reason"); stop != "" {
+			if isStreamErrorFinish(stop) {
+				events = append(events, bridgeStreamEvent{Kind: "error", Error: "upstream Anthropic stream failed", ErrorType: "upstream_error"})
+				return events, nil
+			}
 			events = append(events, bridgeStreamEvent{Kind: "finish", Stop: stop})
 		}
 		return events, nil
@@ -341,6 +507,8 @@ func (parser *bridgeStreamParser) parseResponses(eventName string, value map[str
 		typeName = eventName
 	}
 	switch typeName {
+	case "error":
+		return []bridgeStreamEvent{{Kind: "error", Error: streamErrorMessage(value, "upstream Responses stream error"), ErrorType: streamErrorType(value)}}
 	case "response.created":
 		response := mapAt(value, "response")
 		return []bridgeStreamEvent{{Kind: "start", ResponseID: stringAt(response, "id"), Model: stringAt(response, "model")}}
@@ -400,18 +568,45 @@ func (parser *bridgeStreamParser) parseResponses(eventName string, value map[str
 		}
 	case "response.completed", "response.incomplete", "response.failed", "response.done":
 		response := mapAt(value, "response")
-		usage := decodeOpenAIUsage(mapAt(response, "usage"))
+		usageMap := mapAt(response, "usage")
 		if typeName == "response.failed" || stringAt(response, "status") == "failed" {
 			message := firstString(stringAt(response, "error", "message"), stringAt(value, "error", "message"), "upstream Responses request failed")
-			return []bridgeStreamEvent{{Kind: "usage", Usage: &usage}, {Kind: "error", Error: message, ErrorType: firstString(stringAt(response, "error", "code"), "upstream_error")}}
+			events := []bridgeStreamEvent{{Kind: "error", Error: message, ErrorType: firstString(stringAt(response, "error", "code"), "upstream_error")}}
+			if len(usageMap) > 0 {
+				usage := decodeOpenAIUsage(usageMap)
+				events = append([]bridgeStreamEvent{{Kind: "usage", Usage: &usage}}, events...)
+			}
+			return events
 		}
 		stop := "stop"
 		if typeName == "response.incomplete" {
 			stop = canonicalResponsesIncomplete(stringAt(response, "incomplete_details", "reason"))
 		}
-		return []bridgeStreamEvent{{Kind: "usage", Usage: &usage}, {Kind: "finish", Stop: stop}, {Kind: "done"}}
+		events := make([]bridgeStreamEvent, 0, 3)
+		if len(usageMap) > 0 {
+			usage := decodeOpenAIUsage(usageMap)
+			events = append(events, bridgeStreamEvent{Kind: "usage", Usage: &usage})
+		}
+		return append(events, bridgeStreamEvent{Kind: "finish", Stop: stop}, bridgeStreamEvent{Kind: "done"})
 	}
 	return nil
+}
+
+func streamErrorMessage(value map[string]any, fallback string) string {
+	if message := stringAt(value, "error", "message"); message != "" {
+		return message
+	}
+	if message := stringAt(value, "message"); message != "" {
+		return message
+	}
+	if message, ok := value["error"].(string); ok && message != "" {
+		return message
+	}
+	return fallback
+}
+
+func streamErrorType(value map[string]any) string {
+	return firstString(stringAt(value, "error", "type"), stringAt(value, "error", "code"), "upstream_error")
 }
 
 func isStreamErrorFinish(stop string) bool {

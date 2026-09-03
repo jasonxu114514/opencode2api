@@ -417,6 +417,110 @@ type UpstreamSnapshot struct {
 	Recent   []UpstreamAttempt `json:"recent"`
 }
 
+const (
+	monitorRecentRequestCapacity = 10000
+	monitorRecentAttemptCapacity = 20000
+	monitorRecentOutputLimit     = 500
+)
+
+type upstreamRequestRing struct {
+	items []UpstreamRequest
+	start int
+	count int
+}
+
+func newUpstreamRequestRing() upstreamRequestRing {
+	return upstreamRequestRing{items: make([]UpstreamRequest, monitorRecentRequestCapacity)}
+}
+
+func (ring *upstreamRequestRing) Add(value UpstreamRequest) {
+	if len(ring.items) == 0 {
+		ring.items = make([]UpstreamRequest, monitorRecentRequestCapacity)
+	}
+	index := (ring.start + ring.count) % len(ring.items)
+	if ring.count == len(ring.items) {
+		ring.items[index] = value
+		ring.start = (ring.start + 1) % len(ring.items)
+		return
+	}
+	ring.items[index] = value
+	ring.count++
+}
+
+func (ring *upstreamRequestRing) PruneBefore(cutoff time.Time) {
+	for ring.count > 0 && ring.items[ring.start].Time.Before(cutoff) {
+		ring.items[ring.start] = UpstreamRequest{}
+		ring.start = (ring.start + 1) % len(ring.items)
+		ring.count--
+	}
+}
+
+func (ring *upstreamRequestRing) Snapshot(cutoff time.Time, limit int) []UpstreamRequest {
+	if limit < 1 || ring.count == 0 {
+		return nil
+	}
+	result := make([]UpstreamRequest, 0, min(ring.count, limit))
+	for offset := 0; offset < ring.count; offset++ {
+		value := ring.items[(ring.start+offset)%len(ring.items)]
+		if !value.Time.Before(cutoff) {
+			result = append(result, value)
+		}
+	}
+	if len(result) > limit {
+		result = result[len(result)-limit:]
+	}
+	return result
+}
+
+type upstreamAttemptRing struct {
+	items []UpstreamAttempt
+	start int
+	count int
+}
+
+func newUpstreamAttemptRing() upstreamAttemptRing {
+	return upstreamAttemptRing{items: make([]UpstreamAttempt, monitorRecentAttemptCapacity)}
+}
+
+func (ring *upstreamAttemptRing) Add(value UpstreamAttempt) {
+	if len(ring.items) == 0 {
+		ring.items = make([]UpstreamAttempt, monitorRecentAttemptCapacity)
+	}
+	index := (ring.start + ring.count) % len(ring.items)
+	if ring.count == len(ring.items) {
+		ring.items[index] = value
+		ring.start = (ring.start + 1) % len(ring.items)
+		return
+	}
+	ring.items[index] = value
+	ring.count++
+}
+
+func (ring *upstreamAttemptRing) PruneBefore(cutoff time.Time) {
+	for ring.count > 0 && ring.items[ring.start].Time.Before(cutoff) {
+		ring.items[ring.start] = UpstreamAttempt{}
+		ring.start = (ring.start + 1) % len(ring.items)
+		ring.count--
+	}
+}
+
+func (ring *upstreamAttemptRing) Snapshot(cutoff time.Time, limit int) []UpstreamAttempt {
+	if limit < 1 || ring.count == 0 {
+		return nil
+	}
+	result := make([]UpstreamAttempt, 0, min(ring.count, limit))
+	for offset := 0; offset < ring.count; offset++ {
+		value := ring.items[(ring.start+offset)%len(ring.items)]
+		if !value.Time.Before(cutoff) {
+			result = append(result, value)
+		}
+	}
+	if len(result) > limit {
+		result = result[len(result)-limit:]
+	}
+	return result
+}
+
 type Monitor struct {
 	started         time.Time
 	active          atomic.Int64
@@ -429,8 +533,8 @@ type Monitor struct {
 	lifetimeUsage   UsagePeriod
 	attemptLifetime AttemptAggregate
 	attemptBuckets  [60]attemptBucket
-	recentRequests  []UpstreamRequest
-	recentAttempts  []UpstreamAttempt
+	recentRequests  upstreamRequestRing
+	recentAttempts  upstreamAttemptRing
 }
 
 func NewMonitor() *Monitor {
@@ -438,6 +542,8 @@ func NewMonitor() *Monitor {
 		started:         time.Now().UTC(),
 		lifetimeUsage:   newUsagePeriod(),
 		attemptLifetime: newAttemptAggregate(),
+		recentRequests:  newUpstreamRequestRing(),
+		recentAttempts:  newUpstreamAttemptRing(),
 	}
 }
 
@@ -508,16 +614,8 @@ func (m *Monitor) Record(endpoint string, status int, duration time.Duration, me
 				request.KeyID = "anonymous"
 			}
 			request.Outcome = requestOutcome(status, request.Channel)
-			m.recentRequests = append(m.recentRequests, request)
-			cutoff := request.Time.Add(-time.Hour)
-			first := 0
-			for first < len(m.recentRequests) && m.recentRequests[first].Time.Before(cutoff) {
-				first++
-			}
-			if first > 0 {
-				copy(m.recentRequests, m.recentRequests[first:])
-				m.recentRequests = m.recentRequests[:len(m.recentRequests)-first]
-			}
+			m.recentRequests.PruneBefore(request.Time.Add(-time.Hour))
+			m.recentRequests.Add(request)
 		}
 	}
 	m.mu.Unlock()
@@ -553,16 +651,8 @@ func (m *Monitor) RecordAttempt(attempt UpstreamAttempt) {
 		*bucket = attemptBucket{minute: minute, aggregate: newAttemptAggregate()}
 	}
 	recordAttemptAggregate(&bucket.aggregate, attempt)
-	cutoff := attempt.Time.Add(-time.Hour)
-	first := 0
-	for first < len(m.recentAttempts) && m.recentAttempts[first].Time.Before(cutoff) {
-		first++
-	}
-	if first > 0 {
-		copy(m.recentAttempts, m.recentAttempts[first:])
-		m.recentAttempts = m.recentAttempts[:len(m.recentAttempts)-first]
-	}
-	m.recentAttempts = append(m.recentAttempts, attempt)
+	m.recentAttempts.PruneBefore(attempt.Time.Add(-time.Hour))
+	m.recentAttempts.Add(attempt)
 	m.mu.Unlock()
 }
 
@@ -652,22 +742,10 @@ func (m *Monitor) Snapshot() MonitorSnapshot {
 	usageLifetime := cloneUsagePeriod(m.lifetimeUsage)
 	upstreamLifetime := cloneAttemptAggregate(m.attemptLifetime)
 	cutoff := time.Now().Add(-time.Hour)
-	for _, request := range m.recentRequests {
-		if !request.Time.Before(cutoff) {
-			recentRequests = append(recentRequests, request)
-		}
-	}
-	if len(recentRequests) > 500 {
-		recentRequests = recentRequests[len(recentRequests)-500:]
-	}
-	for _, attempt := range m.recentAttempts {
-		if !attempt.Time.Before(cutoff) {
-			recentAttempts = append(recentAttempts, attempt)
-		}
-	}
-	if len(recentAttempts) > 500 {
-		recentAttempts = recentAttempts[len(recentAttempts)-500:]
-	}
+	m.recentRequests.PruneBefore(cutoff)
+	m.recentAttempts.PruneBefore(cutoff)
+	recentRequests = m.recentRequests.Snapshot(cutoff, monitorRecentOutputLimit)
+	recentAttempts = m.recentAttempts.Snapshot(cutoff, monitorRecentOutputLimit)
 	m.mu.Unlock()
 	finalizeUsagePeriod(&usageLifetime)
 	finalizeUsagePeriod(&usageWindow)

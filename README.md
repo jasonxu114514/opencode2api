@@ -36,7 +36,7 @@
 | `POST` | `/v1/messages` | Anthropic Messages |
 | `GET` | `/healthz` | 健康检查 |
 
-`/healthz` 无需 API key，返回服务版本以及模型目录、Zen/Go key、匿名开关和代理池的汇总状态，不会暴露 key 或代理地址。模型目录尚未完成首次刷新、已经过期、没有可暴露模型或没有健康代理时返回 HTTP `503`；其余情况返回 `200`。
+`/healthz` 无需 API key，返回服务版本以及模型目录、Zen/Go key、匿名开关和代理池的汇总状态，不会暴露 key 或代理地址。模型目录尚未完成首次刷新、没有可暴露模型或没有健康代理时返回 HTTP `503`；使用过期磁盘快取时仍返回 `200`，但 `models.status` 为 `stale`。
 
 模型目录的过期阈值为 `models.refresh_seconds` 的两倍，且不低于 60 秒。刚启动时短暂返回 `503 starting` 属于正常现象，模型列表首次刷新成功后会变为 `200 ok`。
 
@@ -56,7 +56,7 @@ Field Manual WebUI 包含运行桌面、六步首次运行检查、接入手册�
 
 Token 页面展示用量覆盖率、每分钟趋势、模型排行与 Zen/Go Tier 分布。诊断页展示 models.dev 状态、模型原生协议与匿名判断来源、Key/代理状态、逐次上游尝试以及最近一次 Playground 追踪；实时日志通过 SSE 推送。所有动态管理数据都以 DOM 文本节点渲染。
 
-监控、上游尝试、最近 Playground 结果和日志仅保存在内存。**进程重启会清空全部监控与诊断历史，包括 lifetime 累计。** stdout 日志仍可由 Docker 或日志平台收集；models.dev 价格快取是独立的磁盘兼容资料，不属于监控历史。
+监控、上游尝试、最近 Playground 结果和日志仅保存在内存。**进程重启会清空全部监控与诊断历史，包括 lifetime 累计。** stdout 日志仍可由 Docker 或日志平台收集；模型目录快取与 models.dev 价格快取是独立的磁盘兼容资料，不属于监控历史。
 
 ### 监控字段
 
@@ -74,7 +74,7 @@ Token 页面展示用量覆盖率、每分钟趋势、模型排行与 Zen/Go Tie
 
 每个 `upstream.requests` 项对应一个已完成的推理请求，包含最终实际使用的 Tier、通道、Key 尾码（或 `anonymous`）、尝试次数、HTTP 状态、耗时、成功标记和结果分类。每个 `upstream.recent` 项则对应一次上游尝试，包含时间、Request ID、模型、Tier、尝试序号、匿名标记、通道、Key 尾码、`proxy_node`、HTTP 状态、耗时、成功标记和结果分类。真实 Key 在日志和 WebUI 中只显示最后 5 个字符；配置接口的内部 secret ID 仍使用 SHA-256 稳定指纹。代理 URL 的认证信息会被移除，字段名称明确为代理节点而非出口 IP。
 
-lifetime 从当前进程启动开始；last hour 使用 60 个一分钟 Bucket。管理响应最多返回最近 500 个请求路由和 500 次上游尝试，WebUI 默认各显示最后 100 条。数据不会写入配置、metadata 快取或其他数据库。
+lifetime 从当前进程启动开始；last hour 使用 60 个一分钟 Bucket。进程内固定保留最近 10,000 个请求路由和 20,000 次上游尝试，管理响应最多返回其中最近 500 个，WebUI 默认各显示最后 100 条。`resources.models` 额外显示模型目录来源（`none`、`disk` 或 `live`）及 `stale` 状态。数据不会写入配置、metadata 快取或其他数据库。
 
 ### Playground 与诊断 API
 
@@ -318,7 +318,7 @@ socks5://127.0.0.1:1080  # 备用代理
 }
 ```
 
-自动协议来源是 `https://models.opencode.ai/api.json`，并用 OpenCode 官方 Zen/Go endpoint 文档补充具体路径：模型的 `provider.npm`（或 Tier 默认 `npm`）及文档 endpoint 会映射为 OpenAI Responses、Anthropic Messages 或 OpenAI-compatible Chat。若能力目录暂时无法更新，服务会保留进程内上一份能力快照；首次启动且没有能力快照时，不会暴露能力未知的模型，避免把不支持的模型误路由到 Chat。手动 `models.protocols` 可用于上游实验模型。
+自动协议来源是 `https://models.opencode.ai/api.json`，并用 OpenCode 官方 Zen/Go endpoint 文档补充具体路径：模型的 `provider.npm`（或 Tier 默认 `npm`）及文档 endpoint 会映射为 OpenAI Responses、Anthropic Messages 或 OpenAI-compatible Chat。模型列表与协议能力会写入 `<config path>.models.catalog.json`，使用同目录临时文件原子替换并限制为 `0600`；启动时会先使用有效的旧快取，背景刷新成功后再更新。若能力目录暂时无法更新，服务会保留进程内上一份能力快照；首次启动且没有能力快照时，不会暴露能力未知的模型，避免把不支持的模型误路由到 Chat。手动 `models.protocols` 可用于上游实验模型。
 
 模型同时存在于 Zen 与 Go 时按 `prefer` 配置排列认证 Key 顺序：值为 `go` 时先 Go 后 Zen，值为 `zen` 时先 Zen 后 Go（默认 `go`）。首选 Tier 失败后才回退另一 Tier；仅存在于某一池时只使用该池的 key。免费模型在这条认证顺序之前额外尝试匿名 Zen。
 

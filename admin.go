@@ -422,11 +422,12 @@ type DebugInferenceResult struct {
 
 func (a *AdminServer) handleDebugModels(w http.ResponseWriter, _ *http.Request) {
 	models, metadata := a.manager.DebugModels()
+	catalog := a.manager.Resources().Models
 	a.mu.Lock()
 	last := a.lastInference
 	a.mu.Unlock()
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"models": models, "metadata": metadata, "last_inference": last})
+	writeJSON(w, http.StatusOK, map[string]any{"models": models, "metadata": metadata, "catalog": catalog, "last_inference": last})
 }
 
 func (a *AdminServer) handleDebugInference(w http.ResponseWriter, r *http.Request) {

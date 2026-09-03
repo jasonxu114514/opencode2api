@@ -85,6 +85,11 @@ func NewRuntimeManager(root context.Context, configPath string, cfg Config, logg
 	if err != nil {
 		return nil, err
 	}
+	if err := runtime.gateway.catalog.LoadCache(modelCatalogCachePath(configPath)); err != nil && !os.IsNotExist(err) {
+		if manager.logger != nil {
+			manager.logger.Warn("model catalog cache ignored", "component", "models", "event", "catalog_cache_load_failed", "path", modelCatalogCachePath(configPath), "error", err)
+		}
+	}
 	manager.current.Store(runtime)
 	manager.redactor.Replace(cfg)
 	setLogLevel(manager.level, cfg.Logging.Level)
@@ -99,6 +104,7 @@ func (m *RuntimeManager) build(cfg Config) (*gatewayRuntime, error) {
 		return nil, err
 	}
 	gateway.catalog.metadata = m.metadata
+	gateway.catalog.SetCachePath(modelCatalogCachePath(m.configPath))
 	return &gatewayRuntime{config: cfg, gateway: gateway, handler: gateway.Handler(), cancel: func() {}}, nil
 }
 

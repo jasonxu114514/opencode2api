@@ -54,6 +54,8 @@ type healthModels struct {
 	Go                int        `json:"go"`
 	LastRefresh       *time.Time `json:"last_refresh,omitempty"`
 	StaleAfterSeconds int        `json:"stale_after_seconds"`
+	CacheSource       string     `json:"cache_source,omitempty"`
+	Stale             bool       `json:"stale"`
 }
 
 type healthKeys struct {
@@ -83,6 +85,8 @@ func NewGateway(cfg Config, logger *slog.Logger, monitor *Monitor) (*Gateway, er
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}
+	catalog := newModelCatalog(cfg.Prefer, cfg.Models.Protocols)
+	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	return &Gateway{
 		cfg:        cfg,
 		logger:     logger,
@@ -90,7 +94,7 @@ func NewGateway(cfg Config, logger *slog.Logger, monitor *Monitor) (*Gateway, er
 		zenNodes:   zenNodes,
 		goNodes:    goNodes,
 		anonymous:  newAnonymousPool(cfg.Anonymous, transports, cooldown),
-		catalog:    newModelCatalog(cfg.Prefer, cfg.Models.Protocols),
+		catalog:    catalog,
 		monitor:    monitor,
 	}, nil
 }
@@ -123,7 +127,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		if models.Exposed == 0 {
 			modelStatus = "empty"
 			issues = append(issues, "model_catalog_empty")
-		} else if time.Since(models.UpdatedAt) > staleAfter {
+		} else if models.Stale || time.Since(models.UpdatedAt) > staleAfter {
 			modelStatus = "stale"
 			issues = append(issues, "model_catalog_stale")
 		}
@@ -136,9 +140,13 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	status := "ok"
-	httpStatus := http.StatusOK
 	if len(issues) > 0 {
 		status = "degraded"
+	}
+	blocking := modelStatus == "pending" || modelStatus == "empty" || proxyHealthy == 0
+	httpStatus := http.StatusOK
+	ready := !blocking
+	if blocking {
 		httpStatus = http.StatusServiceUnavailable
 		if modelStatus == "pending" {
 			status = "starting"
@@ -146,7 +154,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, httpStatus, healthResponse{
 		Status:  status,
-		Ready:   len(issues) == 0,
+		Ready:   ready,
 		Version: version,
 		Models: healthModels{
 			Status:            modelStatus,
@@ -156,6 +164,8 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			Go:                models.Go,
 			LastRefresh:       lastRefresh,
 			StaleAfterSeconds: int(staleAfter / time.Second),
+			CacheSource:       models.CacheSource,
+			Stale:             models.Stale,
 		},
 		Keys: healthKeys{Zen: zenKeys, Go: goKeys, Total: zenKeys + goKeys, Anonymous: g.cfg.Anonymous},
 		Proxies: healthProxies{
@@ -289,12 +299,9 @@ func (g *Gateway) handleInference(external Protocol) http.HandlerFunc {
 			var usage bridgeUsage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				observer := newStreamUsageObserver(upstreamRoute.Protocol)
-				_, err = io.Copy(w, io.TeeReader(resp.Body, observer))
-				usage = observer.Finish()
-				usageReported = observer.Reported()
+				usage, usageReported, err = forwardSSEWithUsageContext(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
 			} else {
-				usage, usageReported, err = transcodeStreamWithUsage(w, resp.Body, upstreamRoute.Protocol, external, model)
+				usage, usageReported, err = transcodeStreamWithUsageContext(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -813,11 +820,19 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 			capabilities, capabilitiesErr = g.refreshProtocolCapabilities(capabilityCtx)
 		}()
 		wg.Wait()
+		if ctx.Err() != nil {
+			return
+		}
 		if capabilitiesErr != nil {
 			g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
 		}
 		if zen != nil || goModels != nil {
 			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported)
+			if ctx.Err() == nil {
+				if err := g.catalog.SaveCache(); err != nil {
+					g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
+				}
+			}
 			g.logger.Info("model catalog refreshed", "component", "models", "event", "catalog_refreshed", "models", len(g.catalog.List()))
 		}
 	}
