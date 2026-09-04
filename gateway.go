@@ -214,7 +214,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if _, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous); err != nil {
 			continue
 		}
-		data = append(data, map[string]any{"id": model, "object": "model", "created": now, "owned_by": "opencode"})
+		data = append(data, map[string]any{"id": model, "object": "model", "created": now, "owned_by": "opencode", "metadata": g.catalog.Metadata(model)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -827,7 +827,7 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 			g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
 		}
 		if zen != nil || goModels != nil {
-			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported)
+			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
 			if ctx.Err() == nil {
 				if err := g.catalog.SaveCache(); err != nil {
 					g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
