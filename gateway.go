@@ -371,6 +371,109 @@ func (g *Gateway) prepareRouteBodies(from Protocol, route modelRoute, input map[
 }
 
 func (g *Gateway) doUpstream(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs) (*http.Response, modelRoute, error) {
+	resp, effectiveRoute, err := g.doUpstreamTiers(ctx, route, bodies, ids)
+	if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
+		return resp, effectiveRoute, err
+	}
+	errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return resp, effectiveRoute, nil
+	}
+	// Restore the body so downstream error handling still sees the original
+	// payload when no retry happens below.
+	resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	if !isStaleReasoningReference(errBody) {
+		return resp, effectiveRoute, nil
+	}
+	stripped, changed := stripStaleReasoningInputs(effectiveRoute, bodies)
+	if !changed {
+		return resp, effectiveRoute, nil
+	}
+	// The referenced reasoning items belong to an upstream chain this session
+	// can no longer address (e.g. an interrupted stream). Replay once without
+	// them under a fresh upstream session instead of failing the client
+	// request outright.
+	drainAndClose(resp.Body)
+	retryIDs := ids
+	retryIDs.Session = randomID("ses", 12)
+	g.logger.Info("retrying upstream without stale reasoning references", "component", "upstream", "event", "reasoning_reference_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier)
+	retryResp, retryRoute, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, retryIDs)
+	if retryErr != nil || retryResp == nil {
+		g.logger.Warn("reasoning reference retry failed; returning original error", "component", "upstream", "event", "reasoning_reference_retry_failed", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "error", retryErr)
+		fallback := *resp
+		fallback.Body = io.NopCloser(bytes.NewReader(errBody))
+		return &fallback, effectiveRoute, nil
+	}
+	return retryResp, retryRoute, retryErr
+}
+
+// isStaleReasoningReference reports whether an upstream 400 body describes a
+// reasoning reference the server no longer recognizes, such as
+// "Referenced reasoning item 'rs_...' was not found or has expired".
+func isStaleReasoningReference(body []byte) bool {
+	text := strings.ToLower(string(body))
+	if !strings.Contains(text, "reasoning") {
+		return false
+	}
+	for _, marker := range []string{"not found", "expir", "unknown", "no longer", "does not exist", "invalid reference"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripStaleReasoningInputs removes server-issued reasoning references from
+// Responses-protocol upstream payloads: replayed "reasoning" input items and
+// any previous_response_id chain link. Other tiers/protocols are passed
+// through untouched. It reports whether any payload actually changed.
+func stripStaleReasoningInputs(route modelRoute, bodies map[Tier][]byte) (map[Tier][]byte, bool) {
+	changed := false
+	out := make(map[Tier][]byte, len(bodies))
+	for tier, body := range bodies {
+		if len(body) == 0 || route.ProtocolFor(tier) != ProtocolResponses {
+			out[tier] = body
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			out[tier] = body
+			continue
+		}
+		tierChanged := false
+		if _, ok := payload["previous_response_id"]; ok {
+			delete(payload, "previous_response_id")
+			tierChanged = true
+		}
+		if raw, ok := payload["input"].([]any); ok {
+			kept := make([]any, 0, len(raw))
+			for _, item := range raw {
+				if m, ok := item.(map[string]any); ok && stringAt(m, "type") == "reasoning" {
+					tierChanged = true
+					continue
+				}
+				kept = append(kept, item)
+			}
+			if tierChanged {
+				payload["input"] = kept
+			}
+		}
+		if !tierChanged {
+			out[tier] = body
+			continue
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			out[tier] = body
+			continue
+		}
+		out[tier] = encoded
+		changed = true
+	}
+	return out, changed
+}
+
+func (g *Gateway) doUpstreamTiers(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs) (*http.Response, modelRoute, error) {
 	var lastResponse *http.Response
 	var lastErr error
 	effectiveRoute := route
