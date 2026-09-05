@@ -198,7 +198,8 @@ cp config.example.json config.json
     "max_conns_per_host": 0,
     "idle_conn_timeout_seconds": 120,
     "connect_timeout_seconds": 5,
-    "failure_cooldown_seconds": 15
+    "failure_cooldown_seconds": 15,
+    "attempt_timeout_seconds": 0
   },
   "logging": {
     "level": "info",
@@ -342,6 +343,7 @@ socks5://127.0.0.1:1080  # 备用代理
 | `performance.idle_conn_timeout_seconds` | 空闲连接在连接池中保留的时间。 |
 | `performance.connect_timeout_seconds` | 与上游或代理建立 TCP 连接的超时时间。 |
 | `performance.failure_cooldown_seconds` | 连接失败、认证失败、限流或 5xx 后节点的基础冷却时间。连续失败会指数增加冷却时间。 |
+| `performance.attempt_timeout_seconds` | 单次上游尝试等待响应头（首字节）的上限，单位秒。`0` 表示沿用 `retry.timeout_seconds`（默认行为）；设置后不会超过请求级超时。只限制建连后的首字节等待，已建立的流不受影响。 |
 
 ### `logging`
 
