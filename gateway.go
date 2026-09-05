@@ -211,10 +211,40 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if g.cfg.Anonymous && len(g.cfg.ZenKeys) == 0 && len(g.cfg.GoKeys) == 0 && !g.catalog.anonymousDecision(model).Allowed {
 			continue
 		}
-		if _, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous); err != nil {
+		route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+		if err != nil {
 			continue
 		}
-		data = append(data, map[string]any{"id": model, "object": "model", "created": now, "owned_by": "opencode"})
+		// Tier-scoped metadata: the advertised context window must match
+		// the tier that will serve the request (anonymous ⇒ Zen).
+		md := g.catalog.MetadataForTier(model, route.Tier)
+		entry := map[string]any{
+			"id": model, "object": "model", "created": now, "owned_by": "opencode",
+			"metadata": md,
+		}
+		// Top-level OpenAI-standard fields: discovery clients (jcode, Pi, …)
+		// read context/reasoning at the top level of each model entry.
+		if md.ContextWindow > 0 {
+			entry["context_window"] = md.ContextWindow
+			entry["context_length"] = md.ContextWindow
+		}
+		if md.MaxInput > 0 {
+			entry["max_input"] = md.MaxInput
+		}
+		if md.MaxOutput > 0 {
+			entry["max_output"] = md.MaxOutput
+		}
+		if md.Reasoning {
+			entry["reasoning"] = true
+			entry["supports_reasoning"] = true
+		}
+		if md.ToolCall {
+			entry["tool_call"] = true
+		}
+		if md.StructuredOutput {
+			entry["structured_output"] = true
+		}
+		data = append(data, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -944,7 +974,7 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 			g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
 		}
 		if zen != nil || goModels != nil {
-			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported)
+			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
 			if ctx.Err() == nil {
 				if err := g.catalog.SaveCache(); err != nil {
 					g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
