@@ -72,7 +72,7 @@ type healthProxies struct {
 }
 
 func NewGateway(cfg Config, logger *slog.Logger, monitor *Monitor) (*Gateway, error) {
-	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, time.Duration(cfg.Retry.TimeoutSeconds)*time.Second)
+	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, cfg.Performance.AnonymousAttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
 	if err != nil {
 		return nil, err
 	}
@@ -586,6 +586,15 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bod
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
 	for attempts < limit {
+		if ctx.Err() != nil {
+			// The request-level budget is already exhausted. Stop scanning
+			// instead of recording phantom failures against proxies that
+			// would never really be tried.
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			break
+		}
 		node := cursor.Next()
 		if node == nil {
 			break
@@ -610,6 +619,17 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bod
 		status := 0
 		if resp != nil {
 			status = resp.StatusCode
+		}
+		if ctx.Err() != nil {
+			// The parent budget expired while this attempt was in flight.
+			// The outcome says nothing about this proxy: keep it as the
+			// last result but mark nothing and stop scanning.
+			lastResponse = resp
+			lastErr = err
+			if lastErr == nil && lastResponse == nil {
+				lastErr = ctx.Err()
+			}
+			break
 		}
 		g.syncProxyResult(ctx, node.proxy, status, err)
 		g.recordUpstreamAttempt(route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)

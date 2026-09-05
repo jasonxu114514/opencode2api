@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -69,6 +70,23 @@ type PerformanceConfig struct {
 	IdleConnTimeoutSeconds int `json:"idle_conn_timeout_seconds"`
 	ConnectTimeoutSeconds  int `json:"connect_timeout_seconds"`
 	FailureCooldownSeconds int `json:"failure_cooldown_seconds"`
+	AttemptTimeoutSeconds  int `json:"attempt_timeout_seconds"`
+}
+
+// AnonymousAttemptTimeout bounds how long a single upstream attempt may wait
+// for response headers. Values <= 0 keep the historical behavior of using the
+// request-level retry timeout, so existing configs are unaffected. The result
+// never exceeds requestTimeout. Only the header wait is bounded: established
+// streams keep flowing under the request-level timeout.
+func (cfg PerformanceConfig) AnonymousAttemptTimeout(requestTimeout time.Duration) time.Duration {
+	if cfg.AttemptTimeoutSeconds > 0 {
+		attempt := time.Duration(cfg.AttemptTimeoutSeconds) * time.Second
+		if requestTimeout > 0 && attempt > requestTimeout {
+			return requestTimeout
+		}
+		return attempt
+	}
+	return requestTimeout
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -142,6 +160,9 @@ func NormalizeConfig(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Performance.MaxIdleConns < 1 || cfg.Performance.MaxIdleConnsPerHost < 1 || cfg.Performance.MaxConnsPerHost < 0 || cfg.Performance.IdleConnTimeoutSeconds < 1 || cfg.Performance.ConnectTimeoutSeconds < 1 || cfg.Performance.FailureCooldownSeconds < 1 {
 		return Config{}, errors.New("performance values must be positive (max_conns_per_host may be zero for unlimited)")
+	}
+	if cfg.Performance.AttemptTimeoutSeconds < 0 {
+		return Config{}, errors.New("performance.attempt_timeout_seconds must not be negative (0 keeps the retry timeout)")
 	}
 	if cfg.Logging.Level != "debug" && cfg.Logging.Level != "info" && cfg.Logging.Level != "warn" && cfg.Logging.Level != "error" {
 		return Config{}, errors.New("logging.level must be debug, info, warn, or error")

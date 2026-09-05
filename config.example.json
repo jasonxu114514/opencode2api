@@ -25,7 +25,8 @@
     "max_conns_per_host": 0,
     "idle_conn_timeout_seconds": 120,
     "connect_timeout_seconds": 5,
-    "failure_cooldown_seconds": 15
+    "failure_cooldown_seconds": 15,
+    "attempt_timeout_seconds": 0
   },
   "logging": {
     "level": "info",
