@@ -371,12 +371,18 @@ func (g *Gateway) prepareRouteBodies(from Protocol, route modelRoute, input map[
 }
 
 func (g *Gateway) doUpstream(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs) (*http.Response, modelRoute, error) {
-	resp, effectiveRoute, err := g.doUpstreamTiers(ctx, route, bodies, ids)
+	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
 	if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
 		return resp, effectiveRoute, err
 	}
-	errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	origBody := resp.Body
+	errBody, readErr := io.ReadAll(io.LimitReader(origBody, 1<<20))
+	// The original network body is always closed here: the retry path below
+	// reuses the connection, otherwise downstream receives a fresh in-memory
+	// reader over the cached bytes.
+	drainAndClose(origBody)
 	if readErr != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
 		return resp, effectiveRoute, nil
 	}
 	// Restore the body so downstream error handling still sees the original
@@ -392,30 +398,38 @@ func (g *Gateway) doUpstream(ctx context.Context, route modelRoute, bodies map[T
 	// The referenced reasoning items belong to an upstream chain this session
 	// can no longer address (e.g. an interrupted stream). Replay once without
 	// them under a fresh upstream session instead of failing the client
-	// request outright.
-	drainAndClose(resp.Body)
+	// request outright. Attempt numbering continues from the first round so
+	// monitoring never shows duplicate attempt numbers for one request.
 	retryIDs := ids
 	retryIDs.Session = randomID("ses", 12)
-	g.logger.Info("retrying upstream without stale reasoning references", "component", "upstream", "event", "reasoning_reference_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier)
-	retryResp, retryRoute, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, retryIDs)
-	if retryErr != nil || retryResp == nil {
-		g.logger.Warn("reasoning reference retry failed; returning original error", "component", "upstream", "event", "reasoning_reference_retry_failed", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "error", retryErr)
+	g.logger.Info("retrying upstream without stale reasoning references", "component", "upstream", "event", "reasoning_reference_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "attempt_offset", attempts)
+	retryResp, retryRoute, _, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, retryIDs, attempts)
+	if retryErr != nil || retryResp == nil || retryResp.StatusCode/100 != 2 {
+		retryStatus := 0
+		if retryResp != nil {
+			retryStatus = retryResp.StatusCode
+			drainAndClose(retryResp.Body)
+		}
+		g.logger.Warn("reasoning reference retry failed; returning original error", "component", "upstream", "event", "reasoning_reference_retry_failed", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "error", retryErr, "retry_status", retryStatus)
 		fallback := *resp
 		fallback.Body = io.NopCloser(bytes.NewReader(errBody))
 		return &fallback, effectiveRoute, nil
 	}
-	return retryResp, retryRoute, retryErr
+	return retryResp, retryRoute, nil
 }
 
 // isStaleReasoningReference reports whether an upstream 400 body describes a
-// reasoning reference the server no longer recognizes, such as
+// reasoning item/reference the server no longer recognizes, such as
 // "Referenced reasoning item 'rs_...' was not found or has expired".
+// Generic validation errors that merely mention reasoning (e.g. "unknown
+// reasoning field") must NOT match, so both the target phrase and the
+// gone/expired marker are required.
 func isStaleReasoningReference(body []byte) bool {
 	text := strings.ToLower(string(body))
-	if !strings.Contains(text, "reasoning") {
+	if !strings.Contains(text, "reasoning item") && !strings.Contains(text, "reasoning reference") {
 		return false
 	}
-	for _, marker := range []string{"not found", "expir", "unknown", "no longer", "does not exist", "invalid reference"} {
+	for _, marker := range []string{"not found", "expir", "does not exist", "no longer"} {
 		if strings.Contains(text, marker) {
 			return true
 		}
@@ -473,16 +487,16 @@ func stripStaleReasoningInputs(route modelRoute, bodies map[Tier][]byte) (map[Ti
 	return out, changed
 }
 
-func (g *Gateway) doUpstreamTiers(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs) (*http.Response, modelRoute, error) {
+func (g *Gateway) doUpstreamTiers(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs, attemptOffset int) (*http.Response, modelRoute, int, error) {
 	var lastResponse *http.Response
 	var lastErr error
 	effectiveRoute := route
-	attempts := 0
+	attempts := attemptOffset
 	if route.Anonymous {
-		resp, err, used := g.doAnonymousUpstream(ctx, route, bodies, ids)
+		resp, err, used := g.doAnonymousUpstream(ctx, route, bodies, ids, attempts)
 		attempts += used
 		if err == nil && resp != nil && resp.StatusCode/100 == 2 {
-			return resp, route, nil
+			return resp, route, attempts, nil
 		}
 		lastResponse, lastErr = resp, err
 		if len(route.KeyTiers) > 0 {
@@ -507,24 +521,24 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route modelRoute, bodies 
 		resp, err, used := g.doKeyUpstream(ctx, keyRoute, bodies, ids, attempts)
 		attempts += used
 		if err == nil && resp != nil && resp.StatusCode/100 == 2 {
-			return resp, keyRoute, nil
+			return resp, keyRoute, attempts, nil
 		}
 		lastResponse, lastErr = resp, err
 	}
 	if lastResponse != nil {
-		return lastResponse, effectiveRoute, nil
+		return lastResponse, effectiveRoute, attempts, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no usable upstream route")
 	}
-	return nil, effectiveRoute, lastErr
+	return nil, effectiveRoute, attempts, lastErr
 }
 
 // doAnonymousUpstream tries every currently available proxy at most once. Any
 // failure, including an HTTP error response, advances to the next proxy. Only a
 // successful response ends the anonymous phase; exhausting the proxy cursor
 // returns control to the preferred authenticated tiers.
-func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs) (*http.Response, error, int) {
+func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bodies map[Tier][]byte, ids requestIDs, attemptOffset int) (*http.Response, error, int) {
 	var lastResponse *http.Response
 	var lastErr error
 	cursor := g.anonymous.CursorFor(ids.Session)
@@ -541,7 +555,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bod
 		}
 		attempts++
 		if meta, _ := ctx.Value(requestMetaKey{}).(*requestMeta); meta != nil {
-			meta.Attempts = attempts
+			meta.Attempts = attemptOffset + attempts
 			meta.Tier = string(TierZen)
 		}
 		if lastResponse != nil {
@@ -561,7 +575,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bod
 			status = resp.StatusCode
 		}
 		g.syncProxyResult(ctx, node.proxy, status, err)
-		g.recordUpstreamAttempt(route, ids, attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
+		g.recordUpstreamAttempt(route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.anonymous.MarkSuccess(node)
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", redactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
