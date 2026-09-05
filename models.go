@@ -88,7 +88,7 @@ type modelCatalog struct {
 	// catalog. protocols remains the user-configured override map.
 	nativeProtocols map[Tier]map[string]Protocol
 	unsupported     map[Tier]map[string]bool
-	modelMeta       map[string]ModelMetadata
+	modelMeta       map[Tier]map[string]ModelMetadata
 	updatedAt       time.Time
 	prefer          Tier
 	metadata        *modelMetadataStore
@@ -108,18 +108,18 @@ type modelCatalogSnapshot struct {
 	Stale       bool      `json:"stale"`
 }
 
-const modelCatalogCacheSchemaVersion = 2
+const modelCatalogCacheSchemaVersion = 3
 
 var modelCatalogCacheWriteMu sync.Mutex
 
 type modelCatalogCache struct {
-	SchemaVersion   int                          `json:"schema_version"`
-	UpdatedAt       time.Time                    `json:"updated_at"`
-	Zen             []string                     `json:"zen"`
-	Go              []string                     `json:"go"`
-	NativeProtocols map[Tier]map[string]Protocol `json:"native_protocols"`
-	Unsupported     map[Tier]map[string]bool     `json:"unsupported"`
-	Metadata        map[string]ModelMetadata     `json:"metadata,omitempty"`
+	SchemaVersion   int                               `json:"schema_version"`
+	UpdatedAt       time.Time                         `json:"updated_at"`
+	Zen             []string                          `json:"zen"`
+	Go              []string                          `json:"go"`
+	NativeProtocols map[Tier]map[string]Protocol      `json:"native_protocols"`
+	Unsupported     map[Tier]map[string]bool          `json:"unsupported"`
+	Metadata        map[Tier]map[string]ModelMetadata `json:"metadata,omitempty"`
 }
 
 func newModelCatalog(prefer Tier, overrides map[string]string) *modelCatalog {
@@ -151,7 +151,7 @@ func (c *modelCatalog) Replace(zen, goModels []string) {
 	c.ReplaceWithCapabilities(zen, goModels, nil, nil, nil)
 }
 
-func (c *modelCatalog) ReplaceWithCapabilities(zen, goModels []string, native map[Tier]map[string]Protocol, unsupported map[Tier]map[string]bool, metadata map[string]ModelMetadata) {
+func (c *modelCatalog) ReplaceWithCapabilities(zen, goModels []string, native map[Tier]map[string]Protocol, unsupported map[Tier]map[string]bool, metadata map[Tier]map[string]ModelMetadata) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if zen != nil {
@@ -449,14 +449,17 @@ func (c *modelCatalog) Supported(model string) bool {
 	return c.supportedLocked(model)
 }
 
-// Metadata returns the rich per-model metadata (context window, reasoning,
-// tool call, modalities) captured from the opencode catalog. The zero value
-// is returned for models the catalog does not describe (or before the first
-// capability refresh).
-func (c *modelCatalog) Metadata(model string) ModelMetadata {
+// MetadataForTier returns the rich per-model metadata (context window,
+// reasoning, tool call, modalities) captured from the opencode catalog for
+// the tier that will actually serve the request. Same-named models can carry
+// different limits per tier, so callers must pass route.Tier — never a
+// tier-blind lookup. Anonymous routes always resolve to TierZen, which keeps
+// the keyless path on Zen metadata. The zero value is returned for models
+// the catalog does not describe (or before the first capability refresh).
+func (c *modelCatalog) MetadataForTier(model string, tier Tier) ModelMetadata {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.modelMeta[model]
+	return c.modelMeta[tier][model]
 }
 
 func (c *modelCatalog) supportedLocked(model string) bool {
@@ -511,13 +514,12 @@ func cloneBools(source map[string]bool) map[string]bool {
 	return result
 }
 
-func cloneModelMeta(source map[string]ModelMetadata) map[string]ModelMetadata {
-	if source == nil {
-		return nil
-	}
-	result := make(map[string]ModelMetadata, len(source))
-	for id, md := range source {
-		result[id] = md
+func cloneModelMeta(source map[Tier]map[string]ModelMetadata) map[Tier]map[string]ModelMetadata {
+	result := map[Tier]map[string]ModelMetadata{TierZen: {}, TierGo: {}}
+	for _, tier := range []Tier{TierZen, TierGo} {
+		for id, md := range source[tier] {
+			result[tier][id] = md
+		}
 	}
 	return result
 }
@@ -705,7 +707,7 @@ func saveModelCatalogCache(path string, cache modelCatalogCache) error {
 type protocolCapabilities struct {
 	Protocols   map[Tier]map[string]Protocol
 	Unsupported map[Tier]map[string]bool
-	Metadata    map[string]ModelMetadata
+	Metadata    map[Tier]map[string]ModelMetadata
 }
 
 type capabilityProvider struct {
@@ -716,14 +718,18 @@ type capabilityProvider struct {
 }
 
 type capabilityModel struct {
-	ID               string                   `json:"id"`
-	Provider         *capabilityModelProvider `json:"provider"`
-	Limit            *capabilityModelLimit    `json:"limit"`
-	Reasoning        bool                     `json:"reasoning"`
-	ToolCall         bool                     `json:"tool_call"`
-	StructuredOutput bool                     `json:"structured_output"`
-	InputModalities  []string                 `json:"input"`
-	OutputModalities []string                 `json:"output"`
+	ID               string                     `json:"id"`
+	Provider         *capabilityModelProvider   `json:"provider"`
+	Limit            *capabilityModelLimit      `json:"limit"`
+	Reasoning        bool                       `json:"reasoning"`
+	ToolCall         bool                       `json:"tool_call"`
+	StructuredOutput bool                       `json:"structured_output"`
+	Modalities       *capabilityModelModalities `json:"modalities"`
+}
+
+type capabilityModelModalities struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
 }
 
 type capabilityModelLimit struct {
@@ -752,8 +758,10 @@ func (m *capabilityModel) metadata() ModelMetadata {
 		Reasoning:        m.Reasoning,
 		ToolCall:         m.ToolCall,
 		StructuredOutput: m.StructuredOutput,
-		InputModalities:  m.InputModalities,
-		OutputModalities: m.OutputModalities,
+	}
+	if m.Modalities != nil {
+		md.InputModalities = m.Modalities.Input
+		md.OutputModalities = m.Modalities.Output
 	}
 	if m.Limit != nil {
 		md.ContextWindow = m.Limit.Context
@@ -797,7 +805,7 @@ func fetchProtocolCapabilities(ctx context.Context, client *http.Client, endpoin
 	result := protocolCapabilities{
 		Protocols:   map[Tier]map[string]Protocol{TierZen: {}, TierGo: {}},
 		Unsupported: map[Tier]map[string]bool{TierZen: {}, TierGo: {}},
-		Metadata:    map[string]ModelMetadata{},
+		Metadata:    map[Tier]map[string]ModelMetadata{TierZen: {}, TierGo: {}},
 	}
 	for providerID, provider := range providers {
 		tier, ok := capabilityTier(providerID, provider.API)
@@ -817,7 +825,7 @@ func fetchProtocolCapabilities(ctx context.Context, client *http.Client, endpoin
 			} else {
 				result.Unsupported[tier][modelID] = true
 			}
-			result.Metadata[modelID] = model.metadata()
+			result.Metadata[tier][modelID] = model.metadata()
 		}
 	}
 	// The machine catalog is the primary source. The upstream endpoint tables

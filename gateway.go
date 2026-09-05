@@ -211,10 +211,13 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if g.cfg.Anonymous && len(g.cfg.ZenKeys) == 0 && len(g.cfg.GoKeys) == 0 && !g.catalog.anonymousDecision(model).Allowed {
 			continue
 		}
-		if _, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous); err != nil {
+		route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+		if err != nil {
 			continue
 		}
-		md := g.catalog.Metadata(model)
+		// Tier-scoped metadata: the advertised context window must match
+		// the tier that will serve the request (anonymous ⇒ Zen).
+		md := g.catalog.MetadataForTier(model, route.Tier)
 		entry := map[string]any{
 			"id": model, "object": "model", "created": now, "owned_by": "opencode",
 			"metadata": md,

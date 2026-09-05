@@ -7,3 +7,4 @@ opencode2api.exe
 *.log
 .tmp/
 .gocache/
+*.models.catalog.json
