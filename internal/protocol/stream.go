@@ -17,6 +17,11 @@ var errStreamNormalTermination = errors.New("upstream stream terminated normally
 
 var errSSEUnexpectedEOF = errors.New("unexpected end of SSE stream")
 
+// ErrZeroDeliveryReset signals a mid-stream upstream reset before anything
+// reached downstream. The error frame is deliberately NOT emitted: the
+// gateway replays the turn on a fresh attempt inside the same connection.
+var ErrZeroDeliveryReset = errors.New("upstream reset before delivery")
+
 type streamTermination uint8
 
 const (
@@ -47,16 +52,39 @@ func transcodeStream(w http.ResponseWriter, reader io.Reader, from, to Protocol,
 }
 
 func transcodeStreamWithUsage(w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
-	return TranscodeStream(context.Background(), w, reader, from, to, model)
+	usage, reported, _, err := TranscodeStream(context.Background(), w, reader, from, to, model)
+	return usage, reported, err
+}
+
+// StreamOutcome carries the terminal state of a transcoded stream for the
+// request log and the zero-delivery replay decision.
+type StreamOutcome struct {
+	Stop string
+	Tail string
+	// Delivered is false when the stream died before anything reached
+	// downstream. The gateway uses it for the zero-delivery replay.
+	Delivered bool
+}
+
+// EmitStreamError writes a terminal upstream-error frame for a caller that
+// took over a stream (e.g. after a failed zero-delivery replay). Headers
+// are already sent, so this is SSE framing, not an HTTP status.
+func EmitStreamError(w http.ResponseWriter, to Protocol, model string, cause error) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("response writer does not support streaming")
+	}
+	emitter := newBridgeStreamEmitter(w, flusher, to, model)
+	return emitUnexpectedStreamError(emitter, cause)
 }
 
 // TranscodeStream is the request-aware form used by the
 // gateway. A cancelled client must not receive a synthetic upstream error
 // after its connection has gone away.
-func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
+func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, StreamOutcome, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
+		return Usage{}, false, StreamOutcome{}, fmt.Errorf("response writer does not support streaming")
 	}
 	parser := &bridgeStreamParser{
 		protocol:          from,
@@ -93,33 +121,48 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		}
 		return nil
 	})
+	outcome := func() StreamOutcome {
+		stop := emitter.StopReason()
+		out := StreamOutcome{Stop: stop, Delivered: emitter.Delivered()}
+		if (stop == "length" || stop == "") && emitter.TextLen() > 0 {
+			out.Tail = emitter.TextTail(200)
+		}
+		return out
+	}
 	if readErr != nil {
 		if errors.Is(readErr, errStreamNormalTermination) {
-			return emitter.usage, emitter.usageReported, nil
+			return emitter.usage, emitter.usageReported, outcome(), nil
 		}
 		if ClientCanceled(ctx, readErr) {
-			return emitter.usage, emitter.usageReported, readErr
+			return emitter.usage, emitter.usageReported, outcome(), readErr
 		}
 		if termination == streamOpen {
+			// Zero-delivery reset: nothing reached downstream yet, so do
+			// NOT emit the error frame. The gateway replays the turn on
+			// a fresh attempt; emitting first would poison the stream
+			// and make the replay unreceivable.
+			if !emitter.Delivered() {
+				return emitter.usage, emitter.usageReported, outcome(), ErrZeroDeliveryReset
+			}
 			if emitErr := emitUnexpectedStreamError(emitter, readErr); emitErr != nil {
-				return emitter.usage, emitter.usageReported, emitErr
+				return emitter.usage, emitter.usageReported, outcome(), emitErr
 			}
 		}
-		return emitter.usage, emitter.usageReported, readErr
+		return emitter.usage, emitter.usageReported, outcome(), readErr
 	}
 	if termination == streamNormalTermination {
-		return emitter.usage, emitter.usageReported, nil
+		return emitter.usage, emitter.usageReported, outcome(), nil
 	}
 	if termination == streamErrorTermination {
-		return emitter.usage, emitter.usageReported, errStreamUpstreamFailure
+		return emitter.usage, emitter.usageReported, outcome(), errStreamUpstreamFailure
 	}
 	if ClientCanceled(ctx, nil) {
-		return emitter.usage, emitter.usageReported, ctx.Err()
+		return emitter.usage, emitter.usageReported, outcome(), ctx.Err()
 	}
 	if err := emitUnexpectedStreamError(emitter, errSSEUnexpectedEOF); err != nil {
-		return emitter.usage, emitter.usageReported, err
+		return emitter.usage, emitter.usageReported, outcome(), err
 	}
-	return emitter.usage, emitter.usageReported, errSSEUnexpectedEOF
+	return emitter.usage, emitter.usageReported, outcome(), errSSEUnexpectedEOF
 }
 
 func emitUnexpectedStreamError(emitter *bridgeStreamEmitter, cause error) error {

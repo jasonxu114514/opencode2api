@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -714,6 +715,23 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 	if meta := telemetry.MetaFromContext(ctx); meta != nil {
 		meta.AttemptOutcome = outcome
 		meta.Protocol = route.Protocol
+		// Attempt ledger: key:status:ms per leg on the request line.
+		label := keyID
+		if anonymous {
+			label = "anon"
+		}
+		leg := label + ":"
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				leg += "timeout"
+			} else {
+				leg += "transport"
+			}
+		} else {
+			leg += strconv.Itoa(status)
+		}
+		leg += ":" + strconv.FormatInt(max(duration.Milliseconds(), 0), 10) + "ms"
+		meta.Legs = append(meta.Legs, leg)
 	}
 	if g.monitor == nil {
 		return

@@ -196,7 +196,45 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			if external == upstreamRoute.Protocol {
 				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
 			} else {
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
+				var outcome wire.StreamOutcome
+				usage, usageReported, outcome, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
+				if meta != nil {
+					meta.Stop, meta.Tail = outcome.Stop, outcome.Tail
+				}
+				// Zero-delivery reset replay. Upstream cut the stream
+				// before anything reached downstream (Cloudflare shed
+				// during the thinking phase). The client saw nothing, so
+				// one fresh attempt is indistinguishable from a slow
+				// first attempt. Exactly once, never on client-cancel,
+				// never after partial delivery.
+				if errors.Is(err, wire.ErrZeroDeliveryReset) && !wire.ClientCanceled(r.Context(), err) {
+					resp.Body.Close()
+					g.logger.Info("replaying zero-delivery stream", "component", "stream", "event", "stream_zero_replay", "request_id", ids.Request, "model", model, "error", err)
+					retryResp, retryRoute, retryErr := g.doUpstream(requestCtx, route, bodies, ids)
+					if retryErr == nil && retryResp != nil && retryResp.StatusCode/100 == 2 {
+						defer retryResp.Body.Close()
+						upstreamRoute = retryRoute
+						usage, usageReported, outcome, err = wire.TranscodeStream(r.Context(), w, retryResp.Body, upstreamRoute.Protocol, external, model)
+						if meta != nil {
+							meta.Stop, meta.Tail = outcome.Stop, outcome.Tail
+							meta.Tier = string(upstreamRoute.Tier)
+							meta.Protocol = upstreamRoute.Protocol
+						}
+					} else {
+						// Replay failed or non-2xx. The first attempt's
+						// error frame was suppressed, so emit now: a clean
+						// error beats a client hang.
+						if retryErr != nil {
+							g.logger.Warn("zero-delivery replay failed", "component", "stream", "event", "stream_zero_replay_failed", "request_id", ids.Request, "model", model, "error", retryErr)
+						}
+						if retryResp != nil {
+							retryResp.Body.Close()
+						}
+						if emitErr := wire.EmitStreamError(w, external, model, err); emitErr != nil {
+							err = emitErr
+						}
+					}
+				}
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -217,7 +255,9 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
 			return
 		}
-		if upstreamRoute.Anonymous {
+		if upstreamRoute.Anonymous || (meta != nil && meta.Shaped) {
+			// Key-tier shaped requests were force-streamed like the
+			// anonymous lane; collapse the same way.
 			// The anonymous lane is served streaming (see forceStreamBody);
 			// collapse the events back into the single document this
 			// non-streaming client asked for.
