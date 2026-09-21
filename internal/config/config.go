@@ -16,20 +16,22 @@ import (
 )
 
 type Config struct {
-	Listen      string            `json:"listen"`
-	ServerKeys  []string          `json:"server_keys"`
-	ZenKeys     []string          `json:"zen_keys"`
-	GoKeys      []string          `json:"go_keys"`
-	Anonymous   bool              `json:"anonymous"`
-	Proxies     []string          `json:"proxies"`
-	ProxyFile   string            `json:"proxyfile"`
-	Upstream    UpstreamConfig    `json:"upstream"`
-	Retry       RetryConfig       `json:"retry"`
-	Models      ModelsConfig      `json:"models"`
-	Performance PerformanceConfig `json:"performance"`
-	Logging     LoggingConfig     `json:"logging"`
-	WebUI       WebUIConfig       `json:"webui"`
-	Prefer      Tier              `json:"prefer"`
+	Rotation          RotationConfig               `json:"rotation"`
+	Listen            string                       `json:"listen"`
+	ServerKeys        []string                     `json:"server_keys"`
+	ServerKeyMetadata map[string]ServerKeyMetadata `json:"server_key_metadata,omitempty"`
+	ZenKeys           []string                     `json:"zen_keys"`
+	GoKeys            []string                     `json:"go_keys"`
+	Anonymous         bool                         `json:"anonymous"`
+	Proxies           []string                     `json:"proxies"`
+	ProxyFile         string                       `json:"proxyfile"`
+	Upstream          UpstreamConfig               `json:"upstream"`
+	Retry             RetryConfig                  `json:"retry"`
+	Models            ModelsConfig                 `json:"models"`
+	Performance       PerformanceConfig            `json:"performance"`
+	Logging           LoggingConfig                `json:"logging"`
+	WebUI             WebUIConfig                  `json:"webui"`
+	Prefer            Tier                         `json:"prefer"`
 
 	effectiveProxies []string
 }
@@ -132,6 +134,10 @@ func Load(path string) (Config, error) {
 // Normalize resolves external inputs and validates a Config supplied by
 // either the JSON file or the authenticated management API.
 func Normalize(path string, cfg Config) (Config, error) {
+	cfg.Rotation.Defaults()
+	if err := cfg.Rotation.Validate(nil); err != nil {
+		return Config{}, err
+	}
 	trimList(&cfg.ServerKeys)
 	trimList(&cfg.ZenKeys)
 	trimList(&cfg.GoKeys)
@@ -155,6 +161,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if len(cfg.ServerKeys) == 0 {
 		return Config{}, errors.New("server_keys must contain at least one local key")
+	}
+	if cfg.FirstEnabledServerKey() == "" {
+		return Config{}, errors.New("至少保留一个启用的 API Key")
 	}
 	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 {
 		return Config{}, errors.New("zen_keys or go_keys must contain at least one upstream key unless anonymous is enabled")
@@ -241,7 +250,14 @@ func (cfg *Config) PasswordForSave() {
 }
 
 func Clone(cfg Config) Config {
+	cfg.Rotation.SOTA.Order = append([]string(nil), cfg.Rotation.SOTA.Order...)
+	cfg.Rotation.Sweet.Order = append([]string(nil), cfg.Rotation.Sweet.Order...)
 	cfg.ServerKeys = append([]string(nil), cfg.ServerKeys...)
+	metadata := make(map[string]ServerKeyMetadata, len(cfg.ServerKeyMetadata))
+	for id, item := range cfg.ServerKeyMetadata {
+		metadata[id] = item
+	}
+	cfg.ServerKeyMetadata = metadata
 	cfg.ZenKeys = append([]string(nil), cfg.ZenKeys...)
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)

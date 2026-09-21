@@ -16,6 +16,11 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 - Dynamic model discovery, native protocol metadata, and disk caches.
 - A separate management port with configuration editing, a Playground, diagnostics, token statistics, and live logs.
 - Configuration hot reload with validation before switching new requests to a replacement gateway.
+- Go subscription quota dashboard with remaining percentages, reset times, and available models.
+- Local API key creation, naming, enabling, disabling, and deletion with immediate updates.
+- Sticky `sota` / `sweet` model groups with ordering, failure fallback, streaming protection, and persisted state.
+
+See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
 ## Quick start
 

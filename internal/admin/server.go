@@ -32,6 +32,8 @@ type Server struct {
 	attempts      map[string]loginWindow
 	debugAttempts map[string]loginWindow
 	lastInference *DebugInferenceResult
+	quotaMu       sync.Mutex
+	quotaCache    map[string]quotaCacheEntry
 }
 
 func New(manager *gateway.RuntimeManager, monitor *telemetry.Monitor, logs *telemetry.LogHub, logger *slog.Logger) *Server {
@@ -53,6 +55,14 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/account", a.authenticate(a.csrf(http.HandlerFunc(a.handleAccount))))
 	mux.Handle("GET /api/monitor", a.authenticate(http.HandlerFunc(a.handleMonitor)))
 	mux.Handle("GET /api/debug/models", a.authenticate(http.HandlerFunc(a.handleDebugModels)))
+	mux.Handle("GET /api/rotation", a.authenticate(http.HandlerFunc(a.handleRotation)))
+	mux.Handle("PUT /api/rotation", a.authenticate(a.csrf(http.HandlerFunc(a.handleSaveRotation))))
+	mux.Handle("POST /api/rotation/current", a.authenticate(a.csrf(http.HandlerFunc(a.handleSelectRotation))))
+	mux.Handle("GET /api/model-quotas", a.authenticate(http.HandlerFunc(a.handleModelQuotas)))
+	mux.Handle("GET /api/api-keys", a.authenticate(http.HandlerFunc(a.handleListAPIKeys)))
+	mux.Handle("POST /api/api-keys", a.authenticate(a.csrf(http.HandlerFunc(a.handleCreateAPIKey))))
+	mux.Handle("PATCH /api/api-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleUpdateAPIKey))))
+	mux.Handle("DELETE /api/api-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleDeleteAPIKey))))
 	mux.Handle("POST /api/debug/inference", a.authenticate(a.csrf(http.HandlerFunc(a.handleDebugInference))))
 	mux.Handle("GET /api/logs", a.authenticate(http.HandlerFunc(a.handleLogs)))
 	mux.Handle("GET /api/logs/stream", a.authenticate(http.HandlerFunc(a.handleLogStream)))
@@ -181,7 +191,9 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	candidate := config.Config{
-		Listen: update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
+		ServerKeyMetadata: current.ServerKeyMetadata,
+		Rotation:          current.Rotation,
+		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		WebUI: config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
 	}

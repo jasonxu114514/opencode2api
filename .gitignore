@@ -14,3 +14,9 @@ node_modules/
 coverage.out
 *.test
 *.test.exe
+
+*.rotation.json
+.rotation-*.tmp
+
+# Local credentials, deployment backups, and verification artifacts
+.local/

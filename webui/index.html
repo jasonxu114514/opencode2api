@@ -59,6 +59,13 @@
           <button data-page="config"><span class="nav-no">07</span><span>配置中心</span></button>
           <button data-page="logs"><span class="nav-no">08</span><span>事件日志</span></button>
           <button data-page="account"><span class="nav-no">09</span><span>账号安全</span></button>
+          <button data-page="model-quotas">
+            <span class="nav-no">10</span><span>模型与额度</span>
+          </button>
+          <button data-page="api-keys">
+            <span class="nav-no">11</span><span>API Key 管理</span>
+          </button>
+          <button data-page="rotation"><span class="nav-no">12</span><span>模型轮转</span></button>
         </nav>
         <div class="sidebar-foot">
           <div class="live-line"><span class="live-dot"></span><span>CONTROL PLANE LIVE</span></div>
@@ -622,6 +629,201 @@
             /><button id="log-pause" class="ghost">暂停</button>
           </div>
           <div id="log-list" class="logs"></div>
+        </section>
+        <section id="page-model-quotas" class="page hidden">
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>OpenCode Go 套餐额度</h2>
+                <div class="section-caption">
+                  来自 OpenCode 的实时查询，缓存 60 秒。所有模型共享套餐窗口，百分比由上游取整。
+                </div>
+              </div>
+              <button id="quota-refresh" class="ghost">刷新额度</button>
+            </div>
+            <div class="field">
+              <label for="quota-account">Go Key</label
+              ><select id="quota-account">
+                <option>读取中…</option>
+              </select>
+            </div>
+            <div id="quota-status" class="quota-status" role="status" aria-live="polite">
+              进入页面后读取额度。
+            </div>
+            <div id="quota-cards" class="quota-grid"></div>
+            <div id="quota-updated" class="section-caption"></div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>可用模型 <span id="quota-model-count" class="section-caption"></span></h2>
+                <div class="section-caption">
+                  模型名称可直接填入
+                  OPENAI_MODEL。额度列对应上方选定套餐，不代表每个模型拥有独立额度。
+                </div>
+              </div>
+              <input
+                id="quota-model-search"
+                aria-label="搜索模型"
+                placeholder="搜索模型名称…"
+                type="search"
+              />
+            </div>
+            <div id="quota-catalog-status" class="section-caption"></div>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>模型名称</th>
+                    <th>上游协议</th>
+                    <th>5 小时剩余 · 共享</th>
+                    <th>本周剩余 · 共享</th>
+                    <th>本月剩余 · 共享</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="quota-models"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section id="page-rotation" class="page hidden">
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>SOTA / 甜点模型轮转</h2>
+                <div class="section-caption">
+                  成功后继续使用当前模型。额度不足或错误时按顺序切换，仅使用 OpenCode Go。
+                </div>
+              </div>
+              <button id="rotation-refresh" class="ghost">刷新状态</button>
+            </div>
+            <p class="section-caption">
+              沿用现有 Base URL 和 API Key，将 OPENAI_MODEL 设为下方别名。每个模型普通错误最多尝试 3
+              次，一次请求最多重试 3 个模型；额度不足直接跳过。
+            </p>
+            <p class="section-caption">
+              输出开始后，本次回答固定使用同一模型。中途故障会结束本次输出，下一次请求才换模型。模型共享套餐额度，切换不保证解决套餐耗尽。
+            </p>
+            <div id="rotation-status" role="status" class="section-caption"></div>
+          </div>
+          <form id="rotation-form">
+            <div id="rotation-groups"></div>
+            <div class="section">
+              <div class="field">
+                <label for="rotation-timeout">首个有效输出等待上限（秒）</label
+                ><input id="rotation-timeout" type="number" min="1" max="300" value="30" required />
+              </div>
+              <div class="actions">
+                <button id="rotation-save" class="primary">保存别名与顺序</button>
+              </div>
+              <p class="section-caption">
+                保存立即生效；调整顺序不会打断正在输出的回答。手动选择当前模型会立即生效，并解除该模型的临时暂停。
+              </p>
+            </div>
+          </form>
+          <div class="section">
+            <div class="section-head"><h2>最近请求尝试</h2></div>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>请求</th>
+                    <th>别名</th>
+                    <th>实际模型</th>
+                    <th>尝试</th>
+                    <th>结果</th>
+                  </tr>
+                </thead>
+                <tbody id="rotation-attempts"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section id="page-api-keys" class="page hidden">
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>为调用方创建 API Key</h2>
+                <div class="section-caption">
+                  用于访问本机 B 服务。每个应用可使用独立密钥；创建、启停和删除立即生效。
+                </div>
+              </div>
+            </div>
+            <form id="api-key-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="api-key-name">名称</label
+                  ><input
+                    id="api-key-name"
+                    placeholder="例如：我的笔记助手"
+                    maxlength="80"
+                    required
+                  />
+                </div>
+                <div class="field">
+                  <label for="api-key-value">自定义 Key（可选）</label
+                  ><input
+                    id="api-key-value"
+                    type="password"
+                    autocomplete="new-password"
+                    minlength="16"
+                    maxlength="256"
+                    placeholder="留空自动生成；自定义需 16–256 位"
+                  />
+                </div>
+              </div>
+              <div class="actions">
+                <button id="api-key-create" class="primary">创建 API Key</button>
+              </div>
+            </form>
+          </div>
+          <div id="api-key-created" class="section hidden" role="status">
+            <div class="section-head">
+              <div>
+                <h2>密钥已创建</h2>
+                <div class="section-caption">
+                  完整密钥仅在创建后展示，请现在保存到调用方的环境变量。
+                </div>
+              </div>
+              <button id="api-key-dismiss" class="ghost">已保存，关闭</button>
+            </div>
+            <pre id="api-key-env" class="key-env"></pre>
+            <div class="actions">
+              <button id="api-key-copy" class="ghost">复制 Key</button
+              ><button id="api-key-copy-env" class="primary">复制环境变量</button>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>访问密钥 <span id="api-key-count" class="section-caption"></span></h2>
+                <div class="section-caption">
+                  此处管理服务 B 的访问权限。OpenCode Go 的上游密钥仍在配置中心管理。
+                </div>
+              </div>
+              <button id="api-key-refresh" class="ghost">刷新列表</button>
+            </div>
+            <div id="api-key-status" role="status" aria-live="polite" class="section-caption"></div>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>密钥尾码</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="api-key-list"></tbody>
+              </table>
+            </div>
+            <p class="section-caption">
+              停用和删除会使对应应用的新请求返回 401。至少保留一个启用的 Key。
+            </p>
+          </div>
         </section>
         <section id="page-account" class="page hidden">
           <form id="account-form" class="section">

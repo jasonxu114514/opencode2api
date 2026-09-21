@@ -13,6 +13,7 @@ import (
 	"opencode2api/internal/config"
 	modelcatalog "opencode2api/internal/models"
 	"opencode2api/internal/protocol"
+	"opencode2api/internal/rotation"
 	"opencode2api/internal/telemetry"
 )
 
@@ -30,6 +31,7 @@ type ApplyResult struct {
 }
 
 type RuntimeManager struct {
+	rotation   *rotation.Manager
 	configPath string
 	root       context.Context
 	logger     *slog.Logger
@@ -84,6 +86,12 @@ func NewRuntimeManager(root context.Context, configPath string, cfg config.Confi
 		// bootstrap password and must not be retained.
 		_ = os.Remove(configPath + ".bak")
 	}
+	cfg.Rotation.Defaults()
+	rotationManager, err := rotation.New(configPath+".rotation.json", cfg.Rotation)
+	if err != nil {
+		return nil, err
+	}
+	manager.rotation = rotationManager
 	runtime, err := manager.build(cfg)
 	if err != nil {
 		return nil, err
@@ -93,6 +101,10 @@ func NewRuntimeManager(root context.Context, configPath string, cfg config.Confi
 			manager.logger.Warn("model catalog cache ignored", "component", "models", "event", "catalog_cache_load_failed", "path", modelcatalog.CatalogCachePath(configPath), "error", err)
 		}
 	}
+	if err := cfg.Rotation.Validate(runtime.gateway.catalog.List()); err != nil {
+		return nil, err
+	}
+	runtime.gateway.syncRotation()
 	manager.current.Store(runtime)
 	manager.redactor.Replace(cfg)
 	telemetry.SetLogLevel(manager.level, cfg.Logging.Level)
@@ -106,6 +118,7 @@ func (m *RuntimeManager) build(cfg config.Config) (*gatewayRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	gateway.rotation = m.rotation
 	gateway.catalog.SetPricingStore(m.metadata)
 	gateway.catalog.SetCachePath(modelcatalog.CatalogCachePath(m.configPath))
 	return &gatewayRuntime{config: cfg, gateway: gateway, handler: gateway.Handler(), cancel: func() {}}, nil
@@ -163,6 +176,21 @@ func (m *RuntimeManager) RestartStatus() (effectiveListeners, []string) {
 func (m *RuntimeManager) Apply(candidate config.Config, persist bool) (ApplyResult, error) {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
+	return m.applyLocked(candidate, persist)
+}
+
+// Update serializes read-modify-write operations against the latest config.
+func (m *RuntimeManager) Update(change func(*config.Config) error) (ApplyResult, error) {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	candidate := m.Config()
+	if err := change(&candidate); err != nil {
+		return ApplyResult{}, err
+	}
+	return m.applyLocked(candidate, true)
+}
+
+func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (ApplyResult, error) {
 
 	current := m.current.Load()
 	hadPlaintextPassword := candidate.WebUI.Password != ""
@@ -184,6 +212,9 @@ func (m *RuntimeManager) Apply(candidate config.Config, persist bool) (ApplyResu
 	}
 	if current != nil {
 		next.gateway.catalog.CopyState(current.gateway.catalog)
+	}
+	if err := normalized.Rotation.Validate(next.gateway.catalog.List()); err != nil {
+		return ApplyResult{}, err
 	}
 	if persist || hadPlaintextPassword {
 		if err := config.SaveAtomic(m.configPath, normalized); err != nil {
@@ -208,6 +239,8 @@ func (m *RuntimeManager) Apply(candidate config.Config, persist bool) (ApplyResu
 	if current == nil || normalized.Logging.RingSize != current.config.Logging.RingSize {
 		m.hub.Resize(normalized.Logging.RingSize)
 	}
+	m.rotation.Configure(normalized.Rotation)
+	next.gateway.syncRotation()
 	m.start(next)
 	previous := m.current.Swap(next)
 	if previous != nil {
