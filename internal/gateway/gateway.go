@@ -19,6 +19,7 @@ import (
 	"opencode2api/internal/jsonutil"
 	"opencode2api/internal/models"
 	wire "opencode2api/internal/protocol"
+	"opencode2api/internal/rotation"
 	"opencode2api/internal/telemetry"
 )
 
@@ -27,6 +28,7 @@ const maxRequestBody = 32 << 20
 const anonymousZenKey = "public"
 
 type Gateway struct {
+	rotation   *rotation.Manager
 	cfg        config.Config
 	logger     *slog.Logger
 	transports *transportPool
@@ -38,6 +40,11 @@ type Gateway struct {
 }
 
 func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
+	cfg.Rotation.Defaults()
+	rotationManager, err := rotation.New("", cfg.Rotation)
+	if err != nil {
+		return nil, err
+	}
 	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
 	if err != nil {
 		return nil, err
@@ -55,6 +62,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	return &Gateway{
 		cfg:        cfg,
+		rotation:   rotationManager,
 		logger:     logger,
 		transports: transports,
 		zenNodes:   zenNodes,
@@ -83,6 +91,9 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		}
 		valid := false
 		for _, key := range g.cfg.ServerKeys {
+			if !g.cfg.ServerKeyEnabled(key) {
+				continue
+			}
 			for _, candidate := range candidates {
 				if len(candidate) == len(key) && subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
 					valid = true
@@ -120,6 +131,10 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		}
 		if model == "" {
 			wire.WriteError(w, external, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
+			return
+		}
+		if id := g.rotation.GroupID(model); id != "" {
+			g.handleRotation(w, r, external, payload, id, model)
 			return
 		}
 		if !g.catalog.Supported(model) {

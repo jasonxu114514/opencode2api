@@ -39,5 +39,16 @@
     "username": "admin",
     "password": "change-this-admin-password",
     "session_ttl_minutes": 720
+  },
+  "rotation": {
+    "sota": {
+      "alias": "sota",
+      "order": ["deepseek-v4.1-flash", "glm-5.3", "grok-4.6", "kimi-k3", "qwen3.8-max"]
+    },
+    "sweet": {
+      "alias": "sweet",
+      "order": []
+    },
+    "first_output_seconds": 30
   }
 }

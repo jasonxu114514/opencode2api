@@ -153,5 +153,8 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		}
 		data = append(data, entry)
 	}
+	for _, group := range g.rotation.Snapshot().Groups {
+		data = append(data, map[string]any{"id": group.Alias, "object": "model", "created": now, "owned_by": "opencode-go-rotation"})
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }

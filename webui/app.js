@@ -12,6 +12,7 @@ let csrf = "",
   logRenderPending = false,
   toastTimer = null;
 const pages = {
+  rotation: ["12", "模型轮转", "共享当前模型、故障切换与尝试记录。"],
   overview: ["01", "运行桌面", "最近一小时、进程累计与当前资源状态。"],
   guide: ["02", "首次运行", "用六个检查点完成从配置到首个请求。"],
   access: ["03", "接入手册", "Chat、Responses、Anthropic 与 SDK 示例。"],
@@ -21,6 +22,8 @@ const pages = {
   config: ["07", "配置中心", "验证后原子保存，并热应用可变字段。"],
   logs: ["08", "事件日志", "来自进程内 Ring Buffer 的结构化 SSE。"],
   account: ["09", "账号安全", "更新后撤销全部管理 Session。"],
+  "model-quotas": ["10", "模型与额度", "可用模型、共享套餐剩余额度与重置时间。"],
+  "api-keys": ["11", "API Key 管理", "给每个调用方独立的访问密钥。"],
 };
 async function api(path, options = {}) {
   options.headers = { ...(options.headers || {}), Accept: "application/json" };
@@ -52,6 +55,9 @@ function showLogin() {
   if (eventSource) eventSource.close();
   eventSource = null;
   clearInterval(monitorTimer);
+  clearInterval(quotaTimer);
+  clearCreatedKey();
+  $("#api-key-value").value = "";
 }
 async function enterConsole(session) {
   csrf = session.csrf_token;
@@ -62,6 +68,7 @@ async function enterConsole(session) {
   clearInterval(monitorTimer);
   monitorTimer = setInterval(refreshMonitor, 3000);
   connectLogs();
+  openPage(pages[location.hash.slice(1)] ? location.hash.slice(1) : "overview");
 }
 async function boot() {
   try {
@@ -92,6 +99,10 @@ $("#logout").onclick = async () => {
   }
 };
 function openPage(page) {
+  if (!pages[page]) return;
+  history.replaceState(null, "", `#${page}`);
+  clearInterval(quotaTimer);
+  if (page !== "api-keys") clearCreatedKey();
   $$(".nav button").forEach((button) =>
     button.classList.toggle("active", button.dataset.page === page),
   );
@@ -102,6 +113,14 @@ function openPage(page) {
   $("#page-sub").textContent = meta[2];
   if (page === "access") renderAccessExamples();
   if (page === "usage") renderUsage();
+  if (page === "model-quotas") {
+    loadModelQuotas();
+    quotaTimer = setInterval(() => {
+      if (!document.hidden) loadModelQuotas();
+    }, 60000);
+  }
+  if (page === "rotation") loadRotation();
+  if (page === "api-keys") loadAPIKeys();
   if (page === "playground" && !debugData) loadDebugModels();
   if (page === "diagnostics") {
     loadDebugModels();
@@ -762,6 +781,8 @@ async function refreshMonitor() {
 }
 $("#refresh-now").onclick = async () => {
   await Promise.all([refreshMonitor(), loadConfig(), loadDebugModels()]);
+  if (location.hash === "#model-quotas") await loadModelQuotas();
+  if (location.hash === "#api-keys") await loadAPIKeys();
   toast("状态已刷新");
 };
 function derivedAPIBase() {
@@ -902,5 +923,456 @@ $("#log-pause").onclick = () => {
   paused = !paused;
   $("#log-pause").textContent = paused ? "继续" : "暂停";
   if (!paused) renderLogs();
+};
+let quotaData = null,
+  quotaTimer = null,
+  quotaLoading = false,
+  createdKey = "",
+  apiKeysLoading = false;
+const localTime = (value) =>
+  value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
+
+function clearCreatedKey() {
+  createdKey = "";
+  $("#api-key-env").textContent = "";
+  $("#api-key-created").classList.add("hidden");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已复制");
+  } catch {
+    toast("浏览器未允许复制，请手动选中复制", true);
+  }
+}
+
+async function loadModelQuotas() {
+  if (quotaLoading) return;
+  quotaLoading = true;
+  $("#quota-refresh").disabled = true;
+  $("#quota-refresh").textContent = "读取中…";
+  try {
+    const value = await api("/api/model-quotas");
+    if (!csrf) return;
+    quotaData = value;
+    const select = $("#quota-account"),
+      selected = select.value;
+    select.replaceChildren();
+    for (const account of value.accounts || []) {
+      const option = document.createElement("option");
+      option.value = account.id;
+      option.textContent = `Go Key ${account.display}`;
+      select.appendChild(option);
+    }
+    if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+    if (!select.options.length) select.appendChild(new Option("尚未配置 Go Key", ""));
+    renderModelQuotas();
+  } catch (error) {
+    $("#quota-status").textContent = `查询失败：${error.message}。已有显示仅为上次查询结果。`;
+  } finally {
+    quotaLoading = false;
+    $("#quota-refresh").disabled = false;
+    $("#quota-refresh").textContent = "刷新额度";
+  }
+}
+
+function renderModelQuotas() {
+  if (!quotaData) return;
+  const account = quotaData.accounts.find((item) => item.id === $("#quota-account").value);
+  const stale = account?.status === "stale";
+  const cards = $("#quota-cards");
+  cards.replaceChildren();
+  $("#quota-status").textContent = !account
+    ? "请先在配置中心添加 OpenCode Go Key。"
+    : account.error
+      ? `${account.error}${stale ? "；下方显示上次成功数据，当前额度未知。" : "；当前额度未知。"}`
+      : "已连接 OpenCode · 共享套餐额度。多个 Key 的额度不相加。";
+  $("#quota-updated").textContent = account?.fetched_at
+    ? `${stale ? "上次成功查询" : "额度更新时间"}：${localTime(account.fetched_at)} · 缓存 60 秒 · 来源：OpenCode Go /v1/usage`
+    : "";
+  const windows = [
+    ["rolling", "5 小时窗口"],
+    ["weekly", "每周窗口"],
+    ["monthly", "每月窗口"],
+  ];
+  for (const [id, label] of windows) {
+    const item = account?.windows?.[id];
+    const card = document.createElement("div"),
+      heading = document.createElement("h3"),
+      value = document.createElement("div"),
+      progress = document.createElement("progress"),
+      reset = document.createElement("div");
+    card.className = `quota-card${item?.remaining_percent < 20 ? " quota-low" : ""}`;
+    heading.textContent = label;
+    value.className = "quota-value";
+    value.textContent = item ? `≈ ${item.remaining_percent}%` : "未知";
+    progress.max = 100;
+    if (item) progress.value = item.remaining_percent;
+    else progress.value = 0;
+    progress.setAttribute("aria-label", `${label}剩余额度`);
+    reset.className = "quota-reset";
+    reset.textContent = item
+      ? `${stale ? "历史剩余" : "剩余"} · ${item.status === "rate-limited" ? "已限额 · " : ""}重置于 ${localTime(item.resets_at)}`
+      : "等待上游额度数据";
+    card.append(heading, value, progress, reset);
+    cards.appendChild(card);
+  }
+  const query = $("#quota-model-search").value.trim().toLowerCase();
+  const models = quotaData.models.filter((model) => model.id.toLowerCase().includes(query));
+  $("#quota-model-count").textContent = `${models.length} / ${quotaData.models.length}`;
+  const catalog = quotaData.catalog;
+  $("#quota-catalog-status").textContent =
+    `${catalog?.stale ? "模型目录暂未更新，显示缓存 · " : ""}目录更新时间：${localTime(catalog?.updated_at)}`;
+  const host = $("#quota-models");
+  host.replaceChildren();
+  for (const model of models) {
+    const row = document.createElement("tr");
+    appendCell(row, model.id, "mono");
+    appendCell(
+      row,
+      { chat: "Chat Completions", responses: "Responses", anthropic: "Messages" }[model.protocol] ||
+        model.protocol,
+    );
+    for (const [id] of windows) {
+      const item = account?.windows?.[id];
+      appendCell(row, item ? `≈ ${item.remaining_percent}%${stale ? "（历史）" : ""}` : "未知");
+    }
+    const cell = document.createElement("td"),
+      button = document.createElement("button");
+    button.className = "ghost";
+    button.textContent = "复制名称";
+    button.onclick = () => copyText(model.id);
+    cell.appendChild(button);
+    row.appendChild(cell);
+    host.appendChild(row);
+  }
+  if (!models.length)
+    emptyRow(host, 6, quotaData.models.length ? "没有匹配的模型" : "模型目录尚未就绪，请稍后刷新");
+}
+$("#quota-refresh").onclick = loadModelQuotas;
+$("#quota-account").onchange = renderModelQuotas;
+$("#quota-model-search").oninput = renderModelQuotas;
+
+async function loadAPIKeys() {
+  if (apiKeysLoading) return;
+  apiKeysLoading = true;
+  $("#api-key-refresh").disabled = true;
+  try {
+    const data = await api("/api/api-keys");
+    if (csrf) renderAPIKeys(data.keys);
+  } catch (error) {
+    $("#api-key-status").textContent = `读取失败：${error.message}`;
+  } finally {
+    apiKeysLoading = false;
+    $("#api-key-refresh").disabled = false;
+  }
+}
+
+async function mutateAPIKey(id, method, body, button) {
+  button.disabled = true;
+  try {
+    const data = await api(`/api/api-keys/${encodeURIComponent(id)}`, {
+      method,
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!csrf) return;
+    renderAPIKeys(data.keys);
+    await loadConfig();
+    toast("已保存并立即生效");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderAPIKeys(keys) {
+  $("#api-key-count").textContent = `${keys.length} 个`;
+  $("#api-key-status").textContent = `${keys.filter((key) => key.enabled).length} 个已启用`;
+  const host = $("#api-key-list");
+  host.replaceChildren();
+  for (const key of keys) {
+    const row = document.createElement("tr");
+    appendCell(row, key.name);
+    appendCell(row, key.display, "mono");
+    appendCell(row, key.enabled ? "已启用" : "已停用", key.enabled ? "status ok" : "status warn");
+    appendCell(row, key.created_at ? localTime(key.created_at) : "已有配置");
+    const cell = document.createElement("td"),
+      actions = document.createElement("div");
+    actions.className = "key-actions";
+    for (const [label, action] of [
+      [
+        "重命名",
+        (button) => {
+          const name = prompt("密钥名称", key.name);
+          if (name !== null) mutateAPIKey(key.id, "PATCH", { name }, button);
+        },
+      ],
+      [
+        key.enabled ? "停用" : "启用",
+        (button) => mutateAPIKey(key.id, "PATCH", { enabled: !key.enabled }, button),
+      ],
+      [
+        "删除",
+        (button) => {
+          if (confirm(`删除“${key.name}”后，使用它的应用将无法继续访问。确定删除？`))
+            mutateAPIKey(key.id, "DELETE", null, button);
+        },
+      ],
+    ]) {
+      const button = document.createElement("button");
+      button.className = "ghost";
+      button.textContent = label;
+      button.onclick = () => action(button);
+      actions.appendChild(button);
+    }
+    cell.appendChild(actions);
+    row.appendChild(cell);
+    host.appendChild(row);
+  }
+  if (!keys.length) emptyRow(host, 5, "暂无 API Key");
+}
+$("#api-key-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const button = $("#api-key-create");
+  button.disabled = true;
+  try {
+    const data = await api("/api/api-keys", {
+      method: "POST",
+      body: JSON.stringify({ name: $("#api-key-name").value, value: $("#api-key-value").value }),
+    });
+    if (!csrf) return;
+    createdKey = data.key;
+    const goModels = debugData?.models?.filter((item) => item.available_go) || [];
+    const model =
+      goModels.find((item) => item.model === "glm-5.3-flash")?.model ||
+      goModels[0]?.model ||
+      "YOUR_MODEL";
+    $("#api-key-env").textContent =
+      `OPENAI_API_KEY=${data.key}\nOPENAI_BASE_URL=${derivedAPIBase()}/v1\nOPENAI_MODEL=${model}`;
+    $("#api-key-created").classList.remove("hidden");
+    $("#api-key-form").reset();
+    renderAPIKeys(data.keys);
+    await loadConfig();
+    toast("API Key 已创建");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+};
+$("#api-key-refresh").onclick = loadAPIKeys;
+$("#api-key-dismiss").onclick = clearCreatedKey;
+$("#api-key-copy").onclick = () => copyText(createdKey);
+$("#api-key-copy-env").onclick = () => copyText($("#api-key-env").textContent);
+let rotationData = null,
+  rotationDirty = false;
+const rotationReasons = {
+  success: "成功",
+  client_canceled: "调用方取消",
+  quota_or_rate_limit: "额度不足 / 限流",
+  transport_error: "连接错误",
+  first_output_timeout: "首个输出超时",
+  stream_error: "输出中断",
+  response_read_error: "读取响应失败",
+  response_conversion_error: "响应解析或转换失败",
+  request_conversion_error: "请求转换失败",
+  upstream_error: "上游错误",
+};
+async function loadRotation() {
+  try {
+    const value = await api("/api/rotation");
+    if (!csrf) return;
+    rotationData = value;
+    rotationDirty = false;
+    renderRotation();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+function renderRotation() {
+  const state = rotationData;
+  $("#rotation-status").textContent =
+    state.persistence_error || "状态已更新 · 两组独立轮转，所有调用方共享当前位置。";
+  $("#rotation-timeout").value = state.first_output_seconds;
+  const host = $("#rotation-groups");
+  host.replaceChildren();
+  for (const group of state.groups) {
+    const section = document.createElement("div");
+    section.className = "section";
+    const title = document.createElement("h2");
+    title.textContent = group.id === "sota" ? "SOTA" : "甜点";
+    const label = document.createElement("label");
+    label.textContent = "调用别名";
+    label.htmlFor = `rotation-alias-${group.id}`;
+    const input = document.createElement("input");
+    input.id = label.htmlFor;
+    input.value = group.alias;
+    input.required = true;
+    input.maxLength = 64;
+    input.oninput = () => {
+      group.alias = input.value;
+      rotationDirty = true;
+    };
+    const field = document.createElement("div");
+    field.className = "field";
+    field.append(label, input);
+    const current = document.createElement("p");
+    current.className = "mono";
+    current.textContent = `当前模型：${group.current || "等待可用模型"}`;
+    const table = document.createElement("table");
+    table.className = "table";
+    const header = document.createElement("tr");
+    for (const text of ["顺序", "模型", "状态 / 恢复时间", "操作"]) {
+      const th = document.createElement("th");
+      th.textContent = text;
+      header.append(th);
+    }
+    const thead = document.createElement("thead");
+    thead.append(header);
+    table.append(thead);
+    const tbody = document.createElement("tbody");
+    table.append(tbody);
+    group.order.forEach((model, index) => {
+      const row = document.createElement("tr");
+      appendCell(row, String(index + 1));
+      appendCell(row, model, "mono");
+      const until = group.paused[model],
+        paused = until && new Date(until) > new Date();
+      appendCell(
+        row,
+        !group.available[model]
+          ? "已下架 / 暂不可用"
+          : paused
+            ? `暂停至 ${localTime(until)}`
+            : model === group.current
+              ? "当前使用"
+              : "可用",
+      );
+      const actions = document.createElement("td");
+      actions.className = "rotation-actions";
+      for (const [text, delta] of [
+        ["上移", -1],
+        ["下移", 1],
+      ]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost";
+        button.textContent = text;
+        button.setAttribute("aria-label", `${model} ${text}`);
+        button.disabled = index + delta < 0 || index + delta >= group.order.length;
+        button.onclick = () => {
+          [group.order[index], group.order[index + delta]] = [
+            group.order[index + delta],
+            group.order[index],
+          ];
+          state.first_output_seconds = Number($("#rotation-timeout").value);
+          rotationDirty = true;
+          renderRotation();
+        };
+        actions.append(button);
+      }
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "ghost";
+      select.textContent = "设为当前";
+      select.disabled = !group.available[model];
+      select.setAttribute("aria-label", `使用 ${model}`);
+      select.onclick = async () => {
+        select.disabled = true;
+        try {
+          const result = await api("/api/rotation/current", {
+            method: "POST",
+            body: JSON.stringify({ group: group.id, model }),
+          });
+          // Keep unsaved alias/order edits while refreshing operational state.
+          for (const item of state.groups) {
+            const live = result.groups.find((x) => x.id === item.id);
+            Object.assign(item, {
+              current: live.current,
+              paused: live.paused,
+              switches: live.switches,
+            });
+          }
+          state.persistence_error = result.persistence_error;
+          renderRotation();
+          toast("当前模型已切换");
+        } catch (error) {
+          select.disabled = false;
+          toast(error.message, true);
+        }
+      };
+      actions.append(select);
+      row.append(actions);
+      tbody.append(row);
+    });
+    if (!group.order.length) emptyRow(tbody, 4, "等待 Go 模型目录");
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    wrap.append(table);
+    const recent = document.createElement("div");
+    recent.className = "rotation-switches";
+    const caption = document.createElement("h3");
+    caption.textContent = "最近切换";
+    recent.append(caption);
+    for (const item of (group.switches || []).slice(-5).reverse()) {
+      const line = document.createElement("p");
+      line.textContent = `${localTime(item.time)} · ${item.from} → ${item.to} · ${rotationReasons[item.reason] || item.reason}`;
+      recent.append(line);
+    }
+    if (!group.switches?.length) {
+      const line = document.createElement("p");
+      line.textContent = "尚无切换记录";
+      recent.append(line);
+    }
+    section.append(title, field, current, wrap, recent);
+    host.append(section);
+  }
+  const attempts = $("#rotation-attempts");
+  attempts.replaceChildren();
+  for (const item of (state.attempts || []).slice().reverse()) {
+    const row = document.createElement("tr");
+    for (const value of [
+      localTime(item.time),
+      item.request,
+      item.alias,
+      item.model,
+      String(item.number),
+      rotationReasons[item.outcome] || item.outcome,
+    ])
+      appendCell(row, value);
+    attempts.append(row);
+  }
+  if (!state.attempts?.length) emptyRow(attempts, 6, "调用分组别名后显示最近 100 次尝试");
+}
+$("#rotation-refresh").onclick = () => {
+  if (rotationDirty) {
+    toast("有未保存的修改，请先保存后刷新", true);
+    return;
+  }
+  loadRotation();
+};
+$("#rotation-timeout").oninput = () => {
+  rotationDirty = true;
+};
+$("#rotation-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (!rotationData) return;
+  const button = $("#rotation-save");
+  button.disabled = true;
+  try {
+    const body = { first_output_seconds: Number($("#rotation-timeout").value) };
+    for (const group of rotationData.groups)
+      body[group.id] = { alias: group.alias.trim(), order: group.order };
+    rotationData = await api("/api/rotation", { method: "PUT", body: JSON.stringify(body) });
+    rotationDirty = false;
+    renderRotation();
+    toast("模型轮转配置已保存并生效");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 };
 boot();

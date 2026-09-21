@@ -155,6 +155,7 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 		}
 		if zen != nil || goModels != nil {
 			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
+			g.syncRotation()
 			if ctx.Err() == nil {
 				if err := g.catalog.SaveCache(); err != nil {
 					g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)

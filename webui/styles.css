@@ -22,6 +22,77 @@
   --ok: #237056;
   --shadow: 0 12px 35px #17231f16;
 }
+.quota-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin: 20px 0;
+}
+.quota-card {
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--white);
+}
+.quota-card h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.quota-card .quota-value {
+  font-size: 36px;
+  font-weight: 750;
+  letter-spacing: -1px;
+}
+.quota-card progress {
+  width: 100%;
+  height: 9px;
+  accent-color: var(--forest);
+  margin: 14px 0 8px;
+}
+.quota-card.quota-low progress {
+  accent-color: var(--orange);
+}
+.quota-card .quota-reset {
+  font-size: 12px;
+  color: var(--muted);
+}
+.quota-status {
+  padding: 10px 14px;
+  background: var(--paper2);
+  border-radius: 6px;
+}
+.key-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.key-actions button {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.key-env {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 18px;
+  background: var(--forest);
+  color: var(--white);
+  border-radius: 6px;
+}
+#quota-model-search {
+  max-width: 250px;
+}
+#quota-account {
+  max-width: 360px;
+}
+#api-key-created {
+  border-color: var(--ok);
+}
+@media (max-width: 760px) {
+  .quota-grid {
+    grid-template-columns: 1fr;
+  }
+}
 * {
   box-sizing: border-box;
 }
@@ -830,4 +901,25 @@ textarea {
   .section-head {
     flex-direction: column;
   }
+}
+
+.rotation-actions {
+  min-width: 215px;
+  white-space: nowrap;
+}
+.rotation-actions button {
+  margin: 3px;
+}
+.rotation-switches {
+  margin-top: 22px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+#rotation-groups .field {
+  max-width: 360px;
+}
+#rotation-attempts td {
+  max-width: 270px;
+  overflow-wrap: anywhere;
 }
