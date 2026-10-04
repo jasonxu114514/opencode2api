@@ -41,7 +41,7 @@
   },
   "prefer": "go",
   "reasoning": {
-    "effort": "high",
+    "effort": "",
     "effort_by_model": {}
   }
 }
