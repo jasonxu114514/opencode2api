@@ -832,12 +832,11 @@
             <form id="api-key-form">
               <div class="form-grid">
                 <div class="field">
-                  <label for="api-key-name">名称</label
+                  <label for="api-key-name">名称（可选）</label
                   ><input
                     id="api-key-name"
-                    placeholder="例如：我的笔记助手"
+                    placeholder="留空自动使用“自动生成 Key”"
                     maxlength="80"
-                    required
                   />
                 </div>
                 <div class="field">
@@ -853,7 +852,7 @@
                 </div>
               </div>
               <div class="actions">
-                <button id="api-key-create" class="primary">创建 API Key</button>
+                <button id="api-key-create" class="primary">一键生成高熵 API Key</button>
               </div>
             </form>
           </div>

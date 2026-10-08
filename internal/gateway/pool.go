@@ -37,15 +37,24 @@ type transportPool struct {
 // cooldown per proxy. Unlike key nodes, anonymous nodes are never rebound:
 // changing proxy is the failover mechanism because Zen rate-limits them by IP.
 type anonymousPool struct {
-	nodes    []*anonymousNode
-	next     atomic.Uint64
-	cooldown time.Duration
+	nodes            []*anonymousNode
+	next             atomic.Uint64
+	cooldown         time.Duration
+	modelBanCooldown time.Duration
+	modelBanMu       sync.RWMutex
+	modelBans        map[string]anonymousModelBan
 }
 
 type anonymousNode struct {
 	proxy         *proxyTransport
 	failures      atomic.Uint32
 	cooldownUntil atomic.Int64
+}
+
+type anonymousModelBan struct {
+	failures uint32
+	bannedAt time.Time
+	until    time.Time
 }
 
 type anonymousCursor struct {
@@ -55,7 +64,11 @@ type anonymousCursor struct {
 }
 
 func newAnonymousPool(enabled bool, transports *transportPool, cooldown time.Duration) *anonymousPool {
-	pool := &anonymousPool{cooldown: cooldown}
+	pool := &anonymousPool{
+		cooldown:         cooldown,
+		modelBanCooldown: 30 * time.Minute,
+		modelBans:        make(map[string]anonymousModelBan),
+	}
 	if !enabled || transports == nil {
 		return pool
 	}
@@ -89,15 +102,23 @@ func (p *anonymousPool) CursorFor(affinity string) anonymousCursor {
 }
 
 // Next visits each healthy, non-cooling proxy at most once per cursor.
+// Catalog refreshes do not need a model-specific ban, so this preserves the
+// original behavior for those calls.
 func (c *anonymousCursor) Next() *anonymousNode {
+	return c.NextForModel("")
+}
+
+// NextForModel skips exits that are temporarily banned for this model while
+// still allowing the same exit to serve other anonymous models.
+func (c *anonymousCursor) NextForModel(model string) *anonymousNode {
 	if c.pool == nil || len(c.pool.nodes) == 0 {
 		return nil
 	}
-	now := time.Now().UnixNano()
+	now := time.Now()
 	for c.offset < len(c.pool.nodes) {
 		node := c.pool.nodes[(c.start+c.offset)%len(c.pool.nodes)]
 		c.offset++
-		if node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now {
+		if node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now.UnixNano() && !c.pool.modelBanned(node, model, now) {
 			return node
 		}
 	}
@@ -112,13 +133,57 @@ func (p *anonymousPool) MarkSuccess(node *anonymousNode) {
 	node.cooldownUntil.Store(0)
 }
 
+func (p *anonymousPool) MarkSuccessForModel(node *anonymousNode, model string) {
+	p.MarkSuccess(node)
+	if model == "" {
+		return
+	}
+	p.modelBanMu.Lock()
+	delete(p.modelBans, anonymousModelBanKey(node, model))
+	p.modelBanMu.Unlock()
+}
+
+// MarkFailure is retained for non-inference/background catalog requests.
 func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
 	if node == nil {
 		return
 	}
-	if err == nil && resp != nil && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+	if err == nil && resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		p.markRateLimited(node, resp)
+	}
+}
+
+func (p *anonymousPool) MarkFailureForModel(node *anonymousNode, model string, resp *http.Response, err error) {
+	if node == nil {
 		return
 	}
+	if err == nil && resp != nil {
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			// Anonymous quota is IP/exit scoped, so 429 cools the whole exit.
+			p.markRateLimited(node, resp)
+			return
+		case http.StatusUnauthorized, http.StatusForbidden:
+			// 401/403 is commonly model/exit scoped. Do not cool the exit itself;
+			// accumulate a model-specific signal and temporarily skip only this
+			// (exit, model) pairing after repeated failures.
+			p.markModelLimited(node, model)
+			return
+		default:
+			if resp.StatusCode >= 500 {
+				// A 5xx does not prove the exit is bad. The proxy health layer
+				// owns transport failures, while model/upstream 5xx stays neutral.
+				return
+			}
+			return
+		}
+	}
+	// Transport failures are handled by syncProxyResult/transportPool. Avoid a
+	// second anonymous cooldown here; doing so would incorrectly treat slow or
+	// model-side failures as IP failures.
+}
+
+func (p *anonymousPool) markRateLimited(node *anonymousNode, resp *http.Response) {
 	failures := node.failures.Add(1)
 	delay := p.cooldown * time.Duration(1<<min(failures-1, 3))
 	if resp != nil {
@@ -127,6 +192,49 @@ func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, er
 		}
 	}
 	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
+}
+
+func anonymousModelBanKey(node *anonymousNode, model string) string {
+	if node == nil || node.proxy == nil {
+		return ""
+	}
+	return strconv.Itoa(node.proxy.index) + "\x00" + model
+}
+
+func (p *anonymousPool) markModelLimited(node *anonymousNode, model string) {
+	if model == "" {
+		return
+	}
+	key := anonymousModelBanKey(node, model)
+	if key == "" {
+		return
+	}
+	p.modelBanMu.Lock()
+	state := p.modelBans[key]
+	state.failures++
+	state.bannedAt = time.Now()
+	if state.failures >= 2 {
+		state.until = state.bannedAt.Add(p.modelBanCooldown)
+	}
+	p.modelBans[key] = state
+	p.modelBanMu.Unlock()
+}
+
+func (p *anonymousPool) modelBanned(node *anonymousNode, model string, now time.Time) bool {
+	if model == "" {
+		return false
+	}
+	key := anonymousModelBanKey(node, model)
+	if key == "" {
+		return false
+	}
+	p.modelBanMu.RLock()
+	state, ok := p.modelBans[key]
+	p.modelBanMu.RUnlock()
+	if !ok || state.until.IsZero() {
+		return false
+	}
+	return now.Before(state.until)
 }
 
 func (p *transportPool) hasHealthy() bool {

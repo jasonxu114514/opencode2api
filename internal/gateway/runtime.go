@@ -112,7 +112,10 @@ func NewRuntimeManager(root context.Context, configPath string, cfg config.Confi
 	telemetry.SetLogLevel(manager.level, cfg.Logging.Level)
 	manager.start(runtime)
 	manager.metadata.Start(root)
-	manager.startAvailabilityChecks()
+	// Do not run background free-model inference probes. Anonymous Zen requests
+	// use the upstream IP-based free lane, so these probes consume the same
+	// anonymous allowance as real user traffic. Availability is therefore
+	// determined by actual requests instead of synthetic background traffic.
 	return manager, nil
 }
 

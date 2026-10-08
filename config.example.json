@@ -26,7 +26,9 @@
     "connect_timeout_seconds": 5,
     "failure_cooldown_seconds": 15,
     "attempt_timeout_seconds": 0,
-    "first_event_timeout_seconds": 0
+    "first_event_timeout_seconds": 0,
+    "body_idle_timeout_seconds": 120,
+    "responses_body_idle_timeout_seconds": 300
   },
   "logging": {
     "level": "info",

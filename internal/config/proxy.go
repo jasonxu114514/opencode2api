@@ -3,9 +3,13 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func resolveProxyFiles(configPath string, cfg *Config) error {
@@ -13,7 +17,7 @@ func resolveProxyFiles(configPath string, cfg *Config) error {
 	effective := append([]string(nil), cfg.Proxies...)
 	if cfg.ProxyFile != "" {
 		resolved := cfg.ProxyFile
-		if !filepath.IsAbs(resolved) {
+		if !isRemoteProxyFile(resolved) && !filepath.IsAbs(resolved) {
 			resolved = filepath.Join(filepath.Dir(configPath), resolved)
 		}
 		proxies, err := readProxyFile(resolved)
@@ -32,12 +36,40 @@ func resolveProxyFiles(configPath string, cfg *Config) error {
 }
 
 func readProxyFile(path string) ([]string, error) {
+	if isRemoteProxyFile(path) {
+		return readRemoteProxyFile(path)
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
+	return readProxyLines(file)
+}
+
+func isRemoteProxyFile(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && (strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")) && u.Host != ""
+}
+
+func readRemoteProxyFile(rawURL string) ([]string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("remote proxy file returned HTTP %s", resp.Status)
+	}
+
+	return readProxyLines(resp.Body)
+}
+
+func readProxyLines(file io.Reader) ([]string, error) {
 	var proxies []string
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)

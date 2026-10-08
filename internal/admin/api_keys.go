@@ -1,8 +1,6 @@
 package admin
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -92,14 +90,18 @@ func (a *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	key := input.Value
 	if key == "" {
-		var random [24]byte
-		if _, err := rand.Read(random[:]); err != nil {
+		var err error
+		key, err = config.GenerateAPIKey()
+		if err != nil {
 			writeAdminError(w, 500, "generation_failed", "无法生成密钥")
 			return
 		}
-		key = "sk-local-" + hex.EncodeToString(random[:])
 	}
-	_, err := a.manager.Update(func(cfg *config.Config) error { return addAPIKey(cfg, strings.TrimSpace(input.Name), key) })
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = "自动生成 Key"
+	}
+	_, err := a.manager.Update(func(cfg *config.Config) error { return addAPIKey(cfg, name, key) })
 	if err != nil {
 		writeAdminError(w, 400, "key_create_failed", a.manager.Redact(err.Error()))
 		return

@@ -283,7 +283,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			break
 		}
-		node := cursor.Next()
+		node := cursor.NextForModel(route.ID)
 		if node == nil {
 			break
 		}
@@ -302,7 +302,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		}
 		setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
 		started := time.Now()
-		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.cfg.Performance.BodyIdleTimeout(route.ProtocolFor(config.TierZen)))
 		duration := time.Since(started)
 		if ctx.Err() != nil {
 			// The parent budget expired while this attempt was in flight. Its
@@ -314,7 +314,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			break
 		}
-		g.observeAnonymousResult(ctx, node, resp, err)
+		g.observeAnonymousResult(ctx, node, route.ID, resp, err)
 		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
@@ -338,17 +338,20 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 }
 
 // anonymousCoreTools are the tool names the anonymous free tier expects on
-// an agent-shaped request. Requests without them are rejected with 403
-// FreeTierError. Only the names matter; the gateway synthesizes minimal
-// definitions for whichever ones the downstream client did not declare.
-var anonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
+// an agent-shaped request. Current Zen free-tier validation requires the
+// canonical quartet bash + glob + grep + read; extra/fake names are not needed.
+// Requests declaring fewer than this quartet can be rejected with 403
+// FreeTierError, so the gateway synthesizes only the missing canonical tools.
+var anonymousCoreTools = []string{"bash", "glob", "grep", "read"}
 
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
-// free tier: streaming enabled plus the core agent tools present. Bodies
+// free tier: streaming enabled plus the canonical agent tools present. Bodies
 // that already satisfy both (or are not JSON objects) are returned
-// unchanged. System One payloads are decision requests, not agent traffic, so
-// they are forwarded verbatim; injecting streaming or tool definitions would
-// make the upstream reject them.
+// unchanged. If the client supplied no tools, synthesized gate tools are marked
+// non-callable so the compatibility shim cannot change model behavior.
+// System One payloads are decision requests, not agent traffic, so they are
+// forwarded verbatim; injecting streaming or tool definitions would make the
+// upstream reject them.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if protocol == wire.SystemOne {
 		return body
@@ -406,6 +409,14 @@ func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol) bool {
 	raw, exists := payload["tools"]
 	if !exists {
 		payload["tools"] = anonymousToolset(protocol, nil)
+		// The synthesized tools exist only to satisfy the upstream anonymous
+		// lane fingerprint. They are not client capabilities and must not become
+		// callable when the original request had no tools.
+		if protocol == wire.Chat && payload["tool_choice"] == nil {
+			payload["tool_choice"] = "none"
+		} else if protocol == wire.Responses && payload["tool_choice"] == nil {
+			payload["tool_choice"] = "auto"
+		}
 		return true
 	}
 	items, ok := raw.([]any)
@@ -578,7 +589,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		return nil, err, 0
 	}
 	started := time.Now()
-	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.cfg.Performance.BodyIdleTimeout(route.ProtocolFor(override.Tier)))
 	duration := time.Since(started)
 	g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+1, keyID, "key", false, proxy, resp, err, duration)
 	if err != nil {
@@ -647,7 +658,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		keyID := config.KeyDisplayID(node.key)
 		setRequestCredential(ctx, route.Tier, keyID, "key", false, proxy)
 		attemptStarted := time.Now()
-		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.cfg.Performance.BodyIdleTimeout(route.Protocol))
 		attemptDuration := time.Since(attemptStarted)
 		if ctx.Err() != nil {
 			// The request budget expired while this attempt was in flight. A
@@ -705,16 +716,16 @@ func (g *Gateway) observeKeyResult(ctx context.Context, nodes *nodePool, node *u
 	}
 }
 
-func (g *Gateway) observeAnonymousResult(ctx context.Context, node *anonymousNode, resp *http.Response, err error) {
+func (g *Gateway) observeAnonymousResult(ctx context.Context, node *anonymousNode, model string, resp *http.Response, err error) {
 	if isDiagnosticRequest(ctx) {
 		return
 	}
 	status := upstreamStatus(resp)
 	g.syncProxyResult(ctx, node.proxy, status, err)
 	if err == nil && status/100 == 2 {
-		g.anonymous.MarkSuccess(node)
+		g.anonymous.MarkSuccessForModel(node, model)
 	} else {
-		g.anonymous.MarkFailure(node, resp, err)
+		g.anonymous.MarkFailureForModel(node, model, resp, err)
 	}
 }
 

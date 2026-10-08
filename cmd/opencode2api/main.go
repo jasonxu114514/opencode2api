@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,17 +17,37 @@ import (
 	"opencode2api/internal/config"
 	"opencode2api/internal/gateway"
 	"opencode2api/internal/telemetry"
+	"opencode2api/internal/updater"
 )
 
 // version remains the linker injection point used by release builds.
 var version = "dev"
 
 func main() {
+	if updater.IsHelper(os.Args) {
+		if err := updater.RunHelper(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "update helper failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	buildinfo.Version = version
+	generateKey := flag.Bool("generate-key", false, "generate a high-entropy local API key and exit")
 	configPath := flag.String("config", "config.json", "path to config.json")
 	listen := flag.String("listen", "", "override the configured API listen address")
 	webListen := flag.String("web-listen", "", "override the configured WebUI listen address")
 	flag.Parse()
+
+	if *generateKey {
+		key, err := config.GenerateAPIKey()
+		if err != nil {
+			slog.Error("failed to generate API key", "error", err)
+			os.Exit(1)
+		}
+		fmt.Println(key)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -55,6 +76,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer manager.Shutdown()
+
+	updater.Start(ctx, updater.Options{
+		CurrentVersion: buildinfo.Version,
+		Executable:     "",
+		Args:           os.Args[1:],
+		Logger:         logger,
+		OnRestart:      cancel,
+	})
 
 	apiServer := &http.Server{
 		Addr: cfg.Listen, Handler: manager.Handler(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,

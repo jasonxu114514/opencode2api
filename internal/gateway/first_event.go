@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 var errFirstEventTimeout = fmt.Errorf("upstream first SSE event timed out: %w", context.DeadlineExceeded)
+var errBodyIdleTimeout = errors.New("upstream SSE body idle timeout")
 
 type attemptBody struct {
 	io.Reader
@@ -28,8 +30,91 @@ func (b *attemptBody) Close() error {
 // Wait before returning a successful SSE response to the retry loop, while
 // nothing has been committed downstream. Keep every byte for native forwarding.
 // Comments and incomplete frames do not count as the first event.
-func doInferenceAttempt(client *http.Client, req *http.Request, timeout time.Duration) (*http.Response, error) {
-	if timeout <= 0 || strings.HasSuffix(req.URL.Path, "/systemone") {
+// idleTimeoutBody prevents an established SSE stream from hanging forever
+// after the first event. It closes the underlying response when no body bytes
+// arrive within timeout; the blocked Read then returns the dedicated sentinel.
+type idleTimeoutBody struct {
+	body     io.ReadCloser
+	timeout  time.Duration
+	mu       sync.Mutex
+	timer    *time.Timer
+	timedOut bool
+	closed   bool
+}
+
+func newIdleTimeoutBody(body io.ReadCloser, timeout time.Duration) io.ReadCloser {
+	if timeout <= 0 || body == nil {
+		return body
+	}
+	return &idleTimeoutBody{body: body, timeout: timeout}
+}
+
+func (b *idleTimeoutBody) armLocked() {
+	if b.timeout <= 0 || b.closed || b.timedOut {
+		return
+	}
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.timeout, b.fire)
+		return
+	}
+	b.timer.Reset(b.timeout)
+}
+
+func (b *idleTimeoutBody) fire() {
+	b.mu.Lock()
+	if b.closed || b.timedOut {
+		b.mu.Unlock()
+		return
+	}
+	b.timedOut = true
+	b.mu.Unlock()
+	_ = b.body.Close()
+}
+
+func (b *idleTimeoutBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
+	b.armLocked()
+	b.mu.Unlock()
+
+	n, err := b.body.Read(p)
+
+	b.mu.Lock()
+	timedOut := b.timedOut
+	if err != nil {
+		if b.timer != nil {
+			b.timer.Stop()
+		}
+	} else if !timedOut && !b.closed {
+		b.armLocked()
+	}
+	b.mu.Unlock()
+
+	if timedOut {
+		return 0, errBodyIdleTimeout
+	}
+	return n, err
+}
+
+func (b *idleTimeoutBody) Close() error {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closed = true
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	b.mu.Unlock()
+	return b.body.Close()
+}
+
+func doInferenceAttempt(client *http.Client, req *http.Request, timeout time.Duration, bodyIdleTimeout time.Duration) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/systemone") {
 		return client.Do(req)
 	}
 	ctx, cancel := context.WithCancelCause(req.Context())
@@ -42,13 +127,18 @@ func doInferenceAttempt(client *http.Client, req *http.Request, timeout time.Dur
 		resp.Body = &attemptBody{Reader: resp.Body, body: resp.Body, cancel: cancel}
 		return resp, nil
 	}
-	timer := time.AfterFunc(timeout, func() { cancel(errFirstEventTimeout) })
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.AfterFunc(timeout, func() { cancel(errFirstEventTimeout) })
+	}
 	reader := bufio.NewReader(resp.Body)
 	prefix, err := readFirstEvent(reader)
-	stopped := timer.Stop()
-	if !stopped && ctx.Err() == nil {
-		// Stop(false) means the callback may still be about to run.
-		cancel(errFirstEventTimeout)
+	if timer != nil {
+		stopped := timer.Stop()
+		if !stopped && ctx.Err() == nil {
+			// Stop(false) means the callback may be about to run concurrently.
+			cancel(errFirstEventTimeout)
+		}
 	}
 	if cause := context.Cause(ctx); cause != nil {
 		err = cause
@@ -58,7 +148,8 @@ func doInferenceAttempt(client *http.Client, req *http.Request, timeout time.Dur
 		resp.Body.Close()
 		return nil, err
 	}
-	resp.Body = &attemptBody{Reader: io.MultiReader(bytes.NewReader(prefix), reader), body: resp.Body, cancel: cancel}
+	body := &attemptBody{Reader: io.MultiReader(bytes.NewReader(prefix), reader), body: resp.Body, cancel: cancel}
+	resp.Body = newIdleTimeoutBody(body, bodyIdleTimeout)
 	return resp, nil
 }
 
