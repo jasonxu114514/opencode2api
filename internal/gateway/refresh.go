@@ -82,8 +82,11 @@ func (g *Gateway) restoreProxy(proxy *proxyTransport) (zenMoved, goMoved int) {
 	}
 	zenMoved = g.zenNodes.RestoreProxy(proxy.index)
 	goMoved = g.goNodes.RestoreProxy(proxy.index)
-	if zenMoved+goMoved > 0 {
-		g.logger.Info("proxy connectivity restored", "component", "proxy", "event", "proxy_restored", "proxy", config.RedactURL(proxy.name), "zen_keys_moved", zenMoved, "go_keys_moved", goMoved)
+	// The anonymous lane carries its own per-proxy cooldowns; key recovery
+	// alone would leave it skipped after an outage-era failure.
+	anonCleared := g.anonymous.RestoreProxy(proxy)
+	if zenMoved+goMoved > 0 || anonCleared > 0 {
+		g.logger.Info("proxy connectivity restored", "component", "proxy", "event", "proxy_restored", "proxy", config.RedactURL(proxy.name), "zen_keys_moved", zenMoved, "go_keys_moved", goMoved, "anonymous_cleared", anonCleared)
 	}
 	return zenMoved, goMoved
 }

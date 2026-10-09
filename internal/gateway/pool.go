@@ -104,12 +104,42 @@ func (c *anonymousCursor) Next() *anonymousNode {
 	return nil
 }
 
+// maxRetryAfterMultiplier bounds an upstream Retry-After header to the same
+// 8x ceiling as the exponential backoff below. Without a cap, a single quota
+// response can cool a lane for hours; the anonymous lane skips cooling nodes
+// outright (see anonymousCursor.Next), so that reads as a permanent outage
+// and traffic falls through to key lanes until the process restarts.
+const maxRetryAfterMultiplier = 8
+
 func (p *anonymousPool) MarkSuccess(node *anonymousNode) {
 	if node == nil {
 		return
 	}
 	node.failures.Store(0)
 	node.cooldownUntil.Store(0)
+}
+
+// RestoreProxy clears cooldowns for anonymous nodes bound to a recovered
+// proxy, mirroring nodePool.RestoreProxy for key nodes. Without this, an
+// outage-era cooldown survives the proxy's recovery and the anonymous lane
+// stays skipped even though the route is healthy again.
+func (p *anonymousPool) RestoreProxy(proxy *proxyTransport) int {
+	if p == nil || proxy == nil {
+		return 0
+	}
+	cleared := 0
+	for _, node := range p.nodes {
+		if node.proxy != proxy {
+			continue
+		}
+		if node.cooldownUntil.Load() == 0 && node.failures.Load() == 0 {
+			continue
+		}
+		node.failures.Store(0)
+		node.cooldownUntil.Store(0)
+		cleared++
+	}
+	return cleared
 }
 
 func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
@@ -123,7 +153,7 @@ func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, er
 	delay := p.cooldown * time.Duration(1<<min(failures-1, 3))
 	if resp != nil {
 		if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > delay {
-			delay = retryAfter
+			delay = min(retryAfter, p.cooldown*time.Duration(maxRetryAfterMultiplier))
 		}
 	}
 	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
@@ -484,7 +514,7 @@ func (p *nodePool) MarkFailure(node *upstreamNode, resp *http.Response, err erro
 	delay := p.cooldown * multiplier
 	if resp != nil {
 		if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > delay {
-			delay = retryAfter
+			delay = min(retryAfter, p.cooldown*time.Duration(maxRetryAfterMultiplier))
 		}
 	}
 	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
