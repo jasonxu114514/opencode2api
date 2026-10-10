@@ -892,11 +892,32 @@ func responsesReasoning(value any) any {
 	}
 }
 
+// floorResponsesMaxTokens keeps tiny downstream budgets (background titles,
+// probes) from failing Zen responses validation, which requires
+// max_output_tokens >= 16. Larger budgets pass through untouched.
+func floorResponsesMaxTokens(v any) any {
+	switch n := v.(type) {
+	case float64:
+		if n > 0 && n < 16 {
+			return float64(16)
+		}
+	case int:
+		if n > 0 && n < 16 {
+			return 16
+		}
+	case int64:
+		if n > 0 && n < 16 {
+			return int64(16)
+		}
+	}
+	return v
+}
+
 func encodeResponsesRequest(request bridgeRequest) map[string]any {
 	output := map[string]any{"model": request.Model, "stream": request.Stream}
 	jsonutil.Put(output, "temperature", request.Temperature)
 	jsonutil.Put(output, "top_p", request.TopP)
-	jsonutil.Put(output, "max_output_tokens", request.MaxTokens)
+	jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(request.MaxTokens))
 	jsonutil.Put(output, "stop", request.Stop)
 	jsonutil.Put(output, "metadata", request.Metadata)
 	if len(request.System) > 0 {
