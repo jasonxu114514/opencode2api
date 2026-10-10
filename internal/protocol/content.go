@@ -282,7 +282,11 @@ func encodeAnthropicBlocks(blocks []bridgeBlock) []any {
 			}
 			parts = append(parts, map[string]any{"type": "tool_use", "id": block.ID, "name": block.Name, "input": input})
 		case "tool_result":
-			parts = append(parts, map[string]any{"type": "tool_result", "tool_use_id": block.CallID, "content": block.Result, "is_error": block.IsError})
+			content := block.Result
+			if blocks, ok := content.([]bridgeBlock); ok {
+				content = encodeAnthropicBlocks(blocks)
+			}
+			parts = append(parts, map[string]any{"type": "tool_result", "tool_use_id": block.CallID, "content": content, "is_error": block.IsError})
 		case "reasoning":
 			if block.Encrypted != "" {
 				parts = append(parts, map[string]any{"type": "redacted_thinking", "data": block.Encrypted})

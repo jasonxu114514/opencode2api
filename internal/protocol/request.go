@@ -564,6 +564,22 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	default:
 		return request, fmt.Errorf("unsupported input protocol %q", protocol)
 	}
+	for i := range request.Messages {
+		for j := range request.Messages[i].Blocks {
+			block := &request.Messages[i].Blocks[j]
+			if block.Kind != "tool_result" || protocol == Chat {
+				continue
+			}
+			result, err := decodeToolImages(protocol, block.Result)
+			if err != nil {
+				return request, fmt.Errorf("messages[%d].tool_result[%d]: %w", i, j, err)
+			}
+			if _, images := result.([]bridgeBlock); images && block.CallID == "" {
+				return request, fmt.Errorf("messages[%d]: tool image result requires a call ID", i)
+			}
+			block.Result = result
+		}
+	}
 	return request, nil
 }
 
@@ -782,13 +798,21 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 			}
 		}
 		if len(pending) == 0 && len(pendingOrder) > 0 {
+			var attachments []map[string]any
 			for _, id := range pendingOrder {
 				result := pendingResults[id]
+				text, images := chatToolImages(result)
+				if len(images) > 0 {
+					attachments = append(attachments, map[string]any{"role": "user", "content": encodeChatBlocks(images)})
+				}
 				messages = append(messages, map[string]any{
 					"role":         "tool",
 					"tool_call_id": id,
-					"content":      bridgeToolResultContent(result.Result),
+					"content":      text,
 				})
+			}
+			for _, attachment := range attachments {
+				messages = append(messages, attachment)
 			}
 			flushDeferred()
 			pendingOrder = nil
@@ -981,7 +1005,7 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
 					"call_id": block.CallID,
-					"output":  bridgeToolResultContent(block.Result),
+					"output":  responsesToolContent(block.Result),
 				})
 			}
 		}
