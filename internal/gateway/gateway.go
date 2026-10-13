@@ -38,6 +38,9 @@ type Gateway struct {
 	catalog      *models.Catalog
 	monitor      *telemetry.Monitor
 	availability *models.AvailabilityStore
+	// attemptTimeout bounds a whole upstream attempt (dial + write + headers +
+	// first event), not just the header wait. Zero keeps the legacy behavior.
+	attemptTimeout time.Duration
 }
 
 func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
@@ -62,15 +65,16 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 	catalog := models.NewCatalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	return &Gateway{
-		cfg:        cfg,
-		rotation:   rotationManager,
-		logger:     logger,
-		transports: transports,
-		zenNodes:   zenNodes,
-		goNodes:    goNodes,
-		anonymous:  newAnonymousPool(cfg.Anonymous, transports, cooldown),
-		catalog:    catalog,
-		monitor:    monitor,
+		cfg:            cfg,
+		rotation:       rotationManager,
+		logger:         logger,
+		transports:     transports,
+		zenNodes:       zenNodes,
+		goNodes:        goNodes,
+		anonymous:      newAnonymousPool(cfg.Anonymous, transports, cooldown),
+		catalog:        catalog,
+		monitor:        monitor,
+		attemptTimeout: cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second),
 	}, nil
 }
 
