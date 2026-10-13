@@ -56,7 +56,7 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	)
 	return RequestIDs{
 		Session:       session,
-		Request:       RandomID("req", 16),
+		Request:       NewZenRequestID(),
 		Project:       StableID("prj", projectSignal),
 		ParentSession: parentSession,
 	}
@@ -93,6 +93,10 @@ func StableID(prefix, value string) string {
 // 403 FreeTierError, so the timestamp half must be minted, not hashed.
 var canonicalSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
 
+// canonicalRequestPattern mirrors the session shape for request IDs:
+// "msg_" + 12 lowercase hex characters + 14 Base62 characters.
+var canonicalRequestPattern = regexp.MustCompile(`^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // sessionCacheLimit bounds the signal-to-session cache. Conversation seeds can
@@ -126,11 +130,17 @@ func CanonicalSessionID(signal string) string {
 	randomPart := base62Fixed(new(big.Int).SetBytes(sum[6:16]), 14)
 	id := "ses_" + mintedTimePrefix() + randomPart
 	sessionCacheMu.Lock()
+	defer sessionCacheMu.Unlock()
 	if len(sessionCache) >= sessionCacheLimit {
 		sessionCache = make(map[string]string)
 	}
+	// A concurrent first mint for the same signal may have stored an ID
+	// while this one was being minted; converge on the stored value so
+	// every caller for one conversation shares a single upstream session.
+	if existing, ok := sessionCache[key]; ok {
+		return existing
+	}
 	sessionCache[key] = id
-	sessionCacheMu.Unlock()
 	return id
 }
 
@@ -141,6 +151,24 @@ func mintedTimePrefix() string {
 	counter := sessionCounter.Add(1) & 0xfff
 	current := uint64(time.Now().UnixMilli())*0x1000 + counter
 	return fmt.Sprintf("%012x", ^current&0xFFFFFFFFFFFF)
+}
+
+// NewZenRequestID mints an x-opencode-request value in the official client's
+// ascending-timestamp shape ("msg_" + ascending 12 hex + 14 Base62), one per
+// upstream request. The OpenCode client encodes request time as
+// unix_ms*0x1000+counter without applying the session's bitwise inversion.
+// Zen currently validates only the session's timestamp, but the request
+// header is the next plausible checkpoint, and sending the canonical shape
+// costs nothing while keeping the gateway indistinguishable from the CLI.
+func NewZenRequestID() string {
+	counter := sessionCounter.Add(1) & 0xfff
+	current := uint64(time.Now().UnixMilli())*0x1000 + counter
+	buf := make([]byte, 14)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	randomPart := base62Fixed(new(big.Int).SetBytes(buf), 14)
+	return "msg_" + fmt.Sprintf("%012x", current&0xFFFFFFFFFFFF) + randomPart
 }
 
 func base62Fixed(n *big.Int, width int) string {
