@@ -207,7 +207,7 @@ func (g *Gateway) refreshZen(ctx context.Context) []string {
 	if !g.cfg.Anonymous {
 		return nil
 	}
-	return g.refreshAnonymousTier(ctx, g.cfg.Upstream.Zen)
+	return g.refreshAnonymousTier(ctx, g.cfg.Upstream.Anonymous)
 }
 
 func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []string {

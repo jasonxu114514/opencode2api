@@ -8,7 +8,8 @@
   "proxyfile": "",
   "upstream": {
     "zen": "https://opencode.ai/zen",
-    "go": "https://opencode.ai/zen/go"
+    "go": "https://opencode.ai/zen/go",
+    "anonymous": "https://opencode.ai/inference"
   },
   "retry": {
     "max_attempts": 3,

@@ -54,6 +54,10 @@ type ReasoningConfig struct {
 type UpstreamConfig struct {
 	Zen string `json:"zen"`
 	Go  string `json:"go"`
+	// Anonymous is the base URL used by the keyless free-tier lane. Upstream
+	// moved keyless inference off /zen onto its own host, so the anonymous lane
+	// no longer shares the Zen base with the keyed lanes.
+	Anonymous string `json:"anonymous"`
 }
 
 type RetryConfig struct {
@@ -153,7 +157,7 @@ func Load(path string) (Config, error) {
 	}
 	cfg := Config{
 		Listen:      "127.0.0.1:8080",
-		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go"},
+		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
 		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15, StreamContinuation: true, StreamContinuationMax: 1, StreamContinuationTimeoutSeconds: 60},
@@ -194,7 +198,11 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	cfg.Upstream.Zen = strings.TrimSpace(cfg.Upstream.Zen)
 	cfg.Upstream.Go = strings.TrimSpace(cfg.Upstream.Go)
-	for name, raw := range map[string]string{"upstream.zen": cfg.Upstream.Zen, "upstream.go": cfg.Upstream.Go} {
+	cfg.Upstream.Anonymous = strings.TrimSpace(cfg.Upstream.Anonymous)
+	if cfg.Upstream.Anonymous == "" {
+		cfg.Upstream.Anonymous = "https://opencode.ai/inference"
+	}
+	for name, raw := range map[string]string{"upstream.zen": cfg.Upstream.Zen, "upstream.go": cfg.Upstream.Go, "upstream.anonymous": cfg.Upstream.Anonymous} {
 		u, err := url.Parse(strings.TrimSpace(raw))
 		if err != nil || u.Host == "" || (strings.ToLower(u.Scheme) != "http" && strings.ToLower(u.Scheme) != "https") {
 			return Config{}, fmt.Errorf("%s must be an http or https URL", name)

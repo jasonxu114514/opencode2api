@@ -75,20 +75,20 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	}
 	ids := identity.RequestIDs{Session: identity.CanonicalSessionID("availability:" + model), Project: identity.StableID("prj", "opencode2api:default-project")}
 	type lane struct {
-		key, name string
-		client    *http.Client
+		key, name, baseURL string
+		client             *http.Client
 	}
 	var lanes []lane
 	if g.cfg.Anonymous {
 		cursor := g.anonymous.CursorFor(ids.Session)
 		if node := cursor.Next(); node != nil {
-			lanes = append(lanes, lane{anonymousZenKey, "anonymous", node.proxy.client})
+			lanes = append(lanes, lane{anonymousZenKey, "anonymous", g.cfg.Upstream.Anonymous, node.proxy.client})
 		}
 	}
 	cursor := g.zenNodes.CursorFor(ids.Session)
 	if node := cursor.Next(); node != nil {
 		if proxy := g.zenNodes.Proxy(node); proxy != nil {
-			lanes = append(lanes, lane{node.key, "zen", proxy.client})
+			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, proxy.client})
 		}
 	}
 	result := probeResult{reason: "no_probe_channel"}
@@ -98,7 +98,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 			return probeResult{reason: "canceled"}
 		}
 		run := func(effort string) probeResult {
-			return g.probeAttempt(ctx, lane.client, lane.key, model, protocol, ids, effort)
+			return g.probeAttempt(ctx, lane.client, lane.baseURL, lane.key, model, protocol, ids, effort)
 		}
 		result = run("")
 		result.channel = lane.name
@@ -142,7 +142,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	return result
 }
 
-func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string) probeResult {
+func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string) probeResult {
 	b, err := probePayload(model, protocol, effort)
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
@@ -150,7 +150,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, key,
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	ids.Request = identity.RandomID("req", 16)
-	req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Zen, protocol, b, ids, key)
+	req, err := newUpstreamRequest(ctx, baseURL, protocol, b, ids, key)
 	if err != nil {
 		return probeResult{reason: "request_creation_error"}
 	}
