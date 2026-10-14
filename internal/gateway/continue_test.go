@@ -21,7 +21,7 @@ import (
 )
 
 func coreToolset() []any {
-	names := []string{"bash", "edit", "glob", "grep", "read"}
+	names := []string{"shell", "edit", "glob", "grep", "read"}
 	tools := make([]any, 0, len(names))
 	for _, name := range names {
 		tools = append(tools, map[string]any{
@@ -210,7 +210,7 @@ func TestResumeSegmentUsesClientContextAfterInitialBudgetExpires(t *testing.T) {
 	g := &Gateway{
 		cfg: config.Config{
 			Anonymous:   true,
-			Upstream:    config.UpstreamConfig{Zen: server.URL},
+			Upstream:    config.UpstreamConfig{Zen: server.URL, Anonymous: server.URL},
 			Performance: performance,
 		},
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -272,7 +272,7 @@ func TestResumeSegmentTimeoutCancelsBeforeFirstEvent(t *testing.T) {
 		t.Fatalf("newTransportPool: %v", err)
 	}
 	g := &Gateway{
-		cfg:       config.Config{Anonymous: true, Upstream: config.UpstreamConfig{Zen: server.URL}, Performance: performance},
+		cfg:       config.Config{Anonymous: true, Upstream: config.UpstreamConfig{Zen: server.URL, Anonymous: server.URL}, Performance: performance},
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		anonymous: newAnonymousPool(true, transports, time.Second),
 	}
@@ -322,7 +322,7 @@ func TestResumeSegmentStopsBudgetAfterFirstEvent(t *testing.T) {
 	}
 	meta := &telemetry.RequestMeta{}
 	g := &Gateway{
-		cfg:       config.Config{Anonymous: true, Upstream: config.UpstreamConfig{Zen: server.URL}, Performance: performance},
+		cfg:       config.Config{Anonymous: true, Upstream: config.UpstreamConfig{Zen: server.URL, Anonymous: server.URL}, Performance: performance},
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		anonymous: newAnonymousPool(true, transports, time.Second),
 	}
