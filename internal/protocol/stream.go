@@ -158,6 +158,11 @@ type StreamResumer interface {
 	ResumeSegment(partial string) (io.Reader, error)
 }
 
+type StreamResumeObserver interface {
+	ResumeEligible(visibleBytes, reasoningBytes int, toolSeen bool)
+	ResumeSkipped(reason string, visibleBytes, reasoningBytes int, toolSeen bool)
+}
+
 // ForwardStream relays one upstream SSE stream to the client with no resume
 // support; it is the thin wrapper that pins the historical behavior.
 func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
@@ -175,8 +180,10 @@ type streamUsageObserver struct {
 	// text accumulates the visible deltas already delivered downstream. A
 	// mid-stream resume needs exactly this text to build the continuation
 	// request, so it is capped at 1 MiB to bound per-request memory.
-	text     strings.Builder
-	toolSeen bool
+	text           strings.Builder
+	toolSeen       bool
+	visibleBytes   int
+	reasoningBytes int
 }
 
 func newStreamUsageObserver(protocol Protocol) *streamUsageObserver {
@@ -266,11 +273,14 @@ func (observer *streamUsageObserver) consume(frame []byte) {
 			case "error":
 				observer.error = true
 			case "text":
+				observer.visibleBytes += len(event.Text)
 				// Stop appending once the cap is reached; the continuation
 				// body guard rejects partials this large anyway.
 				if event.Text != "" && observer.text.Len() < 1<<20 {
 					observer.text.WriteString(event.Text)
 				}
+			case "reasoning":
+				observer.reasoningBytes += len(event.Text) + len(event.Encrypted)
 			case "tool_start", "tool_delta":
 				observer.toolSeen = true
 			}

@@ -29,6 +29,7 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 		tornTail := observer.Pending()
 		usage := observer.Finish()
 		if observer.ErrorTermination() {
+			reportResumeSkipped(resumer, "upstream_error_event", observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 			closeCurrentIfNotFirst(reader, first)
 			if copyErr != nil {
 				return usage, observer.Reported(), copyErr
@@ -42,6 +43,7 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 		if ClientCanceled(ctx, copyErr) {
 			// A client that walked away must see no synthetic error and no
 			// resume attempt; the bytes would go nowhere.
+			reportResumeSkipped(resumer, "client_canceled", observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 			closeCurrentIfNotFirst(reader, first)
 			if copyErr == nil {
 				copyErr = ctx.Err()
@@ -50,6 +52,9 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 		}
 		// Unexpected termination — the only resume window.
 		if resumer != nil && resumes < maxResumes && observer.TextRunes() > 0 && !observer.ToolSeen() && !ClientCanceled(ctx, nil) {
+			if resumeObserver, ok := resumer.(StreamResumeObserver); ok {
+				resumeObserver.ResumeEligible(observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
+			}
 			tail := observer.TailRunes(200)
 			if terminator := missingRecordTerminator(tornTail); len(terminator) > 0 {
 				// The dead stream stopped mid-frame and those bytes are
@@ -78,6 +83,17 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 			}
 			// The resume failed; fall through and emit the in-band error
 			// with the ORIGINAL cause, exactly as the no-resume path does.
+		} else if resumer != nil {
+			reason := "resume_limit"
+			switch {
+			case resumes < maxResumes && observer.ToolSeen():
+				reason = "tool_seen"
+			case resumes < maxResumes && observer.TextRunes() == 0:
+				reason = "no_visible_text"
+			case resumes < maxResumes && ClientCanceled(ctx, nil):
+				reason = "client_canceled"
+			}
+			reportResumeSkipped(resumer, reason, observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 		}
 		cause := observer.ParseError()
 		if copyErr != nil {
@@ -106,6 +122,12 @@ func closeCurrentIfNotFirst(reader io.Reader, first io.Reader) {
 	}
 	if closer, ok := reader.(io.Closer); ok {
 		_ = closer.Close()
+	}
+}
+
+func reportResumeSkipped(resumer StreamResumer, reason string, visibleBytes, reasoningBytes int, toolSeen bool) {
+	if observer, ok := resumer.(StreamResumeObserver); ok {
+		observer.ResumeSkipped(reason, visibleBytes, reasoningBytes, toolSeen)
 	}
 }
 

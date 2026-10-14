@@ -46,8 +46,12 @@ const doneFrame = "data: [DONE]\n\n"
 const tornFragment = `data: {"id":"chatcmpl-test","choices":[{"delta":{"content":"wor`
 
 type fakeResumer struct {
-	calls   []string
-	segment func(partial string) (io.Reader, error)
+	calls        []string
+	skipped      []string
+	visibleBytes int
+	reasonBytes  int
+	toolSeen     bool
+	segment      func(partial string) (io.Reader, error)
 }
 
 func (f *fakeResumer) ResumeSegment(partial string) (io.Reader, error) {
@@ -56,6 +60,19 @@ func (f *fakeResumer) ResumeSegment(partial string) (io.Reader, error) {
 		return f.segment(partial)
 	}
 	return nil, errors.New("no continuation segment configured")
+}
+
+func (f *fakeResumer) ResumeEligible(visibleBytes, reasoningBytes int, toolSeen bool) {
+	f.visibleBytes = visibleBytes
+	f.reasonBytes = reasoningBytes
+	f.toolSeen = toolSeen
+}
+
+func (f *fakeResumer) ResumeSkipped(reason string, visibleBytes, reasoningBytes int, toolSeen bool) {
+	f.skipped = append(f.skipped, reason)
+	f.visibleBytes = visibleBytes
+	f.reasonBytes = reasoningBytes
+	f.toolSeen = toolSeen
 }
 
 var createdPattern = regexp.MustCompile(`"created":\d+`)
@@ -210,6 +227,9 @@ func TestForwardStreamResumable_toolDeltaBlocksResume(t *testing.T) {
 	if len(resumer.calls) != 0 {
 		t.Fatalf("resumer called %d times after a tool delta, want 0", len(resumer.calls))
 	}
+	if len(resumer.skipped) != 1 || resumer.skipped[0] != "tool_seen" || !resumer.toolSeen {
+		t.Fatalf("resume skip telemetry = reasons:%v tool_seen:%t", resumer.skipped, resumer.toolSeen)
+	}
 	if !strings.Contains(rec.Body.String(), "upstream_error") {
 		t.Fatalf("expected an in-band error frame, got %q", rec.Body.String())
 	}
@@ -245,6 +265,28 @@ func TestForwardStreamResumable_noVisibleTextSkipsResume(t *testing.T) {
 	if len(resumer.calls) != 0 {
 		t.Fatalf("resumer called %d times without visible text, want 0", len(resumer.calls))
 	}
+	if len(resumer.skipped) != 1 || resumer.skipped[0] != "no_visible_text" {
+		t.Fatalf("resume skip telemetry = %v, want [no_visible_text]", resumer.skipped)
+	}
+}
+
+func TestForwardStreamResumable_reasoningOnlyDoesNotBecomeVisiblePartial(t *testing.T) {
+	torn := chatFrame(map[string]any{"reasoning_content": "private reasoning"}) + tornFragment
+	resumer := &fakeResumer{}
+	rec := httptest.NewRecorder()
+	_, _, err := ForwardStreamResumable(context.Background(), rec, strings.NewReader(torn), Chat, "test-model", resumer, 1)
+	if err == nil {
+		t.Fatal("expected an error for a stream with reasoning but no visible text")
+	}
+	if len(resumer.calls) != 0 {
+		t.Fatalf("resumer called %d times for reasoning-only output, want 0", len(resumer.calls))
+	}
+	if len(resumer.skipped) != 1 || resumer.skipped[0] != "no_visible_text" {
+		t.Fatalf("resume skip telemetry = %v, want [no_visible_text]", resumer.skipped)
+	}
+	if resumer.visibleBytes != 0 || resumer.reasonBytes == 0 {
+		t.Fatalf("resume byte telemetry = visible:%d reasoning:%d, want visible 0 and reasoning > 0", resumer.visibleBytes, resumer.reasonBytes)
+	}
 }
 
 func TestForwardStreamResumable_clientCanceledSkipsResumeAndErrorFrame(t *testing.T) {
@@ -259,6 +301,9 @@ func TestForwardStreamResumable_clientCanceledSkipsResumeAndErrorFrame(t *testin
 	}
 	if len(resumer.calls) != 0 {
 		t.Fatalf("resumer called %d times after client cancel, want 0", len(resumer.calls))
+	}
+	if len(resumer.skipped) != 1 || resumer.skipped[0] != "client_canceled" {
+		t.Fatalf("resume skip telemetry = %v, want [client_canceled]", resumer.skipped)
 	}
 	if strings.Contains(rec.Body.String(), "upstream_error") {
 		t.Fatalf("canceled client received an error frame: %q", rec.Body.String())
