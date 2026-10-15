@@ -451,6 +451,7 @@ func TestLongestOverlap(t *testing.T) {
 
 func TestObserverTextAccumulation(t *testing.T) {
 	observer := newStreamUsageObserver(Chat)
+	observer.trackContent = true
 	frame := roleFrame() + contentFrame("Hello")
 	if _, err := observer.Write([]byte(frame)); err != nil {
 		t.Fatalf("write: %v", err)
@@ -467,5 +468,93 @@ func TestObserverTextAccumulation(t *testing.T) {
 	}
 	if got := observer.TailRunes(3); got != "llo" {
 		t.Fatalf("TailRunes(3) = %q, want llo", got)
+	}
+}
+
+func TestObserverTrackContentDisabledSkipsCopies(t *testing.T) {
+	observer := newStreamUsageObserver(Chat)
+	frame := roleFrame() + contentFrame("Hello")
+	if _, err := observer.Write([]byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	observer.Finish()
+	if observer.Text() != "" {
+		t.Fatalf("Text() = %q, want empty when trackContent is off", observer.Text())
+	}
+	if observer.visibleBytes != 5 {
+		t.Fatalf("visibleBytes = %d, want 5 (bytes still counted)", observer.visibleBytes)
+	}
+}
+
+func TestLCPTrimReader_crossFrameOverlapTrimmed(t *testing.T) {
+	// Real Chat streams emit ~1 token per frame; a 5-rune overlap is split
+	// across frames, so single-frame LCP would never fire.
+	src := contentFrame("ABCDE") + contentFrame("FG") + doneFrame
+	out, err := io.ReadAll(newLCPTrimReader(strings.NewReader(src), "ABCDE"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(out)
+	if strings.Contains(got, `"content":"ABCDE"`) {
+		t.Fatalf("cross-frame overlap head not trimmed: %q", got)
+	}
+	if !strings.Contains(got, `"content":"FG"`) {
+		t.Fatalf("surviving content missing: %q", got)
+	}
+	if !strings.HasSuffix(got, doneFrame) {
+		t.Fatalf("terminator lost: %q", got)
+	}
+}
+
+func TestLCPTrimReader_crossFrameMultiByteOverlapTrimmed(t *testing.T) {
+	src := contentFrame("你好") + contentFrame("世界啊") + doneFrame
+	out, err := io.ReadAll(newLCPTrimReader(strings.NewReader(src), "你好世界"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(out)
+	if strings.Contains(got, `"content":"你好"`) {
+		t.Fatalf("multi-byte cross-frame head not trimmed: %q", got)
+	}
+	if !strings.Contains(got, `"content":"啊"`) {
+		t.Fatalf("multi-byte surviving content missing: %q", got)
+	}
+}
+
+func TestContinuationFrameFilter_dropsRoleAndReasoning(t *testing.T) {
+	reasoningFrame := chatFrame(map[string]any{"role": "assistant", "content": "", "reasoning": "thinking..."})
+	src := roleFrame() + reasoningFrame + contentFrame("Hello") + doneFrame
+	out, err := io.ReadAll(newContinuationFrameFilter(strings.NewReader(src)))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(out)
+	if strings.Contains(got, "thinking...") {
+		t.Fatalf("reasoning frame leaked through filter: %q", got)
+	}
+	if strings.Contains(got, `"content":""`) {
+		t.Fatalf("role head frame leaked through filter: %q", got)
+	}
+	if !strings.Contains(got, `"content":"Hello"`) {
+		t.Fatalf("content frame dropped by filter: %q", got)
+	}
+	if !strings.HasSuffix(got, doneFrame) {
+		t.Fatalf("terminator lost: %q", got)
+	}
+}
+
+func TestContinuationFrameFilter_keepsFinishAndUsage(t *testing.T) {
+	finish := `data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}` + "\n\n"
+	src := contentFrame("Hi") + finish + doneFrame
+	out, err := io.ReadAll(newContinuationFrameFilter(strings.NewReader(src)))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Fatalf("finish frame dropped: %q", got)
+	}
+	if !strings.Contains(got, `"total_tokens":15`) {
+		t.Fatalf("usage frame dropped: %q", got)
 	}
 }

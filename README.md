@@ -329,7 +329,7 @@ Comment markers are `#`, `;`, and `//` at the start of a line or after whitespac
 | `performance.max_idle_conns_per_host`   | `256`   | Idle connection limit per host and transport.          |
 | `performance.max_conns_per_host`        | `0`     | Connection limit per host; 0 is unlimited.             |
 | `performance.idle_conn_timeout_seconds` | `120`   | Idle connection lifetime.                              |
-| `performance.stream_continuation`       | `true`  | Silently resume a broken anonymous stream on a new exit. |
+| `performance.stream_continuation`       | `false` | Silently resume a broken anonymous stream on a new exit. |
 | `performance.stream_continuation_max`   | `1`     | Resumes allowed after the first mid-stream break.      |
 
 The per-attempt header timeout is capped by the request timeout. Set it below the total timeout if a slow upstream should leave time for fallback. Expired request contexts stop further attempts without penalizing unused keys or proxies.

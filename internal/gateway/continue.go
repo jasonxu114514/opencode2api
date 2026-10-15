@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/models"
-	wire "opencode2api/internal/protocol"
 	"opencode2api/internal/telemetry"
 )
 
@@ -220,8 +220,11 @@ func (r *gatewayStreamResumer) recordResumeFailure(reason string) {
 // buildContinuationBody appends the delivered partial plus the continuation
 // instruction to the original Zen body. A trailing assistant message is
 // merged in place so the request never carries two adjacent assistant turns;
-// every other field (tools, stream options, effort, ...) is preserved, and
-// prepareAnonymousBody re-asserts the anonymous free-tier shape.
+// every other field (tools, stream options, effort, ...) is preserved. The
+// anonymous free-tier shape is NOT re-asserted here: doAnonymousUpstream
+// already runs prepareAnonymousBody on every body it sends, so shaping here
+// as well was a redundant second pass (review: "prepareAnonymousBody called
+// twice").
 func buildContinuationBody(zenBody []byte, partial string, reasoning string) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(zenBody, &payload); err != nil {
@@ -233,11 +236,10 @@ func buildContinuationBody(zenBody []byte, partial string, reasoning string) ([]
 	}
 	if partial != "" {
 		if last, ok := messages[len(messages)-1].(map[string]any); ok && last["role"] == "assistant" {
-			content, ok := last["content"].(string)
-			if !ok {
-				return nil, errors.New("trailing assistant message has non-string content")
-			}
-			last["content"] = content + partial
+			// Multimodal turns carry content-part arrays; flatten the text
+			// parts so the partial can still merge (review: array content
+			// broke construction).
+			last["content"] = flattenMessageContent(last["content"]) + partial
 		} else {
 			messages = append(messages, map[string]any{"role": "assistant", "content": partial})
 		}
@@ -259,7 +261,28 @@ func buildContinuationBody(zenBody []byte, partial string, reasoning string) ([]
 	if err != nil {
 		return nil, errors.New("continuation body contains unsupported JSON values")
 	}
-	return prepareAnonymousBody(encoded, wire.Chat), nil
+	return encoded, nil
+}
+
+// flattenMessageContent renders a Chat message content value (string or
+// content-part array) as plain text.
+func flattenMessageContent(content any) string {
+	switch value := content.(type) {
+	case string:
+		return value
+	case []any:
+		var out strings.Builder
+		for _, part := range value {
+			if entry, ok := part.(map[string]any); ok {
+				if text, ok := entry["text"].(string); ok {
+					out.WriteString(text)
+				}
+			}
+		}
+		return out.String()
+	default:
+		return ""
+	}
 }
 
 // streamResumeLimit returns the number of resumes allowed after the first

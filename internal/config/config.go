@@ -92,12 +92,12 @@ type WebUIConfig struct {
 }
 
 // PerformanceConfig tunes transport pooling, attempt timeouts and the
-// mid-stream continuation fuse. StreamContinuation is enabled by default:
-// when an anonymous-lane SSE stream dies mid-flight after visible text was
-// delivered, the gateway fetches a continuation segment on another exit and
-// splices it into the same downstream stream. StreamContinuationMax is the
-// number of resumes allowed after the first break (1 = one resume); set
-// stream_continuation=false to keep the old behavior byte-for-byte.
+// mid-stream continuation fuse. StreamContinuation is opt-in (default
+// false): when an anonymous-lane SSE stream dies mid-flight after visible
+// text was delivered, the gateway can fetch a continuation segment on
+// another exit and splice it into the same downstream stream.
+// StreamContinuationMax is the number of resumes allowed after the first
+// break (1 = one resume); set stream_continuation=true to enable.
 // StreamContinuationTimeoutSeconds bounds each continuation fetch on its own
 // budget derived from the client connection, not from the request-level retry
 // timeout. Valid values are 1 through 86400 seconds.
@@ -165,7 +165,7 @@ func Load(path string) (Config, error) {
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
-		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15, StreamContinuation: true, StreamContinuationMax: 1, StreamContinuationTimeoutSeconds: 60},
+		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15, StreamContinuation: false, StreamContinuationMax: 1, StreamContinuationTimeoutSeconds: 60},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
 		WebUI:       WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
 		Prefer:      TierGo,

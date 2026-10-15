@@ -21,13 +21,30 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := newStreamUsageObserver(protocol)
+	observer.trackContent = resumer != nil
+	// Per-segment accounting: the continuation request replays the partial
+	// as prompt, so its reported Input would inflate the true first-segment
+	// cost and its Output alone would hide the delivered first-segment
+	// tokens. Input/Cached come from the first segment only; Output and
+	// Reasoning accumulate across segments (review: "wrong usage after
+	// continuation").
+	var total Usage
 	first := reader
 	resumes := 0
 	for {
 		_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
 		// Snapshot the torn tail before Finish clears the frame buffer.
 		tornTail := observer.Pending()
-		usage := observer.Finish()
+		segUsage := observer.Finish()
+		if resumes == 0 {
+			total.Input = segUsage.Input
+			total.Cached = segUsage.Cached
+			total.CacheCreation = segUsage.CacheCreation
+		}
+		total.Output += segUsage.Output
+		total.Reasoning += segUsage.Reasoning
+		total.Total = max(total.Total, total.Input+total.Output)
+		usage := total
 		if observer.ErrorTermination() {
 			reportResumeSkipped(resumer, "upstream_error_event", observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 			closeCurrentIfNotFirst(reader, first)
@@ -50,52 +67,57 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 			}
 			return usage, observer.Reported(), copyErr
 		}
-		canResumeText := observer.TextRunes() > 0
-		canResumeReasoning := observer.TextRunes() == 0 && observer.ReasoningRunes() > 0
 		// Unexpected termination — the only resume window.
-		if resumer != nil && resumes < maxResumes && (canResumeText || canResumeReasoning) && !observer.ToolSeen() && !ClientCanceled(ctx, nil) {
-			if resumeObserver, ok := resumer.(StreamResumeObserver); ok {
-				resumeObserver.ResumeEligible(observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
-			}
-			tail := observer.TailRunes(200)
-			if terminator := missingRecordTerminator(tornTail); len(terminator) > 0 {
-				// The dead stream stopped mid-frame and those bytes are
-				// already downstream; close the torn record now so neither
-				// the pings nor the continuation's first frame join it and
-				// get dropped by the client parser.
-				if _, err := w.Write(terminator); err != nil {
-					return usage, observer.Reported(), err
+		if resumer != nil && resumes < maxResumes && !observer.ToolSeen() && !ClientCanceled(ctx, nil) {
+			// Rune counting runs only when a resumer is mounted; the
+			// disabled path pays nothing (review: "disabled path not free").
+			canResumeText := observer.TextRunes() > 0
+			canResumeReasoning := !canResumeText && observer.ReasoningRunes() > 0
+			if canResumeText || canResumeReasoning {
+				if resumeObserver, ok := resumer.(StreamResumeObserver); ok {
+					resumeObserver.ResumeEligible(observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 				}
-				flusher.Flush()
-			}
-			next, resumeErr := resumeWithPing(ctx, w, flusher, resumer, observer.Text(), observer.Reasoning())
-			if resumeErr == nil {
-				closeCurrentIfNotFirst(reader, first)
-				// Clear the dead segment's parse fault so a clean
-				// continuation is not misclassified as failed; a systemic
-				// fault re-surfaces on the new segment by itself.
-				observer.parseErr = nil
-				if canResumeText {
-					reader = newLCPTrimReader(next, tail)
-				} else {
-					reader = next
+				tail := observer.TailRunes(200)
+				if terminator := missingRecordTerminator(tornTail); len(terminator) > 0 {
+					// The dead stream stopped mid-frame and those bytes are
+					// already downstream; close the torn record now so neither
+					// the pings nor the continuation's first frame join it and
+					// get dropped by the client parser.
+					if _, err := w.Write(terminator); err != nil {
+						return usage, observer.Reported(), err
+					}
+					flusher.Flush()
 				}
-				resumes++
-				continue
+				next, resumeErr := resumeWithPing(ctx, w, flusher, resumer, observer.Text(), observer.Reasoning())
+				if resumeErr == nil {
+					closeCurrentIfNotFirst(reader, first)
+					// Clear the dead segment's parse fault so a clean
+					// continuation is not misclassified as failed; a systemic
+					// fault re-surfaces on the new segment by itself.
+					observer.parseErr = nil
+					filtered := newContinuationFrameFilter(next)
+					if canResumeText {
+						reader = newLCPTrimReader(filtered, tail)
+					} else {
+						reader = filtered
+					}
+					resumes++
+					continue
+				}
+				if ClientCanceled(ctx, resumeErr) {
+					closeCurrentIfNotFirst(reader, first)
+					return usage, observer.Reported(), resumeErr
+				}
+				// The resume failed; fall through and emit the in-band error
+				// with the ORIGINAL cause, exactly as the no-resume path does.
+			} else {
+				reportResumeSkipped(resumer, "no_visible_text", observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 			}
-			if ClientCanceled(ctx, resumeErr) {
-				closeCurrentIfNotFirst(reader, first)
-				return usage, observer.Reported(), resumeErr
-			}
-			// The resume failed; fall through and emit the in-band error
-			// with the ORIGINAL cause, exactly as the no-resume path does.
 		} else if resumer != nil {
 			reason := "resume_limit"
 			switch {
 			case resumes < maxResumes && observer.ToolSeen():
 				reason = "tool_seen"
-			case resumes < maxResumes && observer.TextRunes() == 0 && observer.ReasoningRunes() == 0:
-				reason = "no_visible_text"
 			case resumes < maxResumes && ClientCanceled(ctx, nil):
 				reason = "client_canceled"
 			}
@@ -194,6 +216,11 @@ const lcpMaxOverlapRunes = 200
 
 const lcpMinOverlapRunes = 4
 
+// lcpMaxCollectFrames bounds how many leading frames the cross-frame overlap
+// scan buffers before deciding (review: single-frame LCP never fired on the
+// ~1-token-per-frame shape real Chat streams emit).
+const lcpMaxCollectFrames = 64
+
 type lcpTrimReader struct {
 	src     io.Reader
 	tail    string
@@ -203,13 +230,17 @@ type lcpTrimReader struct {
 	done    bool
 	srcEOF  bool
 	srcErr  error
+
+	frames  [][]byte
+	accText []rune
 }
 
 // newLCPTrimReader returns a frame-aware reader over a continuation segment.
-// Frames pass through unchanged until the first frame whose JSON carries a
-// non-empty choices[0].delta.content; that frame has its longest overlap with
-// the delivered tail trimmed. Every parse/rewrite failure passes the frame
-// through unchanged (fail-open): dedup must never break the stream.
+// The leading frames are buffered until enough content has accumulated to
+// decide the overlap (or a frame-count/terminator cap is hit); the overlap is
+// then trimmed across those frames and every later byte passes through
+// unchanged. Parse/rewrite failures pass buffered frames through unchanged
+// (fail-open): dedup must never break the stream.
 func newLCPTrimReader(src io.Reader, tail string) io.Reader {
 	return &lcpTrimReader{src: src, tail: tail, tmp: make([]byte, 32<<10)}
 }
@@ -233,9 +264,7 @@ func (reader *lcpTrimReader) Read(p []byte) (int, error) {
 			frame := make([]byte, index+width)
 			copy(frame, reader.buf[:index+width])
 			reader.buf = reader.buf[index+width:]
-			trimmed, done := reader.transform(frame)
-			reader.pending = trimmed
-			reader.done = done
+			reader.collect(frame)
 			continue
 		}
 		if reader.srcEOF {
@@ -272,40 +301,207 @@ func (reader *lcpTrimReader) Close() error {
 	return nil
 }
 
-// transform inspects one complete SSE frame and decides whether it is the
-// first text-carrying frame. The second return value reports whether the
-// scan is over and every later byte must pass through untouched.
-func (reader *lcpTrimReader) transform(frame []byte) ([]byte, bool) {
+// collect buffers one complete frame during the overlap scan and decides
+// when enough content has been seen to determine the trim.
+func (reader *lcpTrimReader) collect(frame []byte) {
+	if reader.done {
+		reader.pending = append(reader.pending, frame...)
+		return
+	}
 	data, ok := sseFrameData(frame)
 	if !ok {
-		// A comment or event-only frame carries no JSON to inspect; keep
+		// A comment or event-only frame carries no JSON; emit and keep
 		// scanning.
-		return frame, false
+		reader.pending = append(reader.pending, frame...)
+		return
 	}
 	if data == "[DONE]" {
-		return frame, true
+		reader.flushDecision()
+		reader.pending = append(reader.pending, frame...)
+		reader.done = true
+		return
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
-		// Unparseable data: fail open and stop scanning.
-		return frame, true
+		// Unparseable data: fail open with the buffered frames unchanged.
+		reader.flushUnchanged()
+		reader.pending = append(reader.pending, frame...)
+		reader.done = true
+		return
 	}
-	delta, text, ok := firstChatDelta(payload)
-	if !ok {
-		return frame, false
+	reader.frames = append(reader.frames, frame)
+	if _, text, ok := firstChatDelta(payload); ok {
+		reader.accText = append(reader.accText, []rune(text)...)
 	}
-	k := longestOverlap(text, reader.tail, lcpMaxOverlapRunes)
-	if k == 0 {
-		return frame, true
+	if len(reader.accText) >= lcpMaxOverlapRunes ||
+		(len(reader.tail) > 0 && len(reader.accText) >= len(reader.tail)) ||
+		len(reader.frames) >= lcpMaxCollectFrames {
+		reader.flushDecision()
+		reader.done = true
 	}
-	// k counts runes; slicing bytes would split multi-byte characters.
-	delta["content"] = string([]rune(text)[k:])
-	rewritten, err := json.Marshal(payload)
-	if err != nil {
-		// Rewrite failure: fail open with the original frame.
-		return frame, true
+}
+
+func (reader *lcpTrimReader) flushDecision() {
+	if len(reader.frames) == 0 {
+		return
 	}
-	return []byte("data: " + string(rewritten) + "\n\n"), true
+	k := longestOverlap(string(reader.accText), reader.tail, lcpMaxOverlapRunes)
+	reader.pending = append(reader.pending, reader.rewriteFrames(k)...)
+	reader.frames = nil
+	reader.accText = nil
+}
+
+func (reader *lcpTrimReader) flushUnchanged() {
+	for _, frame := range reader.frames {
+		reader.pending = append(reader.pending, frame...)
+	}
+	reader.frames = nil
+	reader.accText = nil
+}
+
+// rewriteFrames consumes k runes of overlap from the front of the buffered
+// content frames in order; fully consumed frames keep their envelope with an
+// empty content field so frame identity (id/created) is preserved.
+func (reader *lcpTrimReader) rewriteFrames(k int) []byte {
+	var out []byte
+	remaining := k
+	for _, frame := range reader.frames {
+		if remaining == 0 {
+			out = append(out, frame...)
+			continue
+		}
+		data, ok := sseFrameData(frame)
+		if !ok || data == "[DONE]" {
+			out = append(out, frame...)
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			out = append(out, frame...)
+			continue
+		}
+		delta, text, ok := firstChatDelta(payload)
+		if !ok {
+			out = append(out, frame...)
+			continue
+		}
+		runes := []rune(text)
+		if remaining >= len(runes) {
+			remaining -= len(runes)
+			delta["content"] = ""
+		} else {
+			delta["content"] = string(runes[remaining:])
+			remaining = 0
+		}
+		rewritten, err := json.Marshal(payload)
+		if err != nil {
+			out = append(out, frame...)
+			continue
+		}
+		out = append(out, []byte("data: "+string(rewritten)+"\n\n")...)
+	}
+	return out
+}
+
+// continuationFrameFilter drops the frames a fresh continuation segment
+// re-emits that the client already saw from the first segment: the role head,
+// reasoning deltas and empty-content noise frames. Parse failures pass
+// through unchanged (fail-open).
+type continuationFrameFilter struct {
+	src     io.Reader
+	pending []byte
+	buf     []byte
+	tmp     []byte
+	done    bool
+	srcEOF  bool
+	srcErr  error
+}
+
+func newContinuationFrameFilter(src io.Reader) io.Reader {
+	return &continuationFrameFilter{src: src, tmp: make([]byte, 32<<10)}
+}
+
+func (reader *continuationFrameFilter) Read(p []byte) (int, error) {
+	for len(reader.pending) == 0 {
+		if reader.done {
+			if len(reader.buf) > 0 {
+				reader.pending = reader.buf
+				reader.buf = nil
+				continue
+			}
+			if reader.srcEOF {
+				return 0, reader.srcErr
+			}
+			return reader.src.Read(p)
+		}
+		if index, width := nextSSEBoundary(reader.buf); index >= 0 {
+			frame := make([]byte, index+width)
+			copy(frame, reader.buf[:index+width])
+			reader.buf = reader.buf[index+width:]
+			if !dropContinuationFrame(frame) {
+				reader.pending = append(reader.pending, frame...)
+			}
+			continue
+		}
+		if reader.srcEOF {
+			reader.pending = reader.buf
+			reader.buf = nil
+			reader.done = true
+			continue
+		}
+		n, err := reader.src.Read(reader.tmp)
+		if n > 0 {
+			reader.buf = append(reader.buf, reader.tmp[:n]...)
+		}
+		if err != nil {
+			reader.srcEOF = true
+			if err != io.EOF {
+				reader.srcErr = err
+			} else {
+				reader.srcErr = io.EOF
+			}
+		}
+	}
+	n := copy(p, reader.pending)
+	reader.pending = reader.pending[n:]
+	return n, nil
+}
+
+func (reader *continuationFrameFilter) Close() error {
+	if closer, ok := reader.src.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func dropContinuationFrame(frame []byte) bool {
+	data, ok := sseFrameData(frame)
+	if !ok || data == "[DONE]" {
+		return false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return false
+	}
+	choices, _ := payload["choices"].([]any)
+	if len(choices) == 0 {
+		return false
+	}
+	choice, _ := choices[0].(map[string]any)
+	if choice == nil {
+		return false
+	}
+	if finish, _ := choice["finish_reason"].(string); finish != "" {
+		return false
+	}
+	delta, _ := choice["delta"].(map[string]any)
+	if delta == nil {
+		return false
+	}
+	if content, _ := delta["content"].(string); content != "" {
+		return false
+	}
+	return true
 }
 
 // sseFrameData joins a frame's data: lines via readSSE rules; false means no

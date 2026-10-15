@@ -324,7 +324,7 @@ direct
 | `performance.max_idle_conns_per_host`   | `256`  | 每个 Transport 对单个主机的空闲连接上限。        |
 | `performance.max_conns_per_host`        | `0`    | 单个主机的连接上限；0 表示不限制。               |
 | `performance.idle_conn_timeout_seconds` | `120`  | 空闲连接保留时间。                               |
-| `performance.stream_continuation`       | `true` | 静默续写：匿名车道流中断后换出口并拼进同一条 SSE 流。 |
+| `performance.stream_continuation`       | `false` | 静默续写：匿名车道流中断后换出口并拼进同一条 SSE 流。 |
 | `performance.stream_continuation_max`   | `1`    | 首次中断后允许的续写次数。                       |
 
 单次响应头超时不会超过请求总超时。希望慢节点仍能留出回退时间时，可以将它设为小于总超时的值。请求上下文过期后会停止后续尝试，不会惩罚尚未实际使用的 Key 或代理。

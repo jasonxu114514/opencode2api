@@ -152,6 +152,25 @@ func TestBuildContinuationBody_trailingAssistantMerged(t *testing.T) {
 	}
 }
 
+func TestBuildContinuationBody_arrayContentFlattened(t *testing.T) {
+	base := baseZenBody(t, []any{
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "part one "},
+			map[string]any{"type": "text", "text": "part two"},
+		}},
+	})
+	out, err := buildContinuationBody(base, "partial", "")
+	if err != nil {
+		t.Fatalf("buildContinuationBody with array content: %v", err)
+	}
+	payload := decodeContinuation(t, out)
+	messages := continuationMessages(t, payload)
+	if got := messageField(t, messages[1], "content"); got != "part one part twopartial" {
+		t.Fatalf("array content flatten = %q, want 'part one part twopartial'", got)
+	}
+}
+
 func TestResumeSegment_rejectsBadPartial(t *testing.T) {
 	resumer := &gatewayStreamResumer{}
 	if _, err := resumer.ResumeSegment("", ""); err == nil {

@@ -180,8 +180,12 @@ type streamUsageObserver struct {
 	// text accumulates the visible deltas already delivered downstream. A
 	// mid-stream resume needs exactly this text to build the continuation
 	// request, so it is capped at 1 MiB to bound per-request memory.
+	// trackContent gates both builders: without a mounted resumer the
+	// disabled path must not pay any copy cost (review: "disabled path
+	// not free").
 	text           strings.Builder
 	reasoning      strings.Builder
+	trackContent   bool
 	toolSeen       bool
 	visibleBytes   int
 	reasoningBytes int
@@ -283,12 +287,12 @@ func (observer *streamUsageObserver) consume(frame []byte) {
 				observer.visibleBytes += len(event.Text)
 				// Stop appending once the cap is reached; the continuation
 				// body guard rejects partials this large anyway.
-				if event.Text != "" && observer.text.Len() < 1<<20 {
+				if observer.trackContent && event.Text != "" && observer.text.Len() < 1<<20 {
 					observer.text.WriteString(event.Text)
 				}
 			case "reasoning":
 				observer.reasoningBytes += len(event.Text) + len(event.Encrypted)
-				if event.Text != "" && observer.reasoning.Len() < 512<<10 {
+				if observer.trackContent && event.Text != "" && observer.reasoning.Len() < 512<<10 {
 					observer.reasoning.WriteString(event.Text)
 				}
 			case "tool_start", "tool_delta":
