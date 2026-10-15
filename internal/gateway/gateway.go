@@ -210,6 +210,10 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 		defer cancel()
+		var streamState *anonymousStreamState
+		if g.cfg.Performance.StreamContinuation && external == wire.Chat {
+			requestCtx, streamState = withAnonymousStreamState(requestCtx)
+		}
 		resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
 		if err != nil {
 			finalTier := route.Tier
@@ -262,7 +266,22 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
+				if g.cfg.Performance.StreamContinuation && streamState != nil && upstreamRoute.Anonymous && upstreamRoute.Protocol == wire.Chat && len(bodies[config.TierZen]) > 0 {
+					resumer := &gatewayStreamResumer{
+						g:                   g,
+						clientCtx:           r.Context(),
+						streamState:         streamState,
+						continuationTimeout: g.cfg.Performance.StreamContinuationTimeout(),
+						route:               upstreamRoute,
+						ids:                 ids,
+						zenBody:             bodies[config.TierZen],
+						meta:                meta,
+						attemptOffset:       attemptOffsetFromMeta(meta),
+					}
+					usage, usageReported, err = wire.ForwardStreamResumable(r.Context(), w, resp.Body, upstreamRoute.Protocol, model, resumer, g.streamResumeLimit())
+				} else {
+					usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
+				}
 			} else {
 				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
 			}

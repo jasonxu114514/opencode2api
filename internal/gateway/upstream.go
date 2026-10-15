@@ -55,6 +55,38 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 	return override, ok && override.KeyID != ""
 }
 
+type anonymousStreamState struct {
+	node *anonymousNode
+}
+
+type anonymousStreamStateKey struct{}
+
+// withAnonymousStreamState attaches the holder that records which anonymous
+// exit is serving this request, so a mid-stream death can cool that exit
+// down before the continuation fetch rotates onto a different one.
+func withAnonymousStreamState(ctx context.Context) (context.Context, *anonymousStreamState) {
+	state := &anonymousStreamState{}
+	return context.WithValue(ctx, anonymousStreamStateKey{}, state), state
+}
+
+func anonymousStreamStateFrom(ctx context.Context) *anonymousStreamState {
+	state, _ := ctx.Value(anonymousStreamStateKey{}).(*anonymousStreamState)
+	return state
+}
+
+// markCurrentStreamExitFailed cools down the anonymous exit that just broke
+// mid-stream. Without this, the FNV session cursor of the continuation fetch
+// would land on the same dead exit again. Clearing the node afterwards lets
+// the next successful attempt record the new serving exit.
+func (g *Gateway) markCurrentStreamExitFailed(ctx context.Context) {
+	state := anonymousStreamStateFrom(ctx)
+	if state == nil || state.node == nil {
+		return
+	}
+	g.anonymous.MarkFailure(state.node, nil, io.ErrUnexpectedEOF)
+	state.node = nil
+}
+
 func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
 	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
@@ -320,6 +352,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+			// Record the serving exit so a mid-stream death can cool it
+			// down before the continuation fetch picks the next one.
+			if state := anonymousStreamStateFrom(ctx); state != nil {
+				state.node = node
+			}
 			return resp, nil, attempts
 		}
 		lastResponse = resp
