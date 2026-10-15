@@ -269,12 +269,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	if len(body) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
-	// The anonymous free tier only serves agent-shaped streaming requests
-	// carrying the official core tool definitions (anything else is rejected
-	// with 403 FreeTierError). Normalize the wire body here; the gateway
-	// collapses the stream back when the downstream client asked for a plain
-	// JSON reply. Key tiers keep their original bodies.
-	body = prepareAnonymousBody(body, route.ProtocolFor(config.TierZen))
+	// The Zen body arrives pre-shaped from prepareRouteBodies (shaped on the
+	// decoded map, marshaled once); the gateway collapses the stream back
+	// when the downstream client asked for a plain JSON reply. Key tiers
+	// keep their original bodies.
 	for attempts < limit {
 		if ctx.Err() != nil {
 			// The request-level budget is already gone. Stop scanning instead
@@ -389,6 +387,29 @@ func knownOpencodeTool(name string) (opencodeToolDefinition, bool) {
 	return definition, ok
 }
 
+// shapeAnonymousPayload normalizes a decoded upstream payload for the
+// anonymous free tier: streaming enabled plus the core agent tools present.
+// It reports whether the payload changed. System One payloads are decision
+// requests, not agent traffic, so they are left untouched; injecting
+// streaming or tool definitions would make the upstream reject them.
+func shapeAnonymousPayload(payload map[string]any, protocol wire.Protocol) bool {
+	if protocol == wire.SystemOne || payload == nil {
+		return false
+	}
+	changed := false
+	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
+		payload["stream"] = true
+		changed = true
+	}
+	if ensureAnonymousChatUsage(payload, protocol) {
+		changed = true
+	}
+	if ensureAnonymousTools(payload, protocol) {
+		changed = true
+	}
+	return changed
+}
+
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
 // free tier: streaming enabled plus the core agent tools present with genuine
 // definitions. Bodies that already satisfy all of that (or are not JSON
@@ -403,18 +424,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
 	}
-	changed := false
-	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
-		payload["stream"] = true
-		changed = true
-	}
-	if ensureAnonymousChatUsage(payload, protocol) {
-		changed = true
-	}
-	if ensureAnonymousTools(payload, protocol) {
-		changed = true
-	}
-	if !changed {
+	if !shapeAnonymousPayload(payload, protocol) {
 		return body
 	}
 	encoded, err := json.Marshal(payload)
@@ -608,7 +618,20 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 	if !g.catalog.IsFreeModel(route.ID) {
 		return body, false
 	}
-	shaped := prepareAnonymousBody(body, route.ProtocolFor(tier))
+	protocol := route.ProtocolFor(tier)
+	if protocol == wire.SystemOne {
+		return body, false
+	}
+	if tier == config.TierZen {
+		// Zen bodies arrive pre-shaped from prepareRouteBodies (shaped on
+		// the map, marshaled once), so there is no bytes comparison left
+		// to run: the shaped flag is structural. Collapse only runs for
+		// non-streaming clients, whose payloads always needed at least
+		// the stream flag forced, so the old compare always reported
+		// changed there too.
+		return body, true
+	}
+	shaped := prepareAnonymousBody(body, protocol)
 	return shaped, !bytes.Equal(shaped, body)
 }
 
