@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"slices"
 	"time"
 
 	"opencode2api/internal/buildinfo"
@@ -118,6 +119,22 @@ func (g *Gateway) availableModels() ([]modelcatalog.Route, modelcatalog.CatalogS
 	return g.catalog.AvailableModels(g.zenNodes.Len() > 0, g.goNodes.Len() > 0, g.cfg.Anonymous)
 }
 
+// reasoningLevels are the effort values the gateway accepts and forwards, from
+// lowest to highest. "auto" and "none" are gateway controls, not levels.
+var reasoningLevels = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// reasoningEfforts lists the levels a reasoning model can be asked for. When an
+// "auto" probe has found the highest level the upstream accepts, the list stops
+// there so clients do not offer levels that would be rejected.
+func (g *Gateway) reasoningEfforts(model string, route modelcatalog.Route) []string {
+	if g.cfg.ForcedEffort(model) == "auto" {
+		if ceiling := slices.Index(reasoningLevels, g.resolvedEffort(model, route.Tier, route.Protocol)); ceiling >= 0 {
+			return slices.Clone(reasoningLevels[:ceiling+1])
+		}
+	}
+	return slices.Clone(reasoningLevels)
+}
+
 func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 	now := time.Now().Unix()
 	routes, _ := g.availableModels()
@@ -152,6 +169,35 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if md.Reasoning {
 			entry["reasoning"] = true
 			entry["supports_reasoning"] = true
+			efforts := g.reasoningEfforts(model, route)
+			entry["reasoning_efforts"] = efforts
+			// OpenClaw and similar harnesses read effort levels from compat
+			// rather than inferring them, and otherwise offer only off/max.
+			entry["compat"] = map[string]any{"supportsReasoningEffort": true, "supportedReasoningEfforts": efforts}
+			if effort := g.resolvedEffort(model, route.Tier, route.Protocol); effort != "" && effort != "none" {
+				entry["default_reasoning_effort"] = effort
+			}
+		}
+		if md.Cost != nil {
+			cost := map[string]any{}
+			// Camel-case aliases match OpenClaw's model cost shape.
+			for _, field := range []struct {
+				names []string
+				value *float64
+			}{
+				{[]string{"input"}, md.Cost.Input},
+				{[]string{"output"}, md.Cost.Output},
+				{[]string{"cache_read", "cacheRead"}, md.Cost.CacheRead},
+				{[]string{"cache_write", "cacheWrite"}, md.Cost.CacheWrite},
+			} {
+				if field.value == nil {
+					continue
+				}
+				for _, name := range field.names {
+					cost[name] = *field.value
+				}
+			}
+			entry["cost"] = cost
 		}
 		if md.ToolCall {
 			entry["tool_call"] = true

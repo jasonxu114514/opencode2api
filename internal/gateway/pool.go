@@ -112,6 +112,38 @@ func (p *anonymousPool) MarkSuccess(node *anonymousNode) {
 	node.cooldownUntil.Store(0)
 }
 
+// RestoreProxy clears cooldowns for anonymous nodes bound to a recovered
+// proxy, mirroring nodePool.RestoreProxy for key nodes. Without this, an
+// outage-era cooldown survives the proxy's recovery and the anonymous lane
+// stays skipped even though the route is healthy again.
+func (p *anonymousPool) RestoreProxy(proxy *proxyTransport) int {
+	if p == nil || proxy == nil {
+		return 0
+	}
+	cleared := 0
+	for _, node := range p.nodes {
+		if node.proxy != proxy {
+			continue
+		}
+		if node.cooldownUntil.Load() == 0 && node.failures.Load() == 0 {
+			continue
+		}
+		node.failures.Store(0)
+		node.cooldownUntil.Store(0)
+		cleared++
+	}
+	return cleared
+}
+
+// maxAnonymousRetryAfterMultiplier bounds an upstream Retry-After on the
+// anonymous lane to the same 8x ceiling as its exponential backoff. The lane
+// is rate limited per exit IP and, unlike key lanes, has no earliest-expiry
+// fallback: a quota response asking for hours would keep the exit skipped long
+// after a network change gave it a fresh allowance. Key lanes keep honoring
+// Retry-After in full, since their cursor already falls back to the node that
+// recovers first.
+const maxAnonymousRetryAfterMultiplier = 8
+
 func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
 	if node == nil {
 		return
@@ -123,7 +155,7 @@ func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, er
 	delay := p.cooldown * time.Duration(1<<min(failures-1, 3))
 	if resp != nil {
 		if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > delay {
-			delay = retryAfter
+			delay = min(retryAfter, p.cooldown*maxAnonymousRetryAfterMultiplier)
 		}
 	}
 	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
@@ -245,7 +277,7 @@ func (p *transportPool) checkClaimedProxy(ctx context.Context, proxy *proxyTrans
 // route is unavailable. HTTP responses and unrelated transport/protocol errors
 // must not evict a proxy.
 func isProxyFailure(err error) bool {
-	if errors.Is(err, errFirstEventTimeout) {
+	if errors.Is(err, errFirstEventTimeout) || upstreamAccepted(err) {
 		return false // The upstream accepted HTTP; slow generation is not a broken proxy.
 	}
 	if err == nil {

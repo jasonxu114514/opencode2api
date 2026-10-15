@@ -1,4 +1,11 @@
-// Package identity derives stable session identities and unique request IDs.
+// Package identity derives stable session identities.
+//
+// The 2026-10-14 Zen free-tier gate validates a descending-timestamp session
+// id plus a client User-Agent, and it 403s requests that still carry the
+// legacy x-opencode-request header. The identity that matters upstream is
+// therefore the pair (x-opencode-session, x-opencode-session-id): Session is
+// the conversation-affinity key and must keep the descending layout minted by
+// CanonicalSessionID.
 package identity
 
 import (
@@ -14,6 +21,10 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// RequestIDs carries the identity headers the upstream free tier inspects.
+// Session is sent as both x-opencode-session and x-opencode-session-id; both
+// headers are required since the 2026-10-14 gate. Request is retained for
+// request-level tracing of this gateway only — it must NOT reach upstream.
 type RequestIDs struct {
 	Session       string
 	Request       string
@@ -24,6 +35,7 @@ type RequestIDs struct {
 func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	signal := jsonutil.FirstString(
 		r.Header.Get("x-opencode-session"),
+		r.Header.Get("x-opencode-session-id"),
 		r.Header.Get("x-session-affinity"),
 		r.Header.Get("X-Session-Id"),
 		r.Header.Get("x-session-id"),
@@ -43,6 +55,10 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 		signal = RandomID("fallback", 16)
 	}
 	session := CanonicalSessionID(signal)
+	// The upstream free tier 403s canonical prj_* project ids (2026-10-14
+	// probing) while accepting the literal "global" every official client
+	// sends. Anything non-canonical also passes, so the project header is only
+	// used as a local correlation hint and is no longer forwarded upstream.
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
 		projectSignal = "opencode2api:default-project"
@@ -54,7 +70,7 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	return RequestIDs{
 		Session:       session,
 		Request:       RandomID("req", 16),
-		Project:       StableID("prj", projectSignal),
+		Project:       projectSignal,
 		ParentSession: parentSession,
 	}
 }

@@ -302,10 +302,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
 	// The anonymous free tier only serves agent-shaped streaming requests
-	// (anything else is rejected with 403 FreeTierError). Normalize the
-	// wire body here; the gateway collapses the stream back when the
-	// downstream client asked for a plain JSON reply. Key tiers keep their
-	// original bodies.
+	// carrying the official core tool definitions (anything else is rejected
+	// with 403 FreeTierError). Normalize the wire body here; the gateway
+	// collapses the stream back when the downstream client asked for a plain
+	// JSON reply. Key tiers keep their original bodies.
 	body = prepareAnonymousBody(body, route.ProtocolFor(config.TierZen))
 	for attempts < limit {
 		if ctx.Err() != nil {
@@ -383,7 +383,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 // "shell" is the name OpenCode 2.x ships; the pre-2.x "bash" spelling is
 // deliberately not injected because the free tier validates the definition of
 // every tool it recognises, and a "bash" definition the gateway synthesises
-// does not match the one upstream expects.
+// does not match the one upstream expects. Since 2026-10-14 name presence is
+// not enough either: the upstream compares each recognised tool's description
+// and parameter schema against the official CLI's definitions byte-for-byte
+// (minimal stand-ins 403), which is why the genuine definitions below are
+// embedded. Tool order is irrelevant and extra client tools are allowed.
 var anonymousCoreTools = []string{"shell", "edit", "glob", "grep", "read"}
 
 // opencodeToolsJSON holds the genuine OpenCode tool definitions (description
@@ -533,19 +537,25 @@ func anonymousToolName(protocol wire.Protocol, item any) string {
 	return jsonutil.StringAt(entry, "name")
 }
 
+// anonymousToolset returns the official wire-shaped definitions for the
+// given tool names (all core tools when names is nil).
 func anonymousToolset(protocol wire.Protocol, names []string) []any {
 	if names == nil {
 		names = anonymousCoreTools
 	}
 	tools := make([]any, 0, len(names))
 	for _, name := range names {
-		tools = append(tools, anonymousTool(protocol, name))
+		if tool := anonymousTool(protocol, name); tool != nil {
+			tools = append(tools, tool)
+		}
 	}
 	return tools
 }
 
 // anonymousTool renders one core tool in the shape the given protocol expects,
-// using the genuine OpenCode definition whenever one is known.
+// using the genuine OpenCode definition whenever one is known. SystemOne
+// payloads never reach this path (prepareAnonymousBody forwards them
+// verbatim), so it falls back to the Chat shape.
 func anonymousTool(protocol wire.Protocol, name string) map[string]any {
 	description := "Agent tool " + name
 	parameters := map[string]any{"type": "object", "properties": map[string]any{}}
@@ -906,10 +916,18 @@ func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Proto
 	// FreeTierError, so the client's header set is mirrored exactly.
 	req.Header.Set("User-Agent", httpx.UserAgent())
 	req.Header.Set("x-opencode-client", "cli")
+	// The free tier requires both session headers to carry the same
+	// descending-encoded id. The x-opencode-request correlation header and
+	// canonical prj_* project ids are rejected with 403 since 2026-10-14, so
+	// neither is forwarded; tracing stays local to this gateway.
 	req.Header.Set("x-opencode-session", ids.Session)
 	req.Header.Set("x-opencode-session-id", ids.Session)
 	req.Header.Set("x-session-affinity", ids.Session)
 	req.Header.Set("X-Session-Id", ids.Session)
+	// A canonical prj_* project id is rejected with 403 since 2026-10-14; the
+	// client's own bare 40-hex shape (or any non-canonical value, e.g.
+	// "global") passes. Hash the local project signal into the accepted shape
+	// so one conversation stays pinned to one upstream project.
 	req.Header.Set("x-opencode-project", clientProjectID(ids.Project))
 	if ids.ParentSession != "" {
 		req.Header.Set("x-parent-session-id", ids.ParentSession)
@@ -919,6 +937,9 @@ func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Proto
 		req.Header.Set("anthropic-version", "2023-06-01")
 		req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
 	} else {
+		// The anonymous credential is the literal token "public". The 2026-10-14
+		// gate rejects keyless requests (an absent header used to pass) and is
+		// case-sensitive: "Bearer PUBLIC" 401s.
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return req, nil

@@ -66,6 +66,7 @@ type Catalog struct {
 	cacheSource     string
 	stale           bool
 	refreshAfter    time.Duration
+	freeOnly        bool
 }
 
 type CatalogSnapshot struct {
@@ -125,6 +126,23 @@ func (c *Catalog) SetRefreshInterval(interval time.Duration) {
 	c.mu.Lock()
 	c.refreshAfter = interval
 	c.mu.Unlock()
+}
+
+// SetFreeOnly hides every model that is not free from discovery and routing.
+func (c *Catalog) SetFreeOnly(enabled bool) {
+	c.mu.Lock()
+	c.freeOnly = enabled
+	c.mu.Unlock()
+}
+
+// freeOnlyErrorLocked rejects paid models while models.free_only is set. Both
+// routing entry points check it, so /v1/models, inference, rotation aliases and
+// diagnostics agree on what is exposed.
+func (c *Catalog) freeOnlyErrorLocked(model string) error {
+	if c.freeOnly && !c.anonymousDecision(model).Allowed {
+		return fmt.Errorf("model %q is not free and models.free_only is enabled", model)
+	}
+	return nil
 }
 
 func (c *Catalog) Replace(zen, goModels []string) {
@@ -206,6 +224,9 @@ func (c *Catalog) Route(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) 
 func (c *Catalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) (Route, error) {
 	if c.availability != nil && c.availability.Disabled(model) {
 		return Route{}, fmt.Errorf("model %q is disabled after a failed availability check; restore it in the WebUI or wait for the next probe", model)
+	}
+	if err := c.freeOnlyErrorLocked(model); err != nil {
+		return Route{}, err
 	}
 	keyTiers := c.keyTierOrderLocked(model, hasZenKeys, hasGoKeys)
 	// OpenCode's public credential is a Zen-only lane. Every free model starts
@@ -303,6 +324,9 @@ func (c *Catalog) RouteForTier(model string, tier config.Tier, hasZenKeys, hasGo
 	defer c.mu.RUnlock()
 	if c.availability != nil && c.availability.Disabled(model) {
 		return Route{}, fmt.Errorf("model %q is disabled after a failed availability check", model)
+	}
+	if err := c.freeOnlyErrorLocked(model); err != nil {
+		return Route{}, err
 	}
 	catalogPending := len(c.zen) == 0 && len(c.goModels) == 0
 	advertised := c.zen[model]
@@ -490,6 +514,9 @@ func (c *Catalog) MetadataForTier(model string, tier config.Tier) Metadata {
 	}
 	if md.MaxOutput == 0 {
 		md.MaxOutput = price.MaxOutput
+	}
+	if price.Input != nil || price.Output != nil {
+		md.Cost = &Cost{Input: price.Input, Output: price.Output, CacheRead: price.CacheRead, CacheWrite: price.CacheWrite}
 	}
 	return md
 }

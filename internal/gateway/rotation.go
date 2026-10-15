@@ -70,6 +70,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 	meta := telemetry.MetaFromRequest(r)
 	if meta != nil {
 		meta.Request = ids.Request
+		meta.Session = ids.Session
 		meta.ModelAlias = alias
 	}
 	visited := map[string]bool{}

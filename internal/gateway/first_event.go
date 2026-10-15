@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,19 +23,20 @@ var (
 // attemptTrace records how far a single attempt got before it failed. The
 // shared ResponseHeaderTimeout only covers the header wait; this probe tells
 // apart the phases it cannot see (dial, request write) from the ones it can.
+// The callbacks run on transport goroutines, so the flags are atomic.
 type attemptTrace struct {
-	gotConn      bool
-	wroteRequest bool
-	gotFirstByte bool
+	gotConn      atomic.Bool
+	wroteRequest atomic.Bool
+	gotFirstByte atomic.Bool
 }
 
 func (t *attemptTrace) phase() string {
 	switch {
-	case !t.gotConn:
+	case !t.gotConn.Load():
 		return "dial"
-	case !t.wroteRequest:
+	case !t.wroteRequest.Load():
 		return "write"
-	case !t.gotFirstByte:
+	case !t.gotFirstByte.Load():
 		return "headers"
 	default:
 		return "first_event"
@@ -43,10 +45,18 @@ func (t *attemptTrace) phase() string {
 
 func (t *attemptTrace) clientTrace() *httptrace.ClientTrace {
 	return &httptrace.ClientTrace{
-		GotConn:              func(httptrace.GotConnInfo) { t.gotConn = true },
-		WroteRequest:         func(httptrace.WroteRequestInfo) { t.wroteRequest = true },
-		GotFirstResponseByte: func() { t.gotFirstByte = true },
+		GotConn:              func(httptrace.GotConnInfo) { t.gotConn.Store(true) },
+		WroteRequest:         func(httptrace.WroteRequestInfo) { t.wroteRequest.Store(true) },
+		GotFirstResponseByte: func() { t.gotFirstByte.Store(true) },
 	}
+}
+
+// upstreamAccepted reports whether an attempt died after the upstream had
+// already answered with headers. Such a timeout is slow generation, not a
+// broken proxy, so it must not evict the exit.
+func upstreamAccepted(err error) bool {
+	var pe *phasedError
+	return errors.As(err, &pe) && pe.phase == "first_event"
 }
 
 // phasedError carries the phase an attempt died in. Unwrap keeps the original
@@ -100,7 +110,7 @@ func (b *attemptBody) Close() error {
 // so a wedged exit can otherwise hang in the write or dial phase until the
 // request-level budget is gone.
 func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeout, attemptTimeout time.Duration) (*http.Response, error) {
-	if firstEventTimeout <= 0 || strings.HasSuffix(req.URL.Path, "/systemone") {
+	if (firstEventTimeout <= 0 && attemptTimeout <= 0) || strings.HasSuffix(req.URL.Path, "/systemone") {
 		return client.Do(req)
 	}
 	trace := &attemptTrace{}
@@ -152,7 +162,8 @@ func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeou
 		cancel(nil)
 		return resp, &phasedError{err: err, phase: trace.phase()}
 	}
-	if resp.StatusCode/100 != 2 || !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+	// Without a first-event wait the attempt is done once headers arrive.
+	if firstEventTimeout <= 0 || resp.StatusCode/100 != 2 || !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		if attemptTimer != nil {
 			if cause := commitDeadline(); cause != nil {
 				cancel(nil)

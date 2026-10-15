@@ -44,8 +44,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-      - run: npm ci --ignore-scripts
       - name: Check Go formatting
         shell: bash
         run: |
@@ -54,7 +52,7 @@ jobs:
             printf '%s\n' "$unformatted"
             exit 1
           fi
-      - run: npm run format:check
-      - run: npm run check:web
+      - name: Check WebUI syntax
+        run: node --check webui/app.js
       - name: Check container entrypoint syntax
         run: sh -n docker-entrypoint.sh

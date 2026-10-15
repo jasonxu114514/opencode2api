@@ -27,6 +27,20 @@ const maxRequestBody = 32 << 20
 
 const anonymousZenKey = "public"
 
+// attemptDeadline is the per-attempt context deadline. It is armed only when
+// attempt_timeout_seconds is set: otherwise the request-level budget already
+// bounds the single attempt it would cover.
+func attemptDeadline(cfg config.Config) time.Duration {
+	if cfg.Performance.AttemptTimeoutSeconds <= 0 {
+		return 0
+	}
+	return cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second)
+}
+
+// statusClientClosedRequest is nginx's 499: the client went away before the
+// gateway could answer, so the failure is neither upstream nor ours.
+const statusClientClosedRequest = 499
+
 type Gateway struct {
 	rotation     *rotation.Manager
 	cfg          config.Config
@@ -64,6 +78,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 	}
 	catalog := models.NewCatalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
+	catalog.SetFreeOnly(cfg.Models.FreeOnly)
 	return &Gateway{
 		cfg:            cfg,
 		rotation:       rotationManager,
@@ -74,7 +89,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 		anonymous:      newAnonymousPool(cfg.Anonymous, transports, cooldown),
 		catalog:        catalog,
 		monitor:        monitor,
-		attemptTimeout: cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second),
+		attemptTimeout: attemptDeadline(cfg),
 	}, nil
 }
 
@@ -95,24 +110,32 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 			candidates = append(candidates, strings.TrimSpace(auth[7:]))
 		}
-		valid := false
+		matched := ""
 		for _, key := range g.cfg.ServerKeys {
 			if !g.cfg.ServerKeyEnabled(key) {
 				continue
 			}
 			for _, candidate := range candidates {
 				if len(candidate) == len(key) && subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
-					valid = true
+					matched = key
 				}
 			}
 		}
-		if !valid {
+		if matched == "" {
 			protocol := wire.Chat
 			if r.URL.Path == "/v1/messages" {
 				protocol = wire.Anthropic
 			}
 			wire.WriteError(w, protocol, http.StatusUnauthorized, "invalid local API key", "authentication_error", "")
 			return
+		}
+		if meta := telemetry.MetaFromRequest(r); meta != nil {
+			// The Playground borrows the first enabled key to pass this check, so
+			// its traffic gets its own bucket instead of being billed to that key.
+			meta.ServerKeyID = config.Fingerprint(matched)
+			if isDiagnosticRequest(r.Context()) {
+				meta.ServerKeyID = telemetry.PlaygroundServerKey
+			}
 		}
 		next(w, r)
 	}
@@ -182,6 +205,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		ids := identity.DeriveRequestIDs(r, payload)
 		if meta != nil {
 			meta.Request = ids.Request
+			meta.Session = ids.Session
 		}
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
@@ -197,6 +221,16 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				finalTier = config.Tier(meta.Tier)
 			}
 			keyID, channel, anonymous := requestCredential(requestCtx)
+			// A downstream disconnect is not an upstream failure: report the
+			// real cause so telemetry and clients see a cancel, not a 502.
+			if !errors.Is(err, context.DeadlineExceeded) && wire.ClientCanceled(r.Context(), err) {
+				g.logger.Debug("client canceled before upstream response", "component", "upstream", "event", "request_canceled", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous)
+				if meta != nil {
+					meta.Outcome = "client_canceled"
+				}
+				wire.WriteError(w, external, statusClientClosedRequest, "client closed request", "client_canceled", ids.Request)
+				return
+			}
 			g.logger.Warn("all upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous, "error", err)
 			// An exhausted request budget is a timeout, not a bad gateway: the
 			// distinction matters to clients that retry on 502.
@@ -362,6 +396,7 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	ids := identity.DeriveRequestIDs(r, payload)
 	if meta != nil {
 		meta.Request = ids.Request
+		meta.Session = ids.Session
 	}
 	requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -372,6 +407,14 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 			finalTier = config.Tier(meta.Tier)
 		}
 		keyID, channel, anonymous := requestCredential(requestCtx)
+		if !errors.Is(err, context.DeadlineExceeded) && wire.ClientCanceled(r.Context(), err) {
+			g.logger.Debug("client canceled before upstream response", "component", "upstream", "event", "request_canceled", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous)
+			if meta != nil {
+				meta.Outcome = "client_canceled"
+			}
+			wire.WriteError(w, wire.SystemOne, statusClientClosedRequest, "client closed request", "client_canceled", ids.Request)
+			return
+		}
 		g.logger.Warn("all upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous, "error", err)
 		if errors.Is(err, context.DeadlineExceeded) {
 			wire.WriteError(w, wire.SystemOne, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)

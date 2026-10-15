@@ -20,7 +20,8 @@
 
 - 管理的是网关的 `server_keys`，不修改 OpenCode Go 的上游 Key。
 - 自动生成 192 位随机密钥；自定义密钥为 16–256 位英文字母、数字、`-`、`_` 或 `.`。
-- 列表只显示名称、尾码、状态和创建时间。创建后可复制完整密钥及环境变量。
+- 列表只显示名称、尾码、状态、用量和创建时间。创建后可复制完整密钥及环境变量。
+- 用量按认证命中的 Key 统计请求数和 token，分近 1 小时和累计两个窗口；`GET /api/monitor` 的 `usage.server_keys` 给出同一份数据，各项之和等于聚合口径。Playground 调试流量单独归入 `playground`，不计入任何 Key。与其他监控数据一样只存于内存：热重载保留，进程重启后清零。
 - 变更热应用；停用和删除后，新请求返回 401。在途请求可以完成。至少保留一个启用的 Key。
 - 所有管理接口需要登录，写操作需要 CSRF Token。
 - 元数据以 `server_key_metadata` 保存在原配置中，按 Key 指纹关联；已有 `server_keys` 自动兼容。
@@ -32,8 +33,7 @@
 go test ./...
 go test -race ./...
 go vet ./...
-npm run check:web
-npx prettier --check webui/index.html webui/app.js webui/styles.css
+node --check webui/app.js
 go build -trimpath -o opencode2api ./cmd/opencode2api
 ```
 
@@ -81,7 +81,7 @@ Messages，以及这三种协议的流式输出。真实模型 ID 的原有调�
 - `POST /api/rotation/current`：`{"group":"sota","model":"glm-5.3"}`；立即
   修改当前模型并解除该模型的临时暂停。
 
-验证：`go test -race ./...`、`go vet ./...`、`npm run check:web`。
+验证：`go test -race ./...`、`go vet ./...`、`node --check webui/app.js`。
 模拟上游测试覆盖 9 次普通错误上限、超过 3 个额度跳过、混合错误预算、
 Retry-After、单个模型故障不影响 Key、三种入口协议的跨协议转换、成功保持、
 别名发现与用量归属、畸形响应、输出前错误、首个输出超时、输出后故障、

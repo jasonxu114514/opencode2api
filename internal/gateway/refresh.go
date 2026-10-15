@@ -82,8 +82,11 @@ func (g *Gateway) restoreProxy(proxy *proxyTransport) (zenMoved, goMoved int) {
 	}
 	zenMoved = g.zenNodes.RestoreProxy(proxy.index)
 	goMoved = g.goNodes.RestoreProxy(proxy.index)
-	if zenMoved+goMoved > 0 {
-		g.logger.Info("proxy connectivity restored", "component", "proxy", "event", "proxy_restored", "proxy", config.RedactURL(proxy.name), "zen_keys_moved", zenMoved, "go_keys_moved", goMoved)
+	// The anonymous lane carries its own per-proxy cooldowns; key recovery
+	// alone would leave it skipped after an outage-era failure.
+	anonCleared := g.anonymous.RestoreProxy(proxy)
+	if zenMoved+goMoved > 0 || anonCleared > 0 {
+		g.logger.Info("proxy connectivity restored", "component", "proxy", "event", "proxy_restored", "proxy", config.RedactURL(proxy.name), "zen_keys_moved", zenMoved, "go_keys_moved", goMoved, "anonymous_cleared", anonCleared)
 	}
 	return zenMoved, goMoved
 }
@@ -220,6 +223,11 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		models, status, err := modelcatalog.FetchModels(refreshCtx, node.proxy.client, base, anonymousZenKey)
+		if err != nil && status == 404 {
+			// The new inference backend does not expose a models listing;
+			// probe the legacy Zen console origin once before giving up.
+			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, modelcatalog.LegacyZenBase, anonymousZenKey)
+		}
 		g.syncProxyResult(refreshCtx, node.proxy, status, err)
 		cancel()
 		if err == nil {

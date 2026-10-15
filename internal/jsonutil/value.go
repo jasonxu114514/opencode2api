@@ -42,10 +42,37 @@ func FirstAny(values ...any) any {
 }
 
 func CloneMap(input map[string]any) map[string]any {
-	data, _ := json.Marshal(input)
-	var output map[string]any
-	_ = json.Unmarshal(data, &output)
+	if input == nil {
+		return nil
+	}
+	return cloneMap(input)
+}
+
+// cloneMap deep-copies decoded JSON without a marshal round-trip. Only
+// map[string]any and []any are copied; every other value is shared as-is, so
+// callers must pass trees produced by encoding/json, not maps built from typed
+// Go slices or structs, which would alias instead of being normalized.
+func cloneMap(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = cloneValue(value)
+	}
 	return output
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case []any:
+		output := make([]any, len(typed))
+		for i, item := range typed {
+			output[i] = cloneValue(item)
+		}
+		return output
+	default:
+		return value
+	}
 }
 
 func AsSlice(value any) []any {

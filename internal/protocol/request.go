@@ -19,6 +19,11 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 	if err != nil {
 		return nil, err
 	}
+	if to == Responses {
+		// The bridge already floors converted bodies; a same-protocol body is
+		// a clone of the client's and needs the same guard.
+		jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(output["max_output_tokens"]))
+	}
 	normalizeToolReasoningHistory(to, jsonutil.StringAt(output, "model"), upstreamURL, output)
 	return output, nil
 }
@@ -564,6 +569,22 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	default:
 		return request, fmt.Errorf("unsupported input protocol %q", protocol)
 	}
+	for i := range request.Messages {
+		for j := range request.Messages[i].Blocks {
+			block := &request.Messages[i].Blocks[j]
+			if block.Kind != "tool_result" || protocol == Chat {
+				continue
+			}
+			result, err := decodeToolImages(protocol, block.Result)
+			if err != nil {
+				return request, fmt.Errorf("messages[%d].tool_result[%d]: %w", i, j, err)
+			}
+			if _, images := result.([]bridgeBlock); images && block.CallID == "" {
+				return request, fmt.Errorf("messages[%d]: tool image result requires a call ID", i)
+			}
+			block.Result = result
+		}
+	}
 	return request, nil
 }
 
@@ -782,13 +803,21 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 			}
 		}
 		if len(pending) == 0 && len(pendingOrder) > 0 {
+			var attachments []map[string]any
 			for _, id := range pendingOrder {
 				result := pendingResults[id]
+				text, images := chatToolImages(result)
+				if len(images) > 0 {
+					attachments = append(attachments, map[string]any{"role": "user", "content": encodeChatBlocks(images)})
+				}
 				messages = append(messages, map[string]any{
 					"role":         "tool",
 					"tool_call_id": id,
-					"content":      bridgeToolResultContent(result.Result),
+					"content":      text,
 				})
+			}
+			for _, attachment := range attachments {
+				messages = append(messages, attachment)
 			}
 			flushDeferred()
 			pendingOrder = nil
@@ -892,11 +921,26 @@ func responsesReasoning(value any) any {
 	}
 }
 
+// minResponsesMaxOutputTokens is the smallest max_output_tokens the Zen
+// Responses endpoint accepts; anything lower is rejected with a 400.
+const minResponsesMaxOutputTokens = 16
+
+// floorResponsesMaxTokens keeps tiny downstream budgets (background titles,
+// probes) from failing Zen responses validation. Larger budgets pass through
+// untouched. Decoded JSON numbers are always float64, so no other numeric type
+// can reach this point.
+func floorResponsesMaxTokens(value any) any {
+	if n, ok := value.(float64); ok && n > 0 && n < minResponsesMaxOutputTokens {
+		return float64(minResponsesMaxOutputTokens)
+	}
+	return value
+}
+
 func encodeResponsesRequest(request bridgeRequest) map[string]any {
 	output := map[string]any{"model": request.Model, "stream": request.Stream}
 	jsonutil.Put(output, "temperature", request.Temperature)
 	jsonutil.Put(output, "top_p", request.TopP)
-	jsonutil.Put(output, "max_output_tokens", request.MaxTokens)
+	jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(request.MaxTokens))
 	jsonutil.Put(output, "stop", request.Stop)
 	jsonutil.Put(output, "metadata", request.Metadata)
 	if len(request.System) > 0 {
@@ -981,7 +1025,7 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
 					"call_id": block.CallID,
-					"output":  bridgeToolResultContent(block.Result),
+					"output":  responsesToolContent(block.Result),
 				})
 			}
 		}

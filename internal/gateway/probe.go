@@ -73,7 +73,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	if !d.AvailableZen || !g.catalog.Supported(model) {
 		return probeResult{reason: "unsupported_probe"}
 	}
-	ids := identity.RequestIDs{Session: identity.CanonicalSessionID("availability:" + model), Project: identity.StableID("prj", "opencode2api:default-project")}
+	ids := identity.RequestIDs{Session: identity.CanonicalSessionID("availability:" + model), Project: "opencode2api:default-project"}
 	type lane struct {
 		key, name, baseURL string
 		client             *http.Client

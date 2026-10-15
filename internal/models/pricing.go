@@ -30,6 +30,8 @@ type Price struct {
 	ID            string   `json:"id"`
 	Input         *float64 `json:"input_cost,omitempty"`
 	Output        *float64 `json:"output_cost,omitempty"`
+	CacheRead     *float64 `json:"cache_read_cost,omitempty"`
+	CacheWrite    *float64 `json:"cache_write_cost,omitempty"`
 	ContextWindow int      `json:"context_window,omitempty"`
 	MaxInput      int      `json:"max_input,omitempty"`
 	MaxOutput     int      `json:"max_output,omitempty"`
@@ -326,6 +328,7 @@ func decodeModelsDev(data []byte) (map[string]Price, error) {
 			limit := jsonutil.MapAt(model, "limit")
 			result[modelID] = Price{
 				ID: modelID, Input: numberPointer(cost, "input"), Output: numberPointer(cost, "output"),
+				CacheRead: numberPointer(cost, "cache_read"), CacheWrite: numberPointer(cost, "cache_write"),
 				ContextWindow: jsonutil.IntAt(limit, "context"), MaxInput: jsonutil.IntAt(limit, "input"), MaxOutput: jsonutil.IntAt(limit, "output"),
 				Deprecated: metadataDeprecated(model),
 			}
