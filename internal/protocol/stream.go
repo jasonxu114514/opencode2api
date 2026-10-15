@@ -152,10 +152,10 @@ func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 
 // StreamResumer fetches a replacement upstream SSE segment after the
 // previous one died mid-flight. partial is the visible text already
-// delivered downstream, so the continuation request can ask the model to
-// resume from it.
+// delivered downstream; reasoning is the thinking text delivered downstream
+// when the stream died before any visible text was produced.
 type StreamResumer interface {
-	ResumeSegment(partial string) (io.Reader, error)
+	ResumeSegment(partial string, reasoning string) (io.Reader, error)
 }
 
 type StreamResumeObserver interface {
@@ -181,6 +181,7 @@ type streamUsageObserver struct {
 	// mid-stream resume needs exactly this text to build the continuation
 	// request, so it is capped at 1 MiB to bound per-request memory.
 	text           strings.Builder
+	reasoning      strings.Builder
 	toolSeen       bool
 	visibleBytes   int
 	reasoningBytes int
@@ -229,6 +230,12 @@ func (observer *streamUsageObserver) Text() string { return observer.text.String
 // eligibility keys on this, not on bytes.
 func (observer *streamUsageObserver) TextRunes() int {
 	return utf8.RuneCountInString(observer.text.String())
+}
+
+func (observer *streamUsageObserver) Reasoning() string { return observer.reasoning.String() }
+
+func (observer *streamUsageObserver) ReasoningRunes() int {
+	return utf8.RuneCountInString(observer.reasoning.String())
 }
 
 // ToolSeen reports whether any tool call delta appeared; a stream broken
@@ -281,6 +288,9 @@ func (observer *streamUsageObserver) consume(frame []byte) {
 				}
 			case "reasoning":
 				observer.reasoningBytes += len(event.Text) + len(event.Encrypted)
+				if event.Text != "" && observer.reasoning.Len() < 512<<10 {
+					observer.reasoning.WriteString(event.Text)
+				}
 			case "tool_start", "tool_delta":
 				observer.toolSeen = true
 			}

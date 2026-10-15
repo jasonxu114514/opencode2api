@@ -50,8 +50,10 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 			}
 			return usage, observer.Reported(), copyErr
 		}
+		canResumeText := observer.TextRunes() > 0
+		canResumeReasoning := observer.TextRunes() == 0 && observer.ReasoningRunes() > 0
 		// Unexpected termination — the only resume window.
-		if resumer != nil && resumes < maxResumes && observer.TextRunes() > 0 && !observer.ToolSeen() && !ClientCanceled(ctx, nil) {
+		if resumer != nil && resumes < maxResumes && (canResumeText || canResumeReasoning) && !observer.ToolSeen() && !ClientCanceled(ctx, nil) {
 			if resumeObserver, ok := resumer.(StreamResumeObserver); ok {
 				resumeObserver.ResumeEligible(observer.visibleBytes, observer.reasoningBytes, observer.toolSeen)
 			}
@@ -66,14 +68,18 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 				}
 				flusher.Flush()
 			}
-			next, resumeErr := resumeWithPing(ctx, w, flusher, resumer, observer.Text())
+			next, resumeErr := resumeWithPing(ctx, w, flusher, resumer, observer.Text(), observer.Reasoning())
 			if resumeErr == nil {
 				closeCurrentIfNotFirst(reader, first)
 				// Clear the dead segment's parse fault so a clean
 				// continuation is not misclassified as failed; a systemic
 				// fault re-surfaces on the new segment by itself.
 				observer.parseErr = nil
-				reader = newLCPTrimReader(next, tail)
+				if canResumeText {
+					reader = newLCPTrimReader(next, tail)
+				} else {
+					reader = next
+				}
 				resumes++
 				continue
 			}
@@ -88,7 +94,7 @@ func ForwardStreamResumable(ctx context.Context, w http.ResponseWriter, reader i
 			switch {
 			case resumes < maxResumes && observer.ToolSeen():
 				reason = "tool_seen"
-			case resumes < maxResumes && observer.TextRunes() == 0:
+			case resumes < maxResumes && observer.TextRunes() == 0 && observer.ReasoningRunes() == 0:
 				reason = "no_visible_text"
 			case resumes < maxResumes && ClientCanceled(ctx, nil):
 				reason = "client_canceled"
@@ -159,7 +165,7 @@ func missingRecordTerminator(tail []byte) []byte {
 // comment every 10s so intermediaries do not time the connection out during
 // the fetch. The goroutine is fully stopped before returning, so no ping can
 // be written after the next frames start flowing.
-func resumeWithPing(ctx context.Context, w io.Writer, flusher http.Flusher, resumer StreamResumer, partial string) (io.Reader, error) {
+func resumeWithPing(ctx context.Context, w io.Writer, flusher http.Flusher, resumer StreamResumer, partial string, reasoning string) (io.Reader, error) {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -178,7 +184,7 @@ func resumeWithPing(ctx context.Context, w io.Writer, flusher http.Flusher, resu
 			}
 		}
 	}()
-	reader, err := resumer.ResumeSegment(partial)
+	reader, err := resumer.ResumeSegment(partial, reasoning)
 	close(stop)
 	<-done
 	return reader, err

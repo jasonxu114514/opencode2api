@@ -47,17 +47,19 @@ const tornFragment = `data: {"id":"chatcmpl-test","choices":[{"delta":{"content"
 
 type fakeResumer struct {
 	calls        []string
+	reasonCalls  []string
 	skipped      []string
 	visibleBytes int
 	reasonBytes  int
 	toolSeen     bool
-	segment      func(partial string) (io.Reader, error)
+	segment      func(partial string, reasoning string) (io.Reader, error)
 }
 
-func (f *fakeResumer) ResumeSegment(partial string) (io.Reader, error) {
+func (f *fakeResumer) ResumeSegment(partial string, reasoning string) (io.Reader, error) {
 	f.calls = append(f.calls, partial)
+	f.reasonCalls = append(f.reasonCalls, reasoning)
 	if f.segment != nil {
-		return f.segment(partial)
+		return f.segment(partial, reasoning)
 	}
 	return nil, errors.New("no continuation segment configured")
 }
@@ -132,7 +134,7 @@ func TestForwardStreamResumable_normalStreamMatchesForwardStream(t *testing.T) {
 func TestForwardStreamResumable_tornStreamResumesOnce(t *testing.T) {
 	torn := roleFrame() + contentFrame("Hello") + tornFragment
 	segment2 := contentFrame(" world") + doneFrame
-	resumer := &fakeResumer{segment: func(partial string) (io.Reader, error) {
+	resumer := &fakeResumer{segment: func(partial string, reasoning string) (io.Reader, error) {
 		return strings.NewReader(segment2), nil
 	}}
 	rec := httptest.NewRecorder()
@@ -175,7 +177,7 @@ func TestForwardStreamResumable_tornTailTerminatedWhenNoTrailingNewline(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			torn := roleFrame() + contentFrame("Hello") + tc.fragment
 			segment2 := contentFrame(" world") + doneFrame
-			resumer := &fakeResumer{segment: func(partial string) (io.Reader, error) {
+			resumer := &fakeResumer{segment: func(partial string, reasoning string) (io.Reader, error) {
 				return strings.NewReader(segment2), nil
 			}}
 			rec := httptest.NewRecorder()
@@ -194,7 +196,7 @@ func TestForwardStreamResumable_tornTailTerminatedWhenNoTrailingNewline(t *testi
 func TestForwardStreamResumable_staleParseErrorDoesNotFailCleanResume(t *testing.T) {
 	torn := contentFrame("Hello") + "data: {not-json}\n\n" + tornFragment
 	segment2 := contentFrame(" world") + doneFrame
-	resumer := &fakeResumer{segment: func(partial string) (io.Reader, error) {
+	resumer := &fakeResumer{segment: func(partial string, reasoning string) (io.Reader, error) {
 		return strings.NewReader(segment2), nil
 	}}
 	rec := httptest.NewRecorder()
@@ -216,7 +218,7 @@ func TestForwardStreamResumable_staleParseErrorDoesNotFailCleanResume(t *testing
 
 func TestForwardStreamResumable_toolDeltaBlocksResume(t *testing.T) {
 	torn := roleFrame() + toolCallFrame() + tornFragment
-	resumer := &fakeResumer{segment: func(partial string) (io.Reader, error) {
+	resumer := &fakeResumer{segment: func(partial string, reasoning string) (io.Reader, error) {
 		return strings.NewReader(contentFrame("late") + doneFrame), nil
 	}}
 	rec := httptest.NewRecorder()
@@ -238,7 +240,7 @@ func TestForwardStreamResumable_toolDeltaBlocksResume(t *testing.T) {
 func TestForwardStreamResumable_secondTornSegmentEmitsError(t *testing.T) {
 	torn := roleFrame() + contentFrame("Hello") + tornFragment
 	segment2 := contentFrame(" more") + tornFragment
-	resumer := &fakeResumer{segment: func(partial string) (io.Reader, error) {
+	resumer := &fakeResumer{segment: func(partial string, reasoning string) (io.Reader, error) {
 		return strings.NewReader(segment2), nil
 	}}
 	rec := httptest.NewRecorder()
@@ -270,22 +272,32 @@ func TestForwardStreamResumable_noVisibleTextSkipsResume(t *testing.T) {
 	}
 }
 
-func TestForwardStreamResumable_reasoningOnlyDoesNotBecomeVisiblePartial(t *testing.T) {
+func TestForwardStreamResumable_reasoningOnlyTriggersReasoningResume(t *testing.T) {
 	torn := chatFrame(map[string]any{"reasoning_content": "private reasoning"}) + tornFragment
-	resumer := &fakeResumer{}
+	resumer := &fakeResumer{
+		segment: func(partial string, reasoning string) (io.Reader, error) {
+			if partial != "" {
+				t.Fatalf("partial = %q, want empty for reasoning-only stream", partial)
+			}
+			if reasoning != "private reasoning" {
+				t.Fatalf("reasoning = %q, want 'private reasoning'", reasoning)
+			}
+			return strings.NewReader(contentFrame("resumed answer") + doneFrame), nil
+		},
+	}
 	rec := httptest.NewRecorder()
 	_, _, err := ForwardStreamResumable(context.Background(), rec, strings.NewReader(torn), Chat, "test-model", resumer, 1)
-	if err == nil {
-		t.Fatal("expected an error for a stream with reasoning but no visible text")
+	if err != nil {
+		t.Fatalf("ForwardStreamResumable with reasoning resume failed: %v", err)
 	}
-	if len(resumer.calls) != 0 {
-		t.Fatalf("resumer called %d times for reasoning-only output, want 0", len(resumer.calls))
+	if len(resumer.calls) != 1 || resumer.calls[0] != "" {
+		t.Fatalf("resumer calls = %v, want 1 call with empty partial", resumer.calls)
 	}
-	if len(resumer.skipped) != 1 || resumer.skipped[0] != "no_visible_text" {
-		t.Fatalf("resume skip telemetry = %v, want [no_visible_text]", resumer.skipped)
+	if len(resumer.reasonCalls) != 1 || resumer.reasonCalls[0] != "private reasoning" {
+		t.Fatalf("resumer reasonCalls = %v, want ['private reasoning']", resumer.reasonCalls)
 	}
-	if resumer.visibleBytes != 0 || resumer.reasonBytes == 0 {
-		t.Fatalf("resume byte telemetry = visible:%d reasoning:%d, want visible 0 and reasoning > 0", resumer.visibleBytes, resumer.reasonBytes)
+	if !strings.Contains(rec.Body.String(), "resumed answer") {
+		t.Fatalf("expected resumed answer in downstream stream, got %q", rec.Body.String())
 	}
 }
 

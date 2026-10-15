@@ -81,7 +81,7 @@ func messageField(t *testing.T, message any, key string) any {
 
 func TestBuildContinuationBody_trailingUser(t *testing.T) {
 	base := baseZenBody(t, []any{map[string]any{"role": "user", "content": "hi"}})
-	out, err := buildContinuationBody(base, "partial text")
+	out, err := buildContinuationBody(base, "partial text", "")
 	if err != nil {
 		t.Fatalf("buildContinuationBody: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestBuildContinuationBody_trailingAssistantMerged(t *testing.T) {
 		map[string]any{"role": "user", "content": "hi"},
 		map[string]any{"role": "assistant", "content": "X"},
 	})
-	out, err := buildContinuationBody(base, "partial")
+	out, err := buildContinuationBody(base, "partial", "")
 	if err != nil {
 		t.Fatalf("buildContinuationBody: %v", err)
 	}
@@ -154,11 +154,42 @@ func TestBuildContinuationBody_trailingAssistantMerged(t *testing.T) {
 
 func TestResumeSegment_rejectsBadPartial(t *testing.T) {
 	resumer := &gatewayStreamResumer{}
-	if _, err := resumer.ResumeSegment(""); err == nil {
-		t.Fatal("empty partial must be rejected")
+	if _, err := resumer.ResumeSegment("", ""); err == nil {
+		t.Fatal("empty partial and reasoning must be rejected")
 	}
-	if _, err := resumer.ResumeSegment(strings.Repeat("a", maxContinuationPartialBytes+1)); err == nil {
+	if _, err := resumer.ResumeSegment(strings.Repeat("a", maxContinuationPartialBytes+1), ""); err == nil {
 		t.Fatal("oversized partial must be rejected")
+	}
+}
+
+func TestBuildContinuationBody_reasoningOnly(t *testing.T) {
+	zenBody := baseZenBody(t, []any{map[string]any{"role": "user", "content": "What is 1+1?"}})
+	reasoning := "step 1: 1+1 equals 2."
+	continuation, err := buildContinuationBody(zenBody, "", reasoning)
+	if err != nil {
+		t.Fatalf("buildContinuationBody with reasoning failed: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(continuation, &payload); err != nil {
+		t.Fatalf("unmarshal continuation body: %v", err)
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		t.Fatalf("messages = %v, want non-empty slice", payload["messages"])
+	}
+	lastMessage, ok := messages[len(messages)-1].(map[string]any)
+	if !ok {
+		t.Fatalf("last message not an object: %v", messages[len(messages)-1])
+	}
+	content, ok := lastMessage["content"].(string)
+	if !ok {
+		t.Fatalf("last message content not string: %v", lastMessage["content"])
+	}
+	if !strings.Contains(content, reasoning) {
+		t.Fatalf("continuation content does not contain reasoning: %q", content)
+	}
+	if !strings.Contains(content, "What is 1+1?") {
+		t.Fatalf("continuation content does not preserve original user message: %q", content)
 	}
 }
 
@@ -222,7 +253,7 @@ func TestResumeSegmentUsesClientContextAfterInitialBudgetExpires(t *testing.T) {
 		route:               models.Route{ID: "test-model", Tier: config.TierZen, Protocol: wire.Chat},
 		ids:                 ids, zenBody: baseZenBody(t, []any{map[string]any{"role": "user", "content": "hello"}}), meta: meta,
 	}
-	reader, err := resumer.ResumeSegment("partial answer")
+	reader, err := resumer.ResumeSegment("partial answer", "")
 	if err != nil {
 		t.Fatalf("ResumeSegment with expired initial context: %v", err)
 	}
@@ -283,7 +314,7 @@ func TestResumeSegmentTimeoutCancelsBeforeFirstEvent(t *testing.T) {
 		ids:     identity.RequestIDs{Session: "ses_timeout", Request: "req_timeout"},
 		zenBody: baseZenBody(t, []any{map[string]any{"role": "user", "content": "hello"}}), meta: meta,
 	}
-	_, err = resumer.ResumeSegment("partial answer")
+	_, err = resumer.ResumeSegment("partial answer", "")
 	if !errors.Is(err, errContinuationTimeout) {
 		t.Fatalf("ResumeSegment error = %v, want errContinuationTimeout", err)
 	}
@@ -332,7 +363,7 @@ func TestResumeSegmentStopsBudgetAfterFirstEvent(t *testing.T) {
 		ids:     identity.RequestIDs{Session: "ses_long", Request: "req_long"},
 		zenBody: baseZenBody(t, []any{map[string]any{"role": "user", "content": "hello"}}), meta: meta,
 	}
-	reader, err := resumer.ResumeSegment("partial answer")
+	reader, err := resumer.ResumeSegment("partial answer", "")
 	if err != nil {
 		t.Fatalf("ResumeSegment: %v", err)
 	}
@@ -365,7 +396,7 @@ func TestResumeSegmentClientCancellationSkipsUpstream(t *testing.T) {
 	resumer := &gatewayStreamResumer{
 		clientCtx: ctx, continuationTimeout: time.Second, meta: meta,
 	}
-	if _, err := resumer.ResumeSegment("partial answer"); err == nil {
+	if _, err := resumer.ResumeSegment("partial answer", ""); err == nil {
 		t.Fatal("ResumeSegment after client cancellation returned nil error")
 	}
 	if meta.ResumeSkipped != "client_canceled" || meta.ResumeAttempts != 0 {
@@ -378,7 +409,7 @@ func TestResumeSegmentDisabledBudgetSkipsUpstream(t *testing.T) {
 	resumer := &gatewayStreamResumer{
 		clientCtx: context.Background(), meta: meta,
 	}
-	if _, err := resumer.ResumeSegment("partial answer"); err == nil {
+	if _, err := resumer.ResumeSegment("partial answer", ""); err == nil {
 		t.Fatal("ResumeSegment with a disabled budget returned nil error")
 	}
 	if meta.ResumeSkipped != "budget_disabled" || meta.ResumeAttempts != 0 {

@@ -46,6 +46,7 @@ type RequestMeta struct {
 	ResumeSuccesses      int
 	ResumeFailures       int
 	ResumeSkipped        string
+	ResumeKind           string
 	ResumeVisibleBytes   int
 	ResumeReasoningBytes int
 	ResumeToolSeen       bool
@@ -129,6 +130,7 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 					"model", meta.Model, "model_alias", meta.ModelAlias, "tier", meta.Tier, "key_id", meta.KeyID, "channel", meta.Channel,
 					"anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "continued", meta.Continued,
 					"resume_attempts", meta.ResumeAttempts, "resume_successes", meta.ResumeSuccesses, "resume_failures", meta.ResumeFailures, "resume_skipped", meta.ResumeSkipped,
+					"resume_kind", meta.ResumeKind,
 					"resume_visible_bytes", meta.ResumeVisibleBytes, "resume_reasoning_bytes", meta.ResumeReasoningBytes, "resume_tool_seen", meta.ResumeToolSeen,
 					"outcome", outcome,
 					"stop", meta.Stop, "in", meta.Usage.Input, "out", meta.Usage.Output, "reasoning_tokens", meta.Usage.Reasoning, "cached", meta.Usage.Cached, "tail", meta.Tail)
@@ -138,7 +140,7 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 				"request_id", meta.Request, "model", meta.Model, "model_alias", meta.ModelAlias, "tier", meta.Tier, "key_id", meta.KeyID,
 				"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "stream", meta.Stream,
 				"continued", meta.Continued, "resume_attempts", meta.ResumeAttempts, "resume_successes", meta.ResumeSuccesses,
-				"resume_failures", meta.ResumeFailures, "resume_skipped", meta.ResumeSkipped,
+				"resume_failures", meta.ResumeFailures, "resume_skipped", meta.ResumeSkipped, "resume_kind", meta.ResumeKind,
 				"resume_visible_bytes", meta.ResumeVisibleBytes, "resume_reasoning_bytes", meta.ResumeReasoningBytes, "resume_tool_seen", meta.ResumeToolSeen, "outcome", outcome)
 		}()
 		next.ServeHTTP(writer, r)

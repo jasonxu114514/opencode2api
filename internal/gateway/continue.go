@@ -23,6 +23,8 @@ import (
 // continuing.
 const continuationInstruction = "Continue exactly where you stopped. Do not repeat anything already written."
 
+const reasoningContinuationInstruction = "You have already completed the following detailed reasoning process:\n\n<thinking>\n%s\n</thinking>\n\nBased on your reasoning above, do not repeat or re-evaluate the thinking. Output your final answer directly now."
+
 const maxContinuationPartialBytes = 512 << 10
 
 var errContinuationTimeout = errors.New("stream continuation fetch timed out")
@@ -42,28 +44,31 @@ type gatewayStreamResumer struct {
 // ResumeSegment builds the continuation body from the delivered partial,
 // cools down the exit that just broke so the pool cursor rotates onto a
 // different one, and fetches the next segment on a client-bound budget.
-func (r *gatewayStreamResumer) ResumeSegment(partial string) (io.Reader, error) {
-	if partial == "" {
+func (r *gatewayStreamResumer) ResumeSegment(partial string, reasoning string) (io.Reader, error) {
+	if partial == "" && reasoning == "" {
 		r.recordResumeFailure("empty_partial")
-		return nil, errors.New("stream continuation requires delivered text")
+		return nil, errors.New("stream continuation requires delivered text or reasoning")
 	}
 	if len(partial) > maxContinuationPartialBytes {
 		r.recordResumeFailure("partial_too_large")
 		return nil, fmt.Errorf("stream continuation partial of %d bytes exceeds the %d byte limit", len(partial), maxContinuationPartialBytes)
+	}
+	if len(reasoning) > maxContinuationPartialBytes {
+		reasoning = reasoning[len(reasoning)-maxContinuationPartialBytes:]
 	}
 	if r.clientCtx == nil {
 		r.recordResumeFailure("missing_client_context")
 		return nil, errors.New("stream continuation requires a client context")
 	}
 	if err := r.clientCtx.Err(); err != nil {
-		r.recordResumeSkipped("client_canceled", len(partial), 0, false)
+		r.recordResumeSkipped("client_canceled", len(partial), len(reasoning), false)
 		return nil, err
 	}
 	if r.continuationTimeout <= 0 {
-		r.recordResumeSkipped("budget_disabled", len(partial), 0, false)
+		r.recordResumeSkipped("budget_disabled", len(partial), len(reasoning), false)
 		return nil, errors.New("stream continuation budget is disabled")
 	}
-	requestBody, err := buildContinuationBody(r.zenBody, partial)
+	requestBody, err := buildContinuationBody(r.zenBody, partial, reasoning)
 	if err != nil {
 		r.recordResumeFailure("invalid_continuation_body")
 		return nil, err
@@ -90,9 +95,18 @@ func (r *gatewayStreamResumer) ResumeSegment(partial string) (io.Reader, error) 
 	bodies := map[config.Tier][]byte{config.TierZen: requestBody}
 	if r.meta != nil {
 		r.meta.ResumeAttempts++
+		if partial != "" {
+			r.meta.ResumeKind = "text"
+		} else {
+			r.meta.ResumeKind = "reasoning"
+		}
 	}
 	if r.g.logger != nil {
-		r.g.logger.Info("stream continuation attempt dispatched", "component", "upstream", "event", "stream_continuation_attempted", "request_id", r.ids.Request, "model", r.route.ID, "partial_bytes", len(partial), "timeout_ms", r.continuationTimeout.Milliseconds())
+		kind := ""
+		if r.meta != nil {
+			kind = r.meta.ResumeKind
+		}
+		r.g.logger.Info("stream continuation attempt dispatched", "component", "upstream", "event", "stream_continuation_attempted", "request_id", r.ids.Request, "model", r.route.ID, "partial_bytes", len(partial), "reasoning_bytes", len(reasoning), "resume_kind", kind, "timeout_ms", r.continuationTimeout.Milliseconds())
 	}
 	resp, err, attempts := r.g.doAnonymousUpstream(continuationCtx, r.route, bodies, r.ids, r.attemptOffset)
 	r.attemptOffset += attempts
@@ -144,7 +158,11 @@ func (r *gatewayStreamResumer) ResumeSegment(partial string) (io.Reader, error) 
 	}
 	keepContext = true
 	if r.g.logger != nil {
-		r.g.logger.Info("stream continued on a new exit", "component", "upstream", "event", "stream_continued", "request_id", r.ids.Request, "model", r.route.ID, "partial_bytes", len(partial), "resume_attempt", continued)
+		kind := ""
+		if r.meta != nil {
+			kind = r.meta.ResumeKind
+		}
+		r.g.logger.Info("stream continued on a new exit", "component", "upstream", "event", "stream_continued", "request_id", r.ids.Request, "model", r.route.ID, "partial_bytes", len(partial), "reasoning_bytes", len(reasoning), "resume_kind", kind, "resume_attempt", continued)
 	}
 	return &continuationBody{ReadCloser: resp.Body, cancel: cancel}, nil
 }
@@ -164,6 +182,11 @@ func (r *gatewayStreamResumer) ResumeEligible(visibleBytes, reasoningBytes int, 
 		r.meta.ResumeVisibleBytes = visibleBytes
 		r.meta.ResumeReasoningBytes = reasoningBytes
 		r.meta.ResumeToolSeen = toolSeen
+		if visibleBytes == 0 && reasoningBytes > 0 {
+			r.meta.ResumeKind = "reasoning"
+		} else {
+			r.meta.ResumeKind = "text"
+		}
 	}
 }
 
@@ -199,7 +222,7 @@ func (r *gatewayStreamResumer) recordResumeFailure(reason string) {
 // merged in place so the request never carries two adjacent assistant turns;
 // every other field (tools, stream options, effort, ...) is preserved, and
 // prepareAnonymousBody re-asserts the anonymous free-tier shape.
-func buildContinuationBody(zenBody []byte, partial string) ([]byte, error) {
+func buildContinuationBody(zenBody []byte, partial string, reasoning string) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(zenBody, &payload); err != nil {
 		return nil, fmt.Errorf("parse continuation base body: %w", err)
@@ -208,16 +231,29 @@ func buildContinuationBody(zenBody []byte, partial string) ([]byte, error) {
 	if !ok || len(messages) == 0 {
 		return nil, errors.New("continuation base body has no messages")
 	}
-	if last, ok := messages[len(messages)-1].(map[string]any); ok && last["role"] == "assistant" {
-		content, ok := last["content"].(string)
-		if !ok {
-			return nil, errors.New("trailing assistant message has non-string content")
+	if partial != "" {
+		if last, ok := messages[len(messages)-1].(map[string]any); ok && last["role"] == "assistant" {
+			content, ok := last["content"].(string)
+			if !ok {
+				return nil, errors.New("trailing assistant message has non-string content")
+			}
+			last["content"] = content + partial
+		} else {
+			messages = append(messages, map[string]any{"role": "assistant", "content": partial})
 		}
-		last["content"] = content + partial
-	} else {
-		messages = append(messages, map[string]any{"role": "assistant", "content": partial})
+		messages = append(messages, map[string]any{"role": "user", "content": continuationInstruction})
+	} else if reasoning != "" {
+		instruction := "\n\n" + fmt.Sprintf(reasoningContinuationInstruction, reasoning)
+		if last, ok := messages[len(messages)-1].(map[string]any); ok && last["role"] == "user" {
+			if content, ok := last["content"].(string); ok {
+				last["content"] = content + instruction
+			} else {
+				messages = append(messages, map[string]any{"role": "user", "content": fmt.Sprintf(reasoningContinuationInstruction, reasoning)})
+			}
+		} else {
+			messages = append(messages, map[string]any{"role": "user", "content": fmt.Sprintf(reasoningContinuationInstruction, reasoning)})
+		}
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": continuationInstruction})
 	payload["messages"] = messages
 	encoded, err := json.Marshal(payload)
 	if err != nil {
