@@ -216,11 +216,6 @@ const lcpMaxOverlapRunes = 200
 
 const lcpMinOverlapRunes = 4
 
-// lcpMaxCollectFrames bounds how many leading frames the cross-frame overlap
-// scan buffers before deciding (review: single-frame LCP never fired on the
-// ~1-token-per-frame shape real Chat streams emit).
-const lcpMaxCollectFrames = 64
-
 type lcpTrimReader struct {
 	src     io.Reader
 	tail    string
@@ -334,8 +329,7 @@ func (reader *lcpTrimReader) collect(frame []byte) {
 		reader.accText = append(reader.accText, []rune(text)...)
 	}
 	if len(reader.accText) >= lcpMaxOverlapRunes ||
-		(len(reader.tail) > 0 && len(reader.accText) >= len(reader.tail)) ||
-		len(reader.frames) >= lcpMaxCollectFrames {
+		(len(reader.tail) > 0 && len(reader.accText) >= len(reader.tail)) {
 		reader.flushDecision()
 		reader.done = true
 	}
