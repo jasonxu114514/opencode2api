@@ -37,19 +37,93 @@ func (g *Gateway) availableRotationModels() []string {
 	return models
 }
 func (g *Gateway) syncRotation() {
-	models := g.availableRotationModels()
-	available := make(map[string]bool, len(models))
-	for _, model := range models {
-		available[model] = true
-	}
-	g.rotation.Sync(available)
+	g.rotation.Sync(g.rotationFacts())
+}
+func (g *Gateway) rotationFacts() []config.ModelFacts {
+	return g.catalog.Facts(len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, false)
 }
 func (m *RuntimeManager) RotationSnapshot() rotation.Snapshot {
 	r := m.current.Load()
 	r.gateway.syncRotation()
 	snapshot := m.rotation.Snapshot()
 	snapshot.AvailableModels = r.gateway.availableRotationModels()
+	snapshot.QueryFields = queryFields(r.gateway.rotationFacts())
+	snapshot.SortFields = config.SortFields()
+	snapshot.SortDirections = config.SortDirections()
 	return snapshot
+}
+
+// queryFields describes the queryable fields and, for the closed fields
+// (protocol, tier, modalities), appends any extra values observed in the live
+// catalog to the canonical list so the WebUI offers exactly what exists.
+func queryFields(facts []config.ModelFacts) []config.QueryField {
+	fields := config.QueryFields()
+	observed := map[string]map[string]bool{}
+	add := func(field, value string) {
+		if value == "" {
+			return
+		}
+		if observed[field] == nil {
+			observed[field] = map[string]bool{}
+		}
+		observed[field][value] = true
+	}
+	for _, fact := range facts {
+		add("protocol", fact.Protocol)
+		for _, tier := range fact.Tier {
+			add("tier", tier)
+		}
+		for _, modality := range fact.InputModalities {
+			add("input_modalities", modality)
+		}
+		for _, modality := range fact.OutputModalities {
+			add("output_modalities", modality)
+		}
+	}
+	for i := range fields {
+		extra := observed[fields[i].Name]
+		if len(extra) == 0 {
+			continue
+		}
+		seen := map[string]bool{}
+		merged := append([]string(nil), fields[i].Values...)
+		for _, value := range merged {
+			seen[value] = true
+		}
+		rest := make([]string, 0, len(extra))
+		for value := range extra {
+			if !seen[value] {
+				rest = append(rest, value)
+			}
+		}
+		sort.Strings(rest)
+		fields[i].Values = append(merged, rest...)
+	}
+	return fields
+}
+
+// PreviewRotation resolves a query, sort and pin list against the live catalog
+// without touching rotation state, so the WebUI can preview group membership.
+func (m *RuntimeManager) PreviewRotation(query config.RotationQuery, groupSort *config.GroupSort, pin []string) []config.ModelFacts {
+	r := m.current.Load()
+	if r == nil {
+		return nil
+	}
+	facts := r.gateway.rotationFacts()
+	factMap := make(map[string]config.ModelFacts, len(facts))
+	matched := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		factMap[fact.ID] = fact
+		if query.Evaluate(fact) {
+			matched = append(matched, fact.ID)
+		}
+	}
+	order := config.ResolveOrder(matched, factMap, groupSort, pin, nil)
+	ordered := make([]config.ModelFacts, 0, len(order))
+	for _, id := range order {
+		ordered = append(ordered, factMap[id])
+	}
+	return ordered
 }
 func (m *RuntimeManager) SelectRotation(id, model string) error {
 	m.updateMu.Lock()

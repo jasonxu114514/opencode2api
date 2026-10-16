@@ -8,6 +8,7 @@ import (
 	"opencode2api/internal/config"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"sync"
@@ -37,15 +38,26 @@ type Group struct {
 	Paused     map[string]time.Time `json:"paused"`
 	Available  map[string]bool      `json:"available"`
 	Switches   []Switch             `json:"switches"`
+	// Dynamic marks a query-driven group. Query, Sort and Pin mirror the
+	// configured definition so the WebUI can render the editor from state.
+	Dynamic bool                  `json:"dynamic,omitempty"`
+	Query   *config.RotationQuery `json:"query,omitempty"`
+	Sort    *config.GroupSort     `json:"sort,omitempty"`
+	Pin     []string              `json:"pin,omitempty"`
 }
 type Snapshot struct {
 	Groups             []*Group  `json:"groups"`
 	Attempts           []Attempt `json:"attempts"`
 	PersistenceError   string    `json:"persistence_error,omitempty"`
 	FirstOutputSeconds int       `json:"first_output_seconds"`
-	// AvailableModels lists every Go-routable model the operator may add to a
-	// custom group. It is filled by the runtime, not persisted.
+	// AvailableModels lists every routable model the operator may add to a
+	// static custom group. It is filled by the runtime, not persisted.
 	AvailableModels []string `json:"available_models"`
+	// QueryFields, SortFields and SortDirections describe the query builder
+	// vocabulary for the WebUI. Filled by the runtime, not persisted.
+	QueryFields    []config.QueryField `json:"query_fields"`
+	SortFields     []config.QueryField `json:"sort_fields"`
+	SortDirections []string            `json:"sort_directions"`
 }
 type Token struct {
 	Group, Model string
@@ -61,6 +73,12 @@ type Manager struct {
 // customID namespaces operator-defined groups so their ID and alias stay in
 // lockstep while remaining distinct from the built-in sota/sweet slots.
 func customID(alias string) string { return "custom:" + alias }
+
+// dynamicEqual reports whether two configurations describe the same dynamic
+// group, so an unchanged query keeps its learned priority order.
+func dynamicEqual(a, b config.RotationGroup) bool {
+	return reflect.DeepEqual(a.Query, b.Query) && reflect.DeepEqual(a.Sort, b.Sort) && slices.Equal(a.Pin, b.Pin)
+}
 
 func New(path string, cfg config.RotationConfig) (*Manager, error) {
 	m := &Manager{path: path}
@@ -109,14 +127,18 @@ func (m *Manager) Configure(cfg config.RotationConfig) {
 	type desired struct {
 		id   string
 		cfg  config.RotationGroup
-		auto bool
+		kind int // 0 built-in, 1 static custom, 2 dynamic custom
 	}
 	list := []desired{
-		{id: "sota", cfg: cfg.SOTA, auto: true},
-		{id: "sweet", cfg: cfg.Sweet, auto: true},
+		{id: "sota", cfg: cfg.SOTA, kind: 0},
+		{id: "sweet", cfg: cfg.Sweet, kind: 0},
 	}
 	for _, g := range cfg.Custom {
-		list = append(list, desired{id: customID(g.Alias), cfg: g})
+		kind := 1
+		if g.Dynamic() {
+			kind = 2
+		}
+		list = append(list, desired{id: customID(g.Alias), cfg: g, kind: kind})
 	}
 	next := make([]*Group, 0, len(list))
 	for _, d := range list {
@@ -124,30 +146,45 @@ func (m *Manager) Configure(cfg config.RotationConfig) {
 		if g == nil {
 			g = &Group{ID: d.id}
 		}
-		var order []string
-		if d.auto {
+		clone := config.CloneRotationGroup(d.cfg)
+		prev := previous(d.cfg.Alias)
+		switch d.kind {
+		case 0:
 			// The built-in groups keep any models they already learned while
 			// adopting a changed configured order.
-			prev := previous(d.cfg.Alias)
 			if len(g.Order) == 0 || !slices.Equal(prev.Order, d.cfg.Order) {
-				order = slices.Clone(d.cfg.Order)
+				order := slices.Clone(d.cfg.Order)
 				for _, v := range g.Order {
 					if !slices.Contains(order, v) {
 						order = append(order, v)
 					}
 				}
-			} else {
-				order = slices.Clone(g.Order)
+				if !slices.Equal(order, g.Order) {
+					g.Generation++
+				}
+				g.Order = order
 			}
-		} else {
-			// A custom group rotates exactly the configured models.
-			order = slices.Clone(d.cfg.Order)
+		case 1:
+			// A static custom group rotates exactly the configured models.
+			if !slices.Equal(clone.Order, g.Order) {
+				g.Generation++
+			}
+			g.Order = clone.Order
+		case 2:
+			// A dynamic group keeps its learned order; Sync recomputes the
+			// membership. Only a changed definition invalidates the position.
+			if !dynamicEqual(prev, d.cfg) {
+				g.Generation++
+			}
 		}
-		if !slices.Equal(order, g.Order) || g.Alias != d.cfg.Alias {
+		if g.Alias != d.cfg.Alias {
 			g.Generation++
 		}
-		g.Order = order
 		g.Alias = d.cfg.Alias
+		g.Dynamic = d.kind == 2
+		g.Query = clone.Query
+		g.Sort = clone.Sort
+		g.Pin = clone.Pin
 		if g.Paused == nil {
 			g.Paused = map[string]time.Time{}
 		}
@@ -163,12 +200,22 @@ func (m *Manager) Configure(cfg config.RotationConfig) {
 	m.saveLocked()
 }
 
-// Sync folds the current Go model catalog into the groups. Custom groups claim
-// their explicit members first; sota then takes its remaining pool; sweet keeps
-// every leftover non-SOTA model.
-func (m *Manager) Sync(available map[string]bool) {
+// Sync folds the current model catalog into the groups. Custom and dynamic
+// groups claim their members first (in config order); sota then takes its
+// remaining pool; sweet keeps every leftover non-SOTA model. A dynamic group's
+// order is recomputed from its query, keeping previous priority and appending
+// new matches last.
+func (m *Manager) Sync(facts []config.ModelFacts) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	available := make(map[string]bool, len(facts))
+	factMap := make(map[string]config.ModelFacts, len(facts))
+	for _, fact := range facts {
+		factMap[fact.ID] = fact
+		if fact.Routable {
+			available[fact.ID] = true
+		}
+	}
 	claimed := map[string]bool{}
 	changed := false
 	for _, c := range m.cfg.Custom {
@@ -177,6 +224,26 @@ func (m *Manager) Sync(available map[string]bool) {
 			continue
 		}
 		g.Available = map[string]bool{}
+		if c.Dynamic() {
+			matched := make([]string, 0, len(facts))
+			for _, fact := range facts {
+				if c.Query.Evaluate(fact) {
+					matched = append(matched, fact.ID)
+				}
+			}
+			order := config.ResolveOrder(matched, factMap, c.Sort, c.Pin, g.Order)
+			if !slices.Equal(order, g.Order) {
+				g.Order = order
+				changed = true
+			}
+			for _, model := range order {
+				if available[model] && !claimed[model] {
+					g.Available[model] = true
+					claimed[model] = true
+				}
+			}
+			continue
+		}
 		for _, model := range c.Order {
 			if available[model] && !claimed[model] {
 				g.Available[model] = true
@@ -213,7 +280,10 @@ func (m *Manager) Sync(available map[string]bool) {
 		}
 	}
 	for _, g := range m.state.Groups {
-		if g.Current == "" && len(g.Order) > 0 {
+		if len(g.Order) == 0 {
+			continue
+		}
+		if g.Current == "" || !slices.Contains(g.Order, g.Current) {
 			g.Current = g.Order[0]
 			g.Generation++
 			changed = true

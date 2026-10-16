@@ -18,7 +18,7 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 - Configuration hot reload with validation before switching new requests to a replacement gateway.
 - Go subscription quota dashboard with remaining percentages, reset times, and available models.
 - Local API key creation, naming, enabling, disabling, and deletion with immediate updates.
-- Sticky model-rotation groups (built-in `sota` / `sweet` plus arbitrary custom groups), drawing on both Zen and Go, with ordering, failure fallback, streaming protection, and persisted state.
+- Sticky model-rotation groups (built-in `sota` / `sweet` plus static or query-driven custom groups), drawing on both Zen and Go, with ordering, automatic query refresh, failure fallback, streaming protection, and persisted state.
 
 See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
@@ -255,7 +255,9 @@ Two groups are built in and any number of custom groups may be added:
 
 - `sota` — fixed membership: the five SOTA models, order adjustable.
 - `sweet` — fallback group. An empty `order` absorbs every other available Zen/Go model; a non-empty `order` narrows it.
-- `custom` — operator-defined groups, each rotating exactly the models in its `order`.
+- `custom` — operator-defined groups, either **static** (rotating exactly the models in their `order`) or **dynamic** (rotating every model matched by a `query`).
+
+A dynamic group is rebuilt on every model refresh (OpenCode capability catalog and models.dev pricing): matched models are added, models that vanish are dropped, and priority is preserved — existing members keep their position and new matches are appended last. A `query` is a `terms` sequence combined left to right: the first term seeds the result and every following term carries an `op` (`and` = AND, `or` = OR) joining it to the running value. A term is either a single `condition` or a nested `group` (itself a `terms` sequence), so conditions can be grouped and nested to any depth (up to 4). Conditions filter on model facts: `free`, `deprecated`, `sota`, `routable`, `cost_known`, `reasoning`, `tool_call`, `structured_output`, `context_window`, `max_input`, `max_output`, `cost.input`, `cost.output`, `cost.cache_read`, `cost.cache_write`, `id`, `protocol`, `tier`, `input_modalities`, `output_modalities`. The closed fields accept a fixed value set: `protocol` ∈ `chat` / `responses` / `anthropic` / `systemone`, `tier` ∈ `zen` / `go`, and modalities ∈ `text` / `image` / `audio` / `video` / `pdf` (the WebUI renders these as a dropdown or checkbox group). An optional `sort` orders matches by a numeric or string field; `pin` forces matched models to the front.
 
 ```json
 {
@@ -263,14 +265,34 @@ Two groups are built in and any number of custom groups may be added:
     "sota": { "alias": "sota", "order": ["deepseek-v4.1-flash", "glm-5.3", "grok-4.6", "kimi-k3", "qwen3.8-max"] },
     "sweet": { "alias": "sweet", "order": [] },
     "custom": [
-      { "alias": "fast", "order": ["claude-haiku-5", "gemini-3.5-flash"] }
+      { "alias": "fast", "order": ["claude-haiku-5", "gemini-3.5-flash"] },
+      {
+        "alias": "cheap-reasoning",
+        "query": {
+          "terms": [
+            { "condition": { "field": "reasoning", "op": "is", "value": true } },
+            {
+              "op": "or",
+              "group": {
+                "terms": [
+                  { "condition": { "field": "free", "op": "is", "value": true } },
+                  { "op": "and", "condition": { "field": "cost.input", "op": "<=", "value": 1 } }
+                ]
+              }
+            },
+            { "op": "and", "condition": { "field": "context_window", "op": ">=", "value": 200000 } }
+          ]
+        },
+        "sort": { "field": "cost.input", "direction": "asc" },
+        "pin": ["kimi-k3"]
+      }
     ],
     "first_output_seconds": 30
   }
 }
 ```
 
-Aliases are listed in `/v1/models` whenever at least one member is routable; custom groups take priority when claiming a model. Keep the `sota` group's five fixed models, do not put SOTA models in `sweet`, and give every custom group at least one model. Aliases must be unique and must not equal a real model ID. A custom group's `order` may include models from either tier. The management API edits groups through `GET`/`PUT /api/rotation`, and the WebUI lists every group with a per-group detail view.
+Aliases are listed in `/v1/models` whenever at least one member is routable; custom and dynamic groups take priority over `sota`/`sweet` when claiming a model. Keep the `sota` group's five fixed models, do not put SOTA models in `sweet`, and give every static group at least one model and every dynamic group at least one condition (the two are mutually exclusive). Aliases must be unique and must not equal a real model ID. A static group's `order`, and a dynamic group's matches, may include models from either tier. The management API edits groups through `GET`/`PUT /api/rotation` and previews a query through `POST /api/rotation/preview`; the WebUI lists every group with a per-group detail view and a condition builder.
 
 ## Configuration reference
 

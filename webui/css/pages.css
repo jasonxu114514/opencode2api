@@ -359,6 +359,149 @@
   max-width: 360px;
 }
 
+.rotation-query {
+  margin-top: var(--sp-4);
+}
+
+.rotation-query h3,
+.rotation-sort h3,
+.rotation-pins h3,
+.rotation-preview h3 {
+  font-size: var(--fs-sm);
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+
+.rotation-sequence {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0;
+}
+
+.rotation-sequence-root {
+  margin-top: 0;
+}
+
+.rotation-sequence-actions {
+  gap: var(--sp-2);
+  margin-top: 2px;
+}
+
+.rotation-operator {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-left: var(--sp-1);
+}
+
+.rotation-operator select {
+  font-weight: 600;
+}
+
+.rotation-condition-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border-1);
+  border-left: 3px solid var(--border-2);
+  background: var(--surface);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.rotation-condition-card select,
+.rotation-condition-card input {
+  min-width: 130px;
+}
+
+.rotation-options {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rotation-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border: 1px solid var(--border-1);
+  background: var(--surface);
+  padding: 3px var(--sp-2);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.rotation-option input {
+  min-width: 0;
+  margin: 0;
+}
+
+.rotation-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.rotation-subgroup {
+  border: 1px dashed var(--border-1);
+  background: var(--surface);
+  padding: var(--sp-2) var(--sp-3);
+  margin-left: var(--sp-3);
+}
+
+.rotation-subgroup-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.rotation-subgroup-label:first-child {
+  margin-bottom: 6px;
+}
+
+.rotation-subgroup-label:last-child {
+  margin-top: 6px;
+}
+
+.rotation-value {
+  display: inline-flex;
+}
+
+.rotation-value input {
+  min-width: 170px;
+}
+
+.rotation-pin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: var(--sp-2);
+}
+
+.rotation-pin {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  border: 1px solid var(--border-1);
+  background: var(--surface);
+  padding: 6px var(--sp-3);
+}
+
+.rotation-preview-list {
+  margin: 0;
+  padding-left: 22px;
+  font-size: var(--fs-xs);
+  max-height: 260px;
+  overflow: auto;
+}
+
+.rotation-preview-list li {
+  overflow-wrap: anywhere;
+}
+
 .rotation-current {
   margin-top: var(--sp-2);
   font-size: var(--fs-sm);

@@ -345,8 +345,7 @@ func Clone(cfg Config) Config {
 	cfg.Rotation.Sweet.Order = append([]string(nil), cfg.Rotation.Sweet.Order...)
 	custom := make([]RotationGroup, len(cfg.Rotation.Custom))
 	for i, group := range cfg.Rotation.Custom {
-		group.Order = append([]string(nil), group.Order...)
-		custom[i] = group
+		custom[i] = CloneRotationGroup(group)
 	}
 	cfg.Rotation.Custom = custom
 	cfg.ServerKeys = append([]string(nil), cfg.ServerKeys...)

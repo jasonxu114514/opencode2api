@@ -55,8 +55,19 @@ Messages，以及这三种协议的流式输出。真实模型 ID 的原有调�
 - 甜点组为兜底分组：`order` 为空时自动纳入其余所有可用 Zen / Go 模型（按名称
   排序，新模型追加在末尾）；非空时收敛为列出的成员。下架或协议不受支持的模型
   保留在列表，但不参与调用。
-- 自定义分组仅轮转其 `order` 中列出的模型，成员可来自 Go 或 Zen，不自动扩充，
-  至少需要一个模型。
+- 静态自定义分组仅轮转其 `order` 中列出的模型，成员可来自 Go 或 Zen，不自动
+  扩充，至少需要一个模型。
+- 查询分组按 `query` 自动纳入所有匹配模型：每次模型刷新（OpenCode 能力目录与
+  models.dev 价格）后重新计算，消失的模型自动移除，已有成员保持优先级，新匹配
+  追加到末尾。`query` 是一个 `terms` 序列，按从左到右的顺序组合：第一个条件项
+  作为初始值，其后每个条件项用自身 `op`（`and` 为且、`or` 为或）与当前结果
+  连接。每个条件项要么是单个 `condition`，要么是嵌套的 `group`（本身也是一个
+  `terms` 序列），因此条件可任意分组嵌套（上限 4 层）。条件可筛选 `free`、
+  `deprecated`、`sota`、`routable`、`cost_known`、`reasoning`、`tool_call`、
+  `structured_output`、`context_window`、`max_input`、`max_output`、`cost.input`、
+  `cost.output`、`cost.cache_read`、`cost.cache_write`、`id`、`protocol`、`tier`、
+  `input_modalities`、`output_modalities`；可选 `sort` 按数值或字符串字段排序，
+  `pin` 将匹配模型固定在最前。查询分组不得同时包含 `order`，且至少需要一个条件。
 - 每组共享一个当前模型。成功后保持位置；失败切换后，下次从新位置开始。
   并发请求通过位置版本号避免旧请求把游标移回去；手动切换不打断在途回答。
 - 普通错误每模型最多 3 次（包含首次），每请求最多消耗 3 个普通错误模型预算。
@@ -76,18 +87,25 @@ Messages，以及这三种协议的流式输出。真实模型 ID 的原有调�
   不记录上游错误正文、请求正文或密钥。最近保留 100 条尝试和每组 30 条切换。
 
 配置保存于 `config.json` 的 `rotation` 字段：`sota` / `sweet` 各有 `alias`
-和 `order`，`custom` 为自定义分组数组（每组含 `alias` 与 `order`）；状态单独
-原子写入 `config.json.rotation.json`（0600），包括当前位置、版本、动态追加的
+和 `order`，`custom` 为自定义分组数组（静态组含 `alias` 与 `order`；查询组含
+`alias`、`query`，可选 `sort` 与 `pin`）；状态单独原子写入
+`config.json.rotation.json`（0600），包括当前位置、版本、动态追加或查询解析出的
 顺序、暂停期限和最近记录。修改 Key 或其他配置时沿用同一个轮转状态管理器。
 页面展示状态写入失败提示，首次无法写入则拒绝启动。
 
 管理接口均需要现有管理 Session，写入另需 CSRF：
 
-- `GET /api/rotation`：分组配置、可用状态、暂停期限、切换、尝试记录，以及可
-  供自定义分组选择的模型列表 `available_models`。
+- `GET /api/rotation`：分组配置、可用状态、暂停期限、切换、尝试记录、可供静态
+  分组选择的模型列表 `available_models`，以及查询构建器词汇表 `query_fields`、
+  `sort_fields`、`sort_directions`。每个 `query_fields` 项还带有可选的 `values`
+  （封闭字段的取值：`protocol` 为 `chat`/`responses`/`anthropic`/`systemone`，
+  `tier` 为 `zen`/`go`，模态为 `text`/`image`/`audio`/`video`/`pdf`；页面据此
+  渲染下拉或复选）与 `hint`（输入提示）。
 - `PUT /api/rotation`：提交 `sota` / `sweet` 的 `alias`、完整 `order`，
   `custom` 分组数组，以及 `first_output_seconds`；别名不得重复或与真实模型 ID
-  冲突，自定义分组至少一个成员。
+  冲突，静态分组至少一个成员，查询分组至少一个条件且与 `order` 互斥。
+- `POST /api/rotation/preview`：`{"query":{...},"sort":{...},"pin":[...]}`；返回
+  按当前目录解析出的匹配模型与优先级，供页面实时预览，不修改轮转状态。
 - `POST /api/rotation/current`：`{"group":"sota","model":"glm-5.3"}`；立即
   修改当前模型并解除该模型的临时暂停。
 

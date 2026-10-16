@@ -30,6 +30,30 @@ func (a *Server) handleSaveRotation(w http.ResponseWriter, r *http.Request) {
 	}
 	a.handleRotation(w, r)
 }
+func (a *Server) handlePreviewRotation(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Query config.RotationQuery `json:"query"`
+		Sort  *config.GroupSort    `json:"sort"`
+		Pin   []string             `json:"pin"`
+	}
+	if err := decodeAdminJSON(w, r, &input); err != nil {
+		writeAdminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	if err := input.Query.Validate(); err != nil {
+		writeAdminError(w, 400, "rotation_rejected", err.Error())
+		return
+	}
+	if input.Sort != nil {
+		if err := input.Sort.Validate(); err != nil {
+			writeAdminError(w, 400, "rotation_rejected", err.Error())
+			return
+		}
+	}
+	facts := a.manager.PreviewRotation(input.Query, input.Sort, input.Pin)
+	httpx.WriteJSON(w, 200, map[string]any{"models": facts, "count": len(facts)})
+}
+
 func (a *Server) handleSelectRotation(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Group string `json:"group"`
