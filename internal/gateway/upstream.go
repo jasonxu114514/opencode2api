@@ -411,8 +411,15 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if ensureAnonymousChatUsage(payload, protocol) {
 		changed = true
 	}
-	if ensureAnonymousTools(payload, protocol) {
-		changed = true
+	// Title generation is not agent traffic. The free tier rejects a
+	// title-generation request that carries the agent tool list (403
+	// FreeTierError) even though the identical request without tools succeeds,
+	// and OpenCode's own title generator is sent tool-free. Leave such a
+	// request tool-free instead of injecting the core agent set.
+	if !isTitleGenerationRequest(payload) {
+		if ensureAnonymousTools(payload, protocol) {
+			changed = true
+		}
 	}
 	if !changed {
 		return body
@@ -422,6 +429,66 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		return body
 	}
 	return encoded
+}
+
+// isTitleGenerationRequest reports whether the payload is OpenCode's own
+// session-title generation call rather than agent traffic.
+//
+// OpenCode issues that call with an EMPTY tool list — its source builds it as
+// { small: true, tools: {}, messages: [{ role: "user", content: "Generate a
+// title for this conversation:\n" }, ...] }. The free-tier gate accepts the
+// tool-free form but returns 403 FreeTierError once an agent tool list is
+// attached, so the gateway must not inject tools here.
+//
+// The match is deliberately narrow: a user turn whose text BEGINS with the
+// verbatim title prompt. A false positive would strip the tool list from a real
+// agent request and turn it into the very 403 this avoids.
+func isTitleGenerationRequest(payload map[string]any) bool {
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if jsonutil.StringAt(message, "role") != "user" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(messageText(message["content"])), titleGenerationPrompt) {
+			return true
+		}
+	}
+	return false
+}
+
+// titleGenerationPrompt is the user-turn prefix OpenCode prepends to its title
+// call (packages/opencode/src/session/prompt.ts).
+const titleGenerationPrompt = "Generate a title for this conversation"
+
+// messageText flattens a message content value (a plain string or an array of
+// content blocks) into searchable text.
+func messageText(content any) string {
+	switch typed := content.(type) {
+	case string:
+		return typed
+	case []any:
+		var builder strings.Builder
+		for _, raw := range typed {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				builder.WriteString(text)
+				builder.WriteByte('\n')
+			}
+		}
+		return builder.String()
+	default:
+		return ""
+	}
 }
 
 // ensureAnonymousChatUsage keeps token usage available when a non-streaming
