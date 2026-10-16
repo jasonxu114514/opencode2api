@@ -43,6 +43,9 @@ type Snapshot struct {
 	Attempts           []Attempt `json:"attempts"`
 	PersistenceError   string    `json:"persistence_error,omitempty"`
 	FirstOutputSeconds int       `json:"first_output_seconds"`
+	// AvailableModels lists every Go-routable model the operator may add to a
+	// custom group. It is filled by the runtime, not persisted.
+	AvailableModels []string `json:"available_models"`
 }
 type Token struct {
 	Group, Model string
@@ -54,6 +57,10 @@ type Manager struct {
 	state Snapshot
 	cfg   config.RotationConfig
 }
+
+// customID namespaces operator-defined groups so their ID and alias stay in
+// lockstep while remaining distinct from the built-in sota/sweet slots.
+func customID(alias string) string { return "custom:" + alias }
 
 func New(path string, cfg config.RotationConfig) (*Manager, error) {
 	m := &Manager{path: path}
@@ -67,8 +74,12 @@ func New(path string, cfg config.RotationConfig) (*Manager, error) {
 			return nil, e
 		}
 	}
-	if len(m.state.Groups) != 0 && (len(m.state.Groups) != 2 || m.state.Groups[0] == nil || m.state.Groups[1] == nil || m.state.Groups[0].ID != "sota" || m.state.Groups[1].ID != "sweet") {
-		return nil, fmt.Errorf("invalid rotation groups")
+	seen := map[string]bool{}
+	for _, g := range m.state.Groups {
+		if g == nil || g.ID == "" || seen[g.ID] {
+			return nil, fmt.Errorf("invalid rotation groups")
+		}
+		seen[g.ID] = true
 	}
 	m.Configure(cfg)
 	if m.state.PersistenceError != "" {
@@ -76,34 +87,67 @@ func New(path string, cfg config.RotationConfig) (*Manager, error) {
 	}
 	return m, nil
 }
+
 func (m *Manager) Configure(cfg config.RotationConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cfg.Defaults()
-	for i, c := range []config.RotationGroup{cfg.SOTA, cfg.Sweet} {
-		id := []string{"sota", "sweet"}[i]
-		if len(m.state.Groups) <= i {
-			m.state.Groups = append(m.state.Groups, &Group{ID: id})
-		}
-		g := m.state.Groups[i]
-		previous := m.cfg.SOTA
-		if i == 1 {
-			previous = m.cfg.Sweet
-		}
-		order := slices.Clone(g.Order)
-		if len(order) == 0 || !slices.Equal(previous.Order, c.Order) {
-			order = slices.Clone(c.Order)
-			for _, v := range g.Order {
-				if !slices.Contains(order, v) {
-					order = append(order, v)
-				}
+	previous := func(alias string) config.RotationGroup {
+		for _, p := range m.cfg.All() {
+			if p.Alias == alias {
+				return p
 			}
 		}
-		if !slices.Equal(order, g.Order) || g.Alias != c.Alias {
+		return config.RotationGroup{}
+	}
+	existing := map[string]*Group{}
+	for _, g := range m.state.Groups {
+		if g != nil {
+			existing[g.ID] = g
+		}
+	}
+	type desired struct {
+		id   string
+		cfg  config.RotationGroup
+		auto bool
+	}
+	list := []desired{
+		{id: "sota", cfg: cfg.SOTA, auto: true},
+		{id: "sweet", cfg: cfg.Sweet, auto: true},
+	}
+	for _, g := range cfg.Custom {
+		list = append(list, desired{id: customID(g.Alias), cfg: g})
+	}
+	next := make([]*Group, 0, len(list))
+	for _, d := range list {
+		g := existing[d.id]
+		if g == nil {
+			g = &Group{ID: d.id}
+		}
+		var order []string
+		if d.auto {
+			// The built-in groups keep any models they already learned while
+			// adopting a changed configured order.
+			prev := previous(d.cfg.Alias)
+			if len(g.Order) == 0 || !slices.Equal(prev.Order, d.cfg.Order) {
+				order = slices.Clone(d.cfg.Order)
+				for _, v := range g.Order {
+					if !slices.Contains(order, v) {
+						order = append(order, v)
+					}
+				}
+			} else {
+				order = slices.Clone(g.Order)
+			}
+		} else {
+			// A custom group rotates exactly the configured models.
+			order = slices.Clone(d.cfg.Order)
+		}
+		if !slices.Equal(order, g.Order) || g.Alias != d.cfg.Alias {
 			g.Generation++
 		}
 		g.Order = order
-		g.Alias = c.Alias
+		g.Alias = d.cfg.Alias
 		if g.Paused == nil {
 			g.Paused = map[string]time.Time{}
 		}
@@ -111,36 +155,64 @@ func (m *Manager) Configure(cfg config.RotationConfig) {
 			g.Current = g.Order[0]
 			g.Generation++
 		}
+		next = append(next, g)
 	}
+	m.state.Groups = next
 	m.cfg = cfg
 	m.state.FirstOutputSeconds = cfg.FirstOutputSeconds
 	m.saveLocked()
 }
+
+// Sync folds the current Go model catalog into the groups. Custom groups claim
+// their explicit members first; sota then takes its remaining pool; sweet keeps
+// every leftover non-SOTA model.
 func (m *Manager) Sync(available map[string]bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	claimed := map[string]bool{}
 	changed := false
-	for _, g := range m.state.Groups {
+	for _, c := range m.cfg.Custom {
+		g := m.group(customID(c.Alias))
+		if g == nil {
+			continue
+		}
 		g.Available = map[string]bool{}
-		for model := range available {
-			if config.IsSOTA(model) == (g.ID == "sota") {
+		for _, model := range c.Order {
+			if available[model] && !claimed[model] {
 				g.Available[model] = true
+				claimed[model] = true
 			}
 		}
+	}
+	if g := m.group("sota"); g != nil {
+		g.Available = map[string]bool{}
+		for model := range available {
+			if config.IsSOTA(model) && !claimed[model] {
+				g.Available[model] = true
+				claimed[model] = true
+			}
+		}
+	}
+	if g := m.group("sweet"); g != nil {
+		g.Available = map[string]bool{}
 		added := []string{}
-		for model := range g.Available {
+		for model := range available {
+			if config.IsSOTA(model) || claimed[model] {
+				continue
+			}
+			g.Available[model] = true
+			claimed[model] = true
 			if !slices.Contains(g.Order, model) {
 				added = append(added, model)
 			}
 		}
 		sort.Strings(added)
-		if len(g.Order) == 0 && slices.Contains(added, "glm-5.3-flash") {
-			added = append([]string{"glm-5.3-flash"}, slices.Delete(added, slices.Index(added, "glm-5.3-flash"), slices.Index(added, "glm-5.3-flash")+1)...)
-		}
 		if len(added) > 0 {
 			g.Order = append(g.Order, added...)
 			changed = true
 		}
+	}
+	for _, g := range m.state.Groups {
 		if g.Current == "" && len(g.Order) > 0 {
 			g.Current = g.Order[0]
 			g.Generation++

@@ -317,16 +317,16 @@ const DICTIONARY = {
       "quotas.col.month": "Monthly remaining · shared",
       "quotas.col.action": "Action",
 
-      "rotation.title": "SOTA / sweet model rotation",
+      "rotation.title": "Model rotation",
       "rotation.caption":
-        "On success the current model is kept. When the quota runs out or an error occurs it moves in order, using OpenCode Go only.",
+        "Built-in SOTA / sweet groups plus any number of custom groups; members may come from either OpenCode Go or Zen. On success the current model is kept; when the quota runs out or an error occurs it moves in order.",
       "rotation.refresh": "Refresh status",
       "rotation.usage":
         "Keep your existing Base URL and API Key and set OPENAI_MODEL to the alias below. Each model is retried up to 3 times on ordinary errors, and a single request tries at most 3 models; a quota-exhausted model is skipped immediately.",
       "rotation.streaming":
         "Once output has started, the current answer stays on one model. A mid-stream error ends that output, and only the next request switches models. Models share the plan quota, so switching models does not guarantee escaping a quota exhaustion.",
       "rotation.timeout": "Maximum wait for the first valid output (seconds)",
-      "rotation.save": "Save aliases and order",
+      "rotation.save": "Save group configuration",
       "rotation.saveNote":
         "Saving takes effect immediately; reordering never cuts off an answer that is already streaming. Manually selecting the current model takes effect immediately and clears that model's paused state.",
       "rotation.attempts.title": "Recent attempts",
@@ -336,6 +336,25 @@ const DICTIONARY = {
       "rotation.col.model": "Actual model",
       "rotation.col.attempt": "Attempt",
       "rotation.col.result": "Result",
+      "rotation.list.title": "Groups",
+      "rotation.list.caption": "Pick a group to see its detail, or create a new custom rotation.",
+      "rotation.newGroup": "New custom group",
+      "rotation.customDefault": "Custom group",
+      "rotation.detail.none": "Pick a group to see its detail.",
+      "rotation.detail.sota": "Built-in group with the five fixed SOTA models; the order is adjustable.",
+      "rotation.detail.sweet":
+        "Built-in fallback group that absorbs the remaining Go / Zen models; the order is adjustable.",
+      "rotation.detail.custom":
+        "Custom group that rotates only the models listed below (from Go or Zen).",
+      "rotation.removeGroup": "Delete group",
+      "rotation.addModel": "Add model",
+      "rotation.remove": "Remove",
+      "rotation.removeModel": "Remove {0}",
+      "rotation.waitingAdd": "Waiting for a model to be added",
+      "rotation.itemAlias": "Alias {0}",
+      "rotation.modelCount": "{0} models",
+      "rotation.pausedCount": "{0} paused",
+      "rotation.noGroups": "No groups yet",
 
       "apikeys.create.title": "Create an API Key for a caller",
       "apikeys.create.caption":
@@ -506,7 +525,7 @@ const DICTIONARY = {
       "apikeys.empty": "No API Keys yet",
 
       "rotation.status":
-        "Status updated · the two rotation groups are independent and every caller shares the current position.",
+        "Status updated · custom and built-in groups rotate independently and every caller shares the current position.",
       "rotation.sweet": "sweet",
       "rotation.aliasLabel": "Call alias",
       "rotation.current": "Current model: {0}",
@@ -567,6 +586,7 @@ const DICTIONARY = {
       "toast.rotation.saved": "Model rotation configuration saved and in effect",
       "toast.rotation.switched": "Current model switched",
       "toast.rotation.dirty": "There are unsaved changes; save before refreshing",
+      "toast.rotation.groupEmpty": "No idle model available; add a model to this group first",
     },
 
     vi: {
@@ -864,16 +884,16 @@ const DICTIONARY = {
       "quotas.col.month": "Còn lại tháng · dùng chung",
       "quotas.col.action": "Thao tác",
 
-      "rotation.title": "Luân chuyển mô hình SOTA / sweet",
+      "rotation.title": "Luân chuyển mô hình",
       "rotation.caption":
-        "Thành công thì giữ nguyên mô hình hiện tại. Khi hết hạn mức hoặc gặp lỗi sẽ chuyển theo thứ tự, chỉ dùng OpenCode Go.",
+        "Nhóm SOTA / sweet có sẵn cùng bất kỳ nhóm tùy chỉnh nào; thành viên có thể đến từ OpenCode Go hoặc Zen. Thành công thì giữ nguyên mô hình hiện tại; khi hết hạn mức hoặc gặp lỗi sẽ chuyển theo thứ tự.",
       "rotation.refresh": "Làm mới trạng thái",
       "rotation.usage":
         "Giữ nguyên Base URL và API Key hiện có, đặt OPENAI_MODEL là bí danh bên dưới. Mỗi mô hình lỗi thường được thử tối đa 3 lần, mỗi request tối đa thử 3 mô hình; hết hạn mức thì bỏ qua ngay.",
       "rotation.streaming":
         "Sau khi bắt đầu có output, câu trả lời hiện tại giữ nguyên một mô hình. Lỗi giữa chừng sẽ kết thúc output đó, chỉ request sau mới đổi mô hình. Các mô hình dùng chung hạn mức gói, chuyển mô hình không bảo đảm thoát khỏi tình trạng hết hạn mức.",
       "rotation.timeout": "Giới hạn chờ output hợp lệ đầu tiên (giây)",
-      "rotation.save": "Lưu bí danh và thứ tự",
+      "rotation.save": "Lưu cấu hình nhóm",
       "rotation.saveNote":
         "Lưu là có hiệu lực ngay; đổi thứ tự không cắt ngang câu trả lời đang xuất. Chọn thủ công mô hình hiện tại sẽ có hiệu lực ngay và gỡ trạng thái tạm dừng của mô hình đó.",
       "rotation.attempts.title": "Các lần thử gần nhất",
@@ -883,6 +903,25 @@ const DICTIONARY = {
       "rotation.col.model": "Mô hình thực",
       "rotation.col.attempt": "Lần thử",
       "rotation.col.result": "Kết quả",
+      "rotation.list.title": "Danh sách nhóm",
+      "rotation.list.caption": "Chọn một nhóm để xem chi tiết, hoặc tạo nhóm tùy chỉnh mới.",
+      "rotation.newGroup": "Nhóm tùy chỉnh mới",
+      "rotation.customDefault": "Nhóm tùy chỉnh",
+      "rotation.detail.none": "Chọn một nhóm để xem chi tiết.",
+      "rotation.detail.sota": "Nhóm có sẵn gồm năm mô hình SOTA cố định; có thể chỉnh thứ tự.",
+      "rotation.detail.sweet":
+        "Nhóm dự phòng có sẵn, tự nhận các mô hình Go / Zen còn lại; có thể chỉnh thứ tự.",
+      "rotation.detail.custom":
+        "Nhóm tùy chỉnh chỉ luân chuyển các mô hình liệt kê bên dưới (từ Go hoặc Zen).",
+      "rotation.removeGroup": "Xóa nhóm",
+      "rotation.addModel": "Thêm mô hình",
+      "rotation.remove": "Gỡ",
+      "rotation.removeModel": "Gỡ {0}",
+      "rotation.waitingAdd": "Đang chờ thêm mô hình",
+      "rotation.itemAlias": "Bí danh {0}",
+      "rotation.modelCount": "{0} mô hình",
+      "rotation.pausedCount": "{0} tạm dừng",
+      "rotation.noGroups": "Chưa có nhóm nào",
 
       "apikeys.create.title": "Tạo API Key cho bên gọi",
       "apikeys.create.caption":
@@ -1053,7 +1092,7 @@ const DICTIONARY = {
       "apikeys.empty": "Chưa có API Key",
 
       "rotation.status":
-        "Đã cập nhật trạng thái · hai nhóm luân chuyển độc lập, mọi bên gọi dùng chung vị trí hiện tại.",
+        "Đã cập nhật trạng thái · nhóm tùy chỉnh và có sẵn luân chuyển độc lập, mọi bên gọi dùng chung vị trí hiện tại.",
       "rotation.sweet": "sweet",
       "rotation.aliasLabel": "Bí danh gọi",
       "rotation.current": "Mô hình hiện tại: {0}",
@@ -1114,6 +1153,7 @@ const DICTIONARY = {
       "toast.rotation.saved": "Đã lưu cấu hình luân chuyển mô hình và có hiệu lực",
       "toast.rotation.switched": "Đã chuyển mô hình hiện tại",
       "toast.rotation.dirty": "Có thay đổi chưa lưu, hãy lưu trước khi làm mới",
+      "toast.rotation.groupEmpty": "Không có mô hình rảnh; hãy thêm mô hình cho nhóm này trước",
     },
   };
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,19 +21,35 @@ import (
 	"opencode2api/internal/telemetry"
 )
 
-func (g *Gateway) syncRotation() {
-	available := map[string]bool{}
+// availableRotationModels lists the models a rotation group may use. A group
+// draws from both authenticated tiers (Zen and Go) in prefer order, mirroring
+// normal inference; the anonymous lane is not part of a rotation.
+func (g *Gateway) availableRotationModels() []string {
+	hasZen := len(g.cfg.ZenKeys) > 0
+	hasGo := len(g.cfg.GoKeys) > 0
+	models := make([]string, 0, len(g.catalog.List()))
 	for _, model := range g.catalog.List() {
-		if route, err := g.catalog.RouteForTier(model, config.TierGo, false, g.goNodes.Len() > 0); err == nil && route.Protocol != wire.SystemOne {
-			available[model] = true
+		if route, err := g.catalog.Route(model, hasZen, hasGo, false); err == nil && route.Protocol != wire.SystemOne {
+			models = append(models, model)
 		}
+	}
+	sort.Strings(models)
+	return models
+}
+func (g *Gateway) syncRotation() {
+	models := g.availableRotationModels()
+	available := make(map[string]bool, len(models))
+	for _, model := range models {
+		available[model] = true
 	}
 	g.rotation.Sync(available)
 }
 func (m *RuntimeManager) RotationSnapshot() rotation.Snapshot {
 	r := m.current.Load()
 	r.gateway.syncRotation()
-	return m.rotation.Snapshot()
+	snapshot := m.rotation.Snapshot()
+	snapshot.AvailableModels = r.gateway.availableRotationModels()
+	return snapshot
 }
 func (m *RuntimeManager) SelectRotation(id, model string) error {
 	m.updateMu.Lock()
@@ -81,8 +98,8 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 			break
 		}
 		visited[token.Model] = true
-		route, err := g.catalog.RouteForTier(token.Model, config.TierGo, false, g.goNodes.Len() > 0)
-		if err != nil {
+		route, err := g.catalog.Route(token.Model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, false)
+		if err != nil || route.Protocol == wire.SystemOne {
 			continue
 		}
 		counted := false
@@ -90,7 +107,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 			total++
 			if meta != nil {
 				meta.Model = token.Model
-				meta.Tier = "go"
+				meta.Tier = string(route.Tier)
 				meta.Protocol = route.Protocol
 				meta.Attempts = total
 				meta.Usage = wire.Usage{}
@@ -181,11 +198,20 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.reason = "request_conversion_error"
 		return result
 	}
-	body, toolAlias, shaped := g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
+	body, toolAlias, shaped := g.shapeKeyBody(bodies[route.Tier], route, route.Tier)
 	if meta := telemetry.MetaFromContext(parent); meta != nil {
 		meta.ToolAlias = toolAlias
 	}
-	cursor := g.goNodes.CursorFor(ids.Session)
+	// A group rotates across the authenticated tiers the model advertises.
+	// route.Tier is the preferred tier, so a model present on both Zen and Go
+	// follows prefer; a model on only one tier uses that tier's key pool.
+	nodes := g.zenNodes
+	baseURL := g.cfg.Upstream.Zen
+	if route.Tier == config.TierGo {
+		nodes = g.goNodes
+		baseURL = g.cfg.Upstream.Go
+	}
+	cursor := nodes.CursorFor(ids.Session)
 	var node *upstreamNode
 	// Each group attempt is exactly one HTTP call. Key selection may change,
 	// but there is no nested retry, stale-reasoning replay, or model-wide key ban.
@@ -193,15 +219,15 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		node = cursor.Next()
 	}
 	if node == nil {
-		result.err = errors.New("no Go key")
+		result.err = fmt.Errorf("no %s key", route.Tier)
 		return result
 	}
-	proxy := g.goNodes.Proxy(node)
+	proxy := nodes.Proxy(node)
 	if proxy == nil {
 		result.err = errors.New("no proxy")
 		return result
 	}
-	req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
+	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(route.Tier), body, ids, node.key)
 	if err != nil {
 		result.err = err
 		return result
@@ -210,7 +236,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	req.GetBody = nil
 	client := *proxy.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
+	setRequestCredential(parent, route.Tier, config.KeyDisplayID(node.key), "key", false, proxy)
 	started := time.Now()
 	resp, err := client.Do(req)
 	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
