@@ -846,7 +846,43 @@
                       <h2 class="section-title" data-i18n="config.proxy.title">Proxy 节点</h2>
                     </div>
                   </div>
-                  <div id="proxies-chips" class="chips"></div>
+                  <p class="section-caption" data-i18n="config.proxy.checkCaption">
+                    通过每条代理实际调用免费模型，收到完整文本回复才算可用。点击结果查看具体原因；移除代理后需保存配置。
+                  </p>
+                  <div class="actions proxy-actions">
+                    <button id="proxies-check-all" type="button" class="btn btn-sm" data-i18n="config.proxy.checkAll">检查当前列表</button>
+                    <button id="proxies-check-selected" type="button" class="btn btn-sm" data-i18n="config.proxy.checkSelected">检查所选</button>
+                    <button id="proxies-stop" type="button" class="btn btn-sm hidden" data-i18n="config.proxy.stop">停止检查</button>
+                    <button id="proxies-select-unavailable" type="button" class="btn btn-sm btn-ghost" data-i18n="config.proxy.selectUnavailable">全选不可用</button>
+                    <button id="proxies-clear-selection" type="button" class="btn btn-sm btn-ghost" data-i18n="config.proxy.clearSelection">取消选择</button>
+                    <button id="proxies-delete-selected" type="button" class="btn btn-sm btn-danger" data-i18n="config.proxy.deleteSelected">删除所选代理</button>
+                  </div>
+                  <div class="proxy-filters">
+                    <select id="proxies-filter" aria-label="检查结果筛选" data-i18n-attr="aria-label:config.proxy.filter">
+                      <option value="all" data-i18n="config.proxy.filterAll">全部结果</option>
+                      <option value="available" data-i18n="config.proxy.available">可用</option>
+                      <option value="unavailable" data-i18n="config.proxy.unavailable">未通过</option>
+                      <option value="error" data-i18n="config.proxy.checkFailed">检查失败</option>
+                      <option value="unchecked" data-i18n="config.proxy.unchecked">未检查</option>
+                    </select>
+                    <input id="proxies-search" type="search" placeholder="搜索代理或错误原因" data-i18n-attr="placeholder:config.proxy.search,aria-label:config.proxy.search" aria-label="搜索代理或错误原因" />
+                  </div>
+                  <p id="proxies-summary" class="section-caption" role="status" aria-live="polite"></p>
+                  <div class="table-wrap proxy-table-wrap">
+                    <table id="proxies-table" class="table proxy-table">
+                      <thead>
+                        <tr>
+                          <th><label class="proxy-select"><input id="proxies-select-all" type="checkbox" /><span data-i18n="config.proxy.selectAll">全选</span></label></th>
+                          <th data-i18n="config.proxy.node">代理</th>
+                          <th data-i18n="config.proxy.state">检查结果</th>
+                          <th data-i18n="config.proxy.model">测试模型</th>
+                          <th data-i18n="config.proxy.duration">耗时</th>
+                          <th data-i18n="config.proxy.actions">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody id="proxies-rows"></tbody>
+                    </table>
+                  </div>
                   <div class="form-grid">
                     <div class="field">
                       <label for="proxies-new" data-i18n="config.proxy.add">新增 Proxy（每行一个）</label>
