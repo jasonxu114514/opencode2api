@@ -26,6 +26,7 @@ type proxyTransport struct {
 	index    int
 	name     string
 	pool     bool
+	direct   bool
 	client   *http.Client
 	healthy  atomic.Bool
 	checking atomic.Bool
@@ -33,6 +34,10 @@ type proxyTransport struct {
 
 type transportPool struct {
 	items []*proxyTransport
+	// directIndex is the index of the "direct" transport (the local egress), or
+	// -1 when the configured list has no direct entry. KeysDirect pins the keyed
+	// lanes here so their exit IP stays stable.
+	directIndex int
 }
 
 // anonymousPool gives the shared OpenCode "public" credential an independent
@@ -65,6 +70,13 @@ func newAnonymousPool(enabled bool, transports *transportPool, cooldown time.Dur
 	}
 	pool.nodes = make([]*anonymousNode, 0, len(transports.items))
 	for _, proxy := range transports.items {
+		if proxy.direct {
+			// The anonymous lane exists to leave the local egress behind: the
+			// free tier rate-limits and region-gates it by IP, so trying direct
+			// first would waste an attempt on nearly every request. KeysDirect
+			// can add a direct entry to the pool, so exclude it here.
+			continue
+		}
 		if proxy.pool {
 			pool.hasPool = true
 		}
@@ -235,7 +247,7 @@ func (p *transportPool) healthCounts() (total, healthy int) {
 }
 
 func newTransportPool(proxies []string, cfg config.PerformanceConfig, responseHeaderTimeout time.Duration) (*transportPool, error) {
-	p := &transportPool{items: make([]*proxyTransport, 0, len(proxies))}
+	p := &transportPool{items: make([]*proxyTransport, 0, len(proxies)), directIndex: -1}
 	for _, raw := range proxies {
 		clean, isPool := config.ParseProxyEntry(raw)
 		transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -274,9 +286,12 @@ func newTransportPool(proxies []string, cfg config.PerformanceConfig, responseHe
 			}
 			transport.Proxy = http.ProxyURL(u)
 		}
-		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, client: &http.Client{Transport: transport}}
+		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, direct: clean == "direct", client: &http.Client{Transport: transport}}
 		proxy.healthy.Store(true)
 		p.items = append(p.items, proxy)
+		if proxy.direct && p.directIndex < 0 {
+			p.directIndex = proxy.index
+		}
 	}
 	return p, nil
 }
@@ -382,7 +397,13 @@ type nodePool struct {
 // newNodePool distributes keys over proxies in round-robin order. When there
 // are fewer keys than proxies, the remaining proxies are intentionally idle and
 // can take over a key immediately if an active proxy fails.
-func newNodePool(keys []string, transports *transportPool, cooldown time.Duration) (*nodePool, error) {
+//
+// With direct set, every key is pinned to the "direct" transport instead, so the
+// account keeps one stable exit IP while the anonymous lane keeps rotating. The
+// caller is responsible for the pool actually containing a direct entry (see
+// config.EnsureDirect); if it does not, this falls back to spreading rather than
+// failing the gateway.
+func newNodePool(keys []string, transports *transportPool, cooldown time.Duration, direct bool) (*nodePool, error) {
 	if transports == nil || len(transports.items) == 0 {
 		return nil, fmt.Errorf("at least one proxy transport is required")
 	}
@@ -395,8 +416,15 @@ func newNodePool(keys []string, transports *transportPool, cooldown time.Duratio
 	if len(keys) == 0 {
 		return pool, nil
 	}
+	pinned := -1
+	if direct {
+		pinned = transports.directIndex
+	}
 	for i, key := range keys {
 		proxyIndex := i % len(transports.items)
+		if pinned >= 0 {
+			proxyIndex = pinned
+		}
 		node := &upstreamNode{key: key, index: i, preferredProxy: proxyIndex}
 		node.proxyIndex.Store(int64(proxyIndex))
 		pool.nodes = append(pool.nodes, node)

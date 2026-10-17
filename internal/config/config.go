@@ -25,14 +25,23 @@ type Config struct {
 	Anonymous         bool                         `json:"anonymous"`
 	Proxies           []string                     `json:"proxies"`
 	ProxyFile         string                       `json:"proxyfile"`
-	Upstream          UpstreamConfig               `json:"upstream"`
-	Retry             RetryConfig                  `json:"retry"`
-	Models            ModelsConfig                 `json:"models"`
-	Performance       PerformanceConfig            `json:"performance"`
-	Logging           LoggingConfig                `json:"logging"`
-	WebUI             WebUIConfig                  `json:"webui"`
-	Prefer            Tier                         `json:"prefer"`
-	Reasoning         ReasoningConfig              `json:"reasoning"`
+	// KeysDirect pins the authenticated (Zen/Go) lanes to the local egress and
+	// keeps them off the proxy pool. Keyed traffic normally shares the pool with
+	// the anonymous lane, which means the account's egress IP changes from
+	// request to request; upstream may treat that as suspicious and the operator
+	// running many proxies has no way to opt out. With KeysDirect the keyed lanes
+	// keep one stable address while the anonymous lane keeps rotating, which is
+	// the combination a large scraped pool actually wants. Off by default so
+	// existing behaviour is unchanged.
+	KeysDirect  bool              `json:"keys_direct,omitempty"`
+	Upstream    UpstreamConfig    `json:"upstream"`
+	Retry       RetryConfig       `json:"retry"`
+	Models      ModelsConfig      `json:"models"`
+	Performance PerformanceConfig `json:"performance"`
+	Logging     LoggingConfig     `json:"logging"`
+	WebUI       WebUIConfig       `json:"webui"`
+	Prefer      Tier              `json:"prefer"`
+	Reasoning   ReasoningConfig   `json:"reasoning"`
 
 	effectiveProxies []string
 }

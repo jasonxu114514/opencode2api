@@ -67,16 +67,34 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 	if err != nil {
 		return nil, err
 	}
-	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
+	proxies := cfg.RuntimeProxies()
+	if cfg.KeysDirect {
+		// Make sure a local egress exists to pin the keyed lanes to. A config
+		// whose proxies all come from proxyfile has no direct entry, and silently
+		// ignoring keys_direct there would be worse than one extra entry.
+		proxies = config.EnsureDirect(proxies)
+	}
+	transports, err := newTransportPool(proxies, cfg.Performance, cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
 	if err != nil {
 		return nil, err
 	}
+	if cfg.KeysDirect {
+		if transports.directIndex >= 0 {
+			logger.Info("keyed lanes pinned to the direct egress",
+				"component", "gateway", "event", "keys_direct", "direct_index", transports.directIndex, "transports", len(transports.items))
+		} else {
+			// Should be unreachable after EnsureDirect, but never leave the
+			// operator believing a setting took effect when it did not.
+			logger.Warn("keys_direct is set but no direct egress is available; keyed lanes keep sharing the pool",
+				"component", "gateway", "event", "keys_direct_unavailable")
+		}
+	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
-	zenNodes, err := newNodePool(cfg.ZenKeys, transports, cooldown)
+	zenNodes, err := newNodePool(cfg.ZenKeys, transports, cooldown, cfg.KeysDirect)
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
 	}
-	goNodes, err := newNodePool(cfg.GoKeys, transports, cooldown)
+	goNodes, err := newNodePool(cfg.GoKeys, transports, cooldown, cfg.KeysDirect)
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}

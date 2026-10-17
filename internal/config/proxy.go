@@ -122,6 +122,23 @@ func uniqueProxyEntries(items []string) []string {
 	return out
 }
 
+// EnsureDirect returns proxies with a "direct" entry appended when it has none.
+// Callers that need a guaranteed local egress (KeysDirect pins the keyed lanes
+// to it) must use this instead of assuming the configured list contains one:
+// a config with only proxyfile entries has no direct transport, and a feature
+// that silently degrades to "spread across the pool" would be worse than an
+// explicit extra entry.
+func EnsureDirect(proxies []string) []string {
+	for _, item := range proxies {
+		if clean, _ := ParseProxyEntry(item); clean == "direct" {
+			return proxies
+		}
+	}
+	out := make([]string, 0, len(proxies)+1)
+	out = append(out, proxies...)
+	return append(out, "direct")
+}
+
 func trimList(items *[]string) {
 	out := (*items)[:0]
 	for _, item := range *items {
