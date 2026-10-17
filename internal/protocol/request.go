@@ -492,8 +492,15 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		}
 		for i, raw := range jsonutil.SliceAt(input, "tools") {
 			tool, ok := raw.(map[string]any)
-			if !ok || jsonutil.StringAt(tool, "type") != "function" {
-				return request, fmt.Errorf("tools[%d] must be a function tool", i)
+			if !ok {
+				return request, fmt.Errorf("tools[%d] must be an object", i)
+			}
+			// Built-in Responses tools (web_search, file_search, code_interpreter, …)
+			// have no Chat/Anthropic equivalent; skip them during cross-protocol
+			// bridging so requests that mix function tools with built-in plugins
+			// still reach the upstream.
+			if jsonutil.StringAt(tool, "type") != "function" {
+				continue
 			}
 			request.Tools = append(request.Tools, bridgeTool{
 				Name:        jsonutil.StringAt(tool, "name"),

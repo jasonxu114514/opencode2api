@@ -3,10 +3,37 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// ParseProxyEntry splits an optional dynamic-pool marker ("pool+" scheme prefix
+// or "#pool" URL fragment) from a configured proxy string and returns the clean
+// dial URL alongside whether the entry is a rotating proxy pool (such as Resin).
+func ParseProxyEntry(raw string) (clean string, pool bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "direct" {
+		return trimmed, false
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "pool+") {
+		trimmed = strings.TrimSpace(trimmed[len("pool+"):])
+		pool = true
+	}
+	if u, err := url.Parse(trimmed); err == nil && u.Host != "" {
+		if strings.EqualFold(strings.TrimSpace(u.Fragment), "pool") {
+			pool = true
+			u.Fragment = ""
+			trimmed = u.String()
+		}
+	} else if idx := strings.LastIndex(trimmed, "#"); idx >= 0 && strings.EqualFold(strings.TrimSpace(trimmed[idx+1:]), "pool") {
+		pool = true
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	return trimmed, pool
+}
 
 func resolveProxyFiles(configPath string, cfg *Config) error {
 	trimList(&cfg.Proxies)
@@ -23,7 +50,7 @@ func resolveProxyFiles(configPath string, cfg *Config) error {
 		effective = append(effective, proxies...)
 	}
 
-	effective = uniqueStrings(effective)
+	effective = uniqueProxyEntries(effective)
 	if len(effective) == 0 {
 		effective = []string{"direct"}
 	}
@@ -66,14 +93,30 @@ func stripProxyLineComment(line string) string {
 	return line
 }
 
-func uniqueStrings(items []string) []string {
+// uniqueProxyEntries drops exact repeats while keeping a #pool entry next to a
+// static proxy that dials the same endpoint: they are different routes (fresh
+// connection, no cooldown, no health eviction), not two spellings of one.
+func uniqueProxyEntries(items []string) []string {
 	out := items[:0]
 	seen := make(map[string]struct{}, len(items))
+	pools := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if _, exists := seen[item]; exists {
+		key, pool := ParseProxyEntry(item)
+		if key == "" {
 			continue
 		}
-		seen[item] = struct{}{}
+		if pool {
+			if _, exists := pools[key]; exists {
+				continue
+			}
+			pools[key] = struct{}{}
+			out = append(out, item)
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		out = append(out, item)
 	}
 	return out

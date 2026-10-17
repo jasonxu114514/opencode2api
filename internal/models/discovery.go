@@ -19,8 +19,9 @@ const (
 	CapabilitiesURL = "https://models.opencode.ai/api.json"
 	ZenDocsURL      = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx"
 	GoDocsURL       = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx"
-	// LegacyZenBase is the console origin that still serves the anonymous
-	// models listing after chat traffic moved to the inference backend.
+	// LegacyZenBase is the legacy /zen console origin (serving /zen/v1/*) that
+	// still serves anonymous inference and the models listing alongside the newer
+	// /inference backend.
 	LegacyZenBase = "https://opencode.ai/zen"
 )
 
@@ -269,12 +270,17 @@ type modelsResponse struct {
 }
 
 func FetchModels(ctx context.Context, client *http.Client, baseURL, key string) ([]string, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/v1/models", nil)
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed+"/v1/models", nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("User-Agent", httpx.UserAgent())
+	if strings.EqualFold(trimmed, strings.TrimRight(LegacyZenBase, "/")) || strings.HasSuffix(strings.ToLower(trimmed), "/zen") {
+		req.Header.Set("User-Agent", httpx.LegacyUserAgent())
+	} else {
+		req.Header.Set("User-Agent", httpx.UserAgent())
+	}
 	req.Header.Set("x-opencode-client", "cli")
 	resp, err := client.Do(req)
 	if err != nil {

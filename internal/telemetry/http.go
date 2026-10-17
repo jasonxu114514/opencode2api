@@ -36,10 +36,15 @@ type RequestMeta struct {
 	// upstream account that served the request.
 	ServerKeyID string
 	// Shaped marks a key-tier free-model request whose wire body was
-	// normalized to agent shape (stream + core tools) like the anonymous
+	// normalized to agent shape (stream + required tools) like the anonymous
 	// lane. Non-streaming responses for shaped requests arrive as SSE
 	// and must be collapsed like anonymous ones.
-	Shaped         bool
+	Shaped bool
+	// ToolAlias holds the client's original read-related tool name (e.g.
+	// "reAd" or "read_file") when the legacy /zen/v1 shaper renamed it to
+	// "read" on the outbound wire. When non-empty, "read" tool calls in the
+	// upstream response are rewritten back to ToolAlias before returning.
+	ToolAlias      string
 	Usage          protocol.Usage
 	UsageReported  bool
 	AttemptOutcome string

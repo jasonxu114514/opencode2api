@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -454,4 +455,93 @@ func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 		return decodeAnthropicUsage(usage), true
 	}
 	return decodeOpenAIUsage(usage), true
+}
+
+// RenameResponseTool rewrites tool call names matching fromName to toName inside
+// a serialized JSON response or SSE event data object for the given protocol.
+// It is used to restore a client's original read-related tool name (e.g.
+// "reAd" or "read_file") after the legacy /zen/v1 shaper aliased it to "read"
+// on the outbound wire.
+//
+// fromName is guaranteed not to occur as a substring of any other text in a
+// response (tool names are never echoed back inside content), so a byte-level
+// occurrence check is enough to skip the re-marshal for the vast majority of
+// frames.
+func RenameResponseTool(body []byte, protocol Protocol, fromName, toName string) []byte {
+	if fromName == "" || toName == "" || fromName == toName || len(body) == 0 {
+		return body
+	}
+	if !bytes.Contains(body, []byte(fromName)) {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if !renameToolInMap(payload, protocol, fromName, toName) {
+		return body
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+func renameToolInMap(payload map[string]any, protocol Protocol, fromName, toName string) bool {
+	changed := false
+	switch protocol {
+	case Chat:
+		for _, rawChoice := range jsonutil.SliceAt(payload, "choices") {
+			choice, _ := rawChoice.(map[string]any)
+			for _, key := range []string{"message", "delta"} {
+				container := jsonutil.MapAt(choice, key)
+				for _, rawCall := range jsonutil.SliceAt(container, "tool_calls") {
+					call, _ := rawCall.(map[string]any)
+					if function, ok := call["function"].(map[string]any); ok && jsonutil.StringAt(function, "name") == fromName {
+						function["name"] = toName
+						changed = true
+					}
+				}
+			}
+		}
+	case Responses:
+		if item, ok := payload["item"].(map[string]any); ok {
+			if jsonutil.StringAt(item, "type") == "function_call" && jsonutil.StringAt(item, "name") == fromName {
+				item["name"] = toName
+				changed = true
+			}
+		}
+		for _, rawItem := range jsonutil.SliceAt(payload, "output") {
+			item, _ := rawItem.(map[string]any)
+			if jsonutil.StringAt(item, "type") == "function_call" && jsonutil.StringAt(item, "name") == fromName {
+				item["name"] = toName
+				changed = true
+			}
+		}
+		if resp, ok := payload["response"].(map[string]any); ok {
+			for _, rawItem := range jsonutil.SliceAt(resp, "output") {
+				item, _ := rawItem.(map[string]any)
+				if jsonutil.StringAt(item, "type") == "function_call" && jsonutil.StringAt(item, "name") == fromName {
+					item["name"] = toName
+					changed = true
+				}
+			}
+		}
+	case Anthropic:
+		if block, ok := payload["content_block"].(map[string]any); ok {
+			if jsonutil.StringAt(block, "type") == "tool_use" && jsonutil.StringAt(block, "name") == fromName {
+				block["name"] = toName
+				changed = true
+			}
+		}
+		for _, rawBlock := range jsonutil.SliceAt(payload, "content") {
+			block, _ := rawBlock.(map[string]any)
+			if jsonutil.StringAt(block, "type") == "tool_use" && jsonutil.StringAt(block, "name") == fromName {
+				block["name"] = toName
+				changed = true
+			}
+		}
+	}
+	return changed
 }

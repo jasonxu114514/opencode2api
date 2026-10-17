@@ -257,6 +257,10 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			copyErrorResponse(w, external, resp, ids.Request)
 			return
 		}
+		var toolAlias string
+		if meta != nil {
+			toolAlias = meta.ToolAlias
+		}
 		if stream {
 			if meta != nil {
 				meta.Stream = true
@@ -269,12 +273,13 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
+			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
+				usage, usageReported, err = wire.ForwardStream(r.Context(), w, streamBody, upstreamRoute.Protocol, model)
 			} else {
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
+				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, model)
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -309,6 +314,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			}
 			responseBody = collapsed
 		}
+		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
 		}

@@ -1,0 +1,280 @@
+/* Reset, typography, focus, skip link and the two-column application shell. */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-1);
+  font: var(--fs-base) / var(--lh-base) var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+ul,
+ol,
+dl,
+dd,
+figure {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+.hidden {
+  display: none !important;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+:focus-visible {
+  outline: 2px solid var(--text-1);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: fixed;
+  top: -80px;
+  left: var(--sp-4);
+  z-index: 100;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-md);
+}
+
+.skip-link:focus {
+  top: var(--sp-4);
+}
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-3);
+  border-right: 1px solid var(--border-1);
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+}
+
+.brand-name {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.nav {
+  display: grid;
+  gap: var(--sp-5);
+  min-width: 0;
+}
+
+.nav-group {
+  display: grid;
+  gap: 2px;
+}
+
+.nav-group-title {
+  padding: 0 var(--sp-2) var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.nav-item {
+  display: block;
+  width: 100%;
+  padding: 7px var(--sp-2);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  text-align: left;
+  font-size: var(--fs-base);
+}
+
+.nav-item:hover {
+  color: var(--text-1);
+  background: var(--bg-subtle);
+}
+
+.nav-item.active {
+  color: var(--text-1);
+  background: var(--bg-subtle);
+  font-weight: 500;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding: var(--sp-3) var(--sp-2) 0;
+  border-top: 1px solid var(--border-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding: var(--sp-6) var(--sp-8) var(--sp-4);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.page-title {
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.page-sub {
+  margin-top: var(--sp-1);
+  max-width: 640px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+
+.topbar-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--sp-2);
+}
+
+main {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding: var(--sp-6) var(--sp-8) var(--sp-12);
+}
+
+@media (max-width: 980px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
+    gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-1);
+    overflow: visible;
+  }
+
+  .nav {
+    display: flex;
+    gap: var(--sp-4);
+    overflow-x: auto;
+    padding-bottom: var(--sp-1);
+  }
+
+  .nav-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .nav-group-title {
+    display: none;
+  }
+
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .sidebar-foot {
+    display: none;
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: var(--sp-5) var(--sp-4) var(--sp-3);
+  }
+
+  .topbar-actions {
+    justify-content: flex-end;
+  }
+
+  main {
+    padding: var(--sp-5) var(--sp-4) var(--sp-10);
+  }
+}
+
+@media (max-width: 680px) {
+  main {
+    padding-inline: var(--sp-3);
+  }
+
+  .topbar {
+    padding-inline: var(--sp-3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

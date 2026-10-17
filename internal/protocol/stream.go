@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+
+	"opencode2api/internal/jsonutil"
 )
 
 var errStreamUpstreamFailure = errors.New("upstream stream failure delivered")
@@ -184,6 +187,204 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		return usage, observer.Reported(), err
 	}
 	return usage, observer.Reported(), cause
+}
+
+// RenameStreamReader wraps an SSE stream reader and rewrites tool call names
+// matching fromName back to toName before downstream parsers or writers consume
+// the stream. When fromName or toName is empty (or identical), reader is
+// returned unchanged.
+//
+// It is a pull-based transform instead of a goroutine plus io.Pipe so a client
+// that disconnects mid-stream cannot strand a blocked writer.
+func RenameStreamReader(reader io.Reader, protocol Protocol, fromName, toName string) io.Reader {
+	if fromName == "" || toName == "" || fromName == toName {
+		return reader
+	}
+	return &renameStreamReader{
+		buffer:  bufio.NewReaderSize(reader, 64<<10),
+		renamer: &streamToolRenamer{protocol: protocol, fromName: fromName, toName: toName, tools: map[string]*streamToolRenameState{}},
+	}
+}
+
+type renameStreamReader struct {
+	buffer  *bufio.Reader
+	renamer *streamToolRenamer
+	pending []byte
+	err     error
+}
+
+func (reader *renameStreamReader) Read(data []byte) (int, error) {
+	for len(reader.pending) == 0 {
+		if reader.err != nil {
+			return 0, reader.err
+		}
+		// ReadString either returns a non-empty chunk with a nil error or
+		// returns the trailing chunk together with EOF, so this loop can only
+		// repeat while a rewritten chunk is still being drained.
+		line, err := reader.buffer.ReadString('\n')
+		if len(line) > 0 {
+			reader.pending = reader.rewriteLine(line)
+		}
+		if err != nil {
+			// The final chunk is drained before the error is reported so a
+			// truncated stream still delivers every byte the upstream sent.
+			reader.err = err
+			if len(reader.pending) == 0 {
+				return 0, err
+			}
+		}
+	}
+	n := copy(data, reader.pending)
+	reader.pending = reader.pending[n:]
+	return n, nil
+}
+
+// rewriteLine transforms one complete SSE line, preserving its original bytes
+// and terminator whenever nothing needs to be rewritten.
+func (reader *renameStreamReader) rewriteLine(line string) []byte {
+	body, terminator := line, ""
+	if trimmed := strings.TrimSuffix(line, "\n"); trimmed != line {
+		terminator = "\n"
+		body = trimmed
+		if trimmed = strings.TrimSuffix(body, "\r"); trimmed != body {
+			terminator = "\r\n"
+			body = trimmed
+		}
+	}
+	if !strings.HasPrefix(body, "data:") {
+		return []byte(line)
+	}
+	raw := strings.TrimSpace(strings.TrimPrefix(body, "data:"))
+	if raw == "" || raw == "[DONE]" {
+		return []byte(line)
+	}
+	rewritten := reader.renamer.rewriteFrame(raw)
+	if string(rewritten) == raw {
+		return []byte(line)
+	}
+	return []byte("data: " + string(rewritten) + terminator)
+}
+
+// streamToolRenameState tracks how one tool call's name was resolved while a
+// stream is rewritten. Chat deltas may repeat a growing name prefix or append
+// fragments, so a value that is still a prefix of fromName is held back until
+// it either completes the match or diverges.
+type streamToolRenameState struct {
+	decided bool
+	renamed bool
+	pending string
+}
+
+type streamToolRenamer struct {
+	protocol Protocol
+	fromName string
+	toName   string
+	tools    map[string]*streamToolRenameState
+}
+
+// rewriteFrame rewrites one decoded SSE data object.
+func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
+	if renamer.protocol != Chat {
+		// Anthropic and Responses streams always carry a complete tool name in
+		// a single event, so the stateless object rewrite is exact.
+		if !strings.Contains(raw, renamer.fromName) {
+			return []byte(raw)
+		}
+		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.fromName, renamer.toName)
+	}
+	if !strings.Contains(raw, `"tool_calls"`) {
+		return []byte(raw)
+	}
+	return renamer.rewriteChatFrame(raw)
+}
+
+func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return []byte(raw)
+	}
+	changed := false
+	for _, rawChoice := range jsonutil.SliceAt(payload, "choices") {
+		choice, _ := rawChoice.(map[string]any)
+		for _, container := range []string{"delta", "message"} {
+			message, _ := choice[container].(map[string]any)
+			if message == nil {
+				continue
+			}
+			for callIndex, rawCall := range jsonutil.SliceAt(message, "tool_calls") {
+				call, _ := rawCall.(map[string]any)
+				function, _ := call["function"].(map[string]any)
+				if function == nil {
+					continue
+				}
+				state := renamer.toolState(fmt.Sprint(jsonutil.FirstAny(call["index"], jsonutil.StringAt(call, "id"), callIndex)))
+				if name, ok := function["name"].(string); ok && name != "" {
+					if renamer.applyNameFragment(state, function, name) {
+						changed = true
+					}
+				}
+				if _, ok := function["arguments"]; ok && !state.decided {
+					// Arguments can only start once the name is complete: flush
+					// whatever was held back, verbatim.
+					if state.pending != "" {
+						function["name"] = state.pending
+						changed = true
+					}
+					state.decided = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return []byte(raw)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(raw)
+	}
+	return encoded
+}
+
+// applyNameFragment folds one name fragment into a tool's rename state and
+// reports whether the frame changed.
+func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState, function map[string]any, fragment string) bool {
+	if state.decided {
+		if !state.renamed {
+			return false
+		}
+		// A resolved alias accepts no further fragments: any continuation
+		// belongs to a longer name the client never declared.
+		if _, exists := function["name"]; exists {
+			delete(function, "name")
+			return true
+		}
+		return false
+	}
+	state.pending = mergeToolName(state.pending, fragment)
+	switch {
+	case state.pending == renamer.fromName:
+		function["name"] = renamer.toName
+		state.decided, state.renamed = true, true
+		return true
+	case strings.HasPrefix(renamer.fromName, state.pending):
+		// Still a prefix of the alias: hold the fragment until a later frame
+		// either completes the match or diverges.
+		delete(function, "name")
+		return true
+	default:
+		function["name"] = state.pending
+		state.decided = true
+		return true
+	}
+}
+
+func (renamer *streamToolRenamer) toolState(key string) *streamToolRenameState {
+	if state := renamer.tools[key]; state != nil {
+		return state
+	}
+	state := &streamToolRenameState{}
+	renamer.tools[key] = state
+	return state
 }
 
 type streamUsageObserver struct {

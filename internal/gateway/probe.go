@@ -42,7 +42,7 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 	return item.AutoEffort.Effort
 }
 
-func probePayload(model string, protocol wire.Protocol, effort string) ([]byte, error) {
+func probePayload(model string, protocol wire.Protocol, effort string, legacy bool) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
 		return json.Marshal(map[string]any{"model": model, "state": "1 + 1 = 2", "questions": map[string]any{
@@ -61,7 +61,8 @@ func probePayload(model string, protocol wire.Protocol, effort string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	return prepareAnonymousBody(b, protocol), nil
+	shaped, _ := prepareAnonymousBody(b, protocol, legacy)
+	return shaped, nil
 }
 
 func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult {
@@ -82,7 +83,10 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	if g.cfg.Anonymous {
 		cursor := g.anonymous.CursorFor(ids.Session)
 		if node := cursor.Next(); node != nil {
-			lanes = append(lanes, lane{anonymousZenKey, "anonymous", g.cfg.Upstream.Anonymous, node.proxy.client})
+			// Prefer the legacy /zen/v1 lane before falling back to /inference.
+			for _, baseURL := range g.anonymousUpstreams() {
+				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, node.proxy.client})
+			}
 		}
 	}
 	cursor := g.zenNodes.CursorFor(ids.Session)
@@ -143,7 +147,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 }
 
 func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string) probeResult {
-	b, err := probePayload(model, protocol, effort)
+	b, err := probePayload(model, protocol, effort, isLegacyZenUpstream(baseURL))
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
 	}

@@ -33,7 +33,7 @@
 go test ./...
 go test -race ./...
 go vet ./...
-node --check webui/app.js
+for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
 go build -trimpath -o opencode2api ./cmd/opencode2api
 ```
 
@@ -81,7 +81,7 @@ Messages，以及这三种协议的流式输出。真实模型 ID 的原有调�
 - `POST /api/rotation/current`：`{"group":"sota","model":"glm-5.3"}`；立即
   修改当前模型并解除该模型的临时暂停。
 
-验证：`go test -race ./...`、`go vet ./...`、`node --check webui/app.js`。
+验证：`go test -race ./...`、`go vet ./...`、`for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done`。
 模拟上游测试覆盖 9 次普通错误上限、超过 3 个额度跳过、混合错误预算、
 Retry-After、单个模型故障不影响 Key、三种入口协议的跨协议转换、成功保持、
 别名发现与用量归属、畸形响应、输出前错误、首个输出超时、输出后故障、

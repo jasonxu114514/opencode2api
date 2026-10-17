@@ -1,0 +1,84 @@
+/* Design tokens: monochrome scale, semantic status colors, type and spacing. */
+:root {
+  color-scheme: light;
+
+  --bg: #fafafa;
+  --bg-subtle: #f1f1f1;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --text-1: #0a0a0a;
+  --text-2: #5e5e5e;
+  --text-3: #8f8f8f;
+  --border-1: #e6e6e6;
+  --border-2: #d4d4d4;
+  --inverse-bg: #0a0a0a;
+  --inverse-text: #ffffff;
+  --inverse-hover: #333333;
+  --focus-ring: rgba(10, 10, 10, 0.14);
+  --overlay: rgba(0, 0, 0, 0.45);
+
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --warn-bg: #fff8c5;
+  --bad: #cf222e;
+  --bad-bg: #ffebe9;
+
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-2xl: 24px;
+  --fs-3xl: 30px;
+
+  --lh-base: 1.6;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+
+  --sidebar-w: 232px;
+  --content-max: 1280px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --bg: #0a0a0a;
+    --bg-subtle: #171717;
+    --surface: #121212;
+    --surface-2: #0d0d0d;
+    --text-1: #ededed;
+    --text-2: #a0a0a0;
+    --text-3: #787878;
+    --border-1: #262626;
+    --border-2: #3a3a3a;
+    --inverse-bg: #ededed;
+    --inverse-text: #0a0a0a;
+    --inverse-hover: #cfcfcf;
+    --focus-ring: rgba(237, 237, 237, 0.18);
+    --overlay: rgba(0, 0, 0, 0.6);
+
+    --ok: #3fb950;
+    --warn: #d29922;
+    --warn-bg: rgba(210, 153, 34, 0.15);
+    --bad: #f85149;
+    --bad-bg: rgba(248, 81, 73, 0.15);
+  }
+}
