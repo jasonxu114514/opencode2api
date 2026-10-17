@@ -164,9 +164,17 @@ async function loadAvailability() {
           ? t("切回自动", "availability.switchAuto")
           : t("切为手动", "availability.switchManual"),
       });
+      const hide = el("button", {
+        type: "button",
+        class: "btn btn-sm btn-ghost",
+        text: item.hidden
+          ? t("对客户端显示", "availability.unhide")
+          : t("对客户端隐藏", "availability.hide"),
+      });
       const run = async (path, body) => {
         restore.disabled = true;
         toggle.disabled = true;
+        hide.disabled = true;
         try {
           await api(path, { method: "POST", body: JSON.stringify(body) });
           await loadAvailability();
@@ -175,15 +183,27 @@ async function loadAvailability() {
           $("#availability-error").textContent = error.message;
           restore.disabled = !item.disabled;
           toggle.disabled = false;
+          hide.disabled = false;
         }
       };
       restore.addEventListener("click", () => run("/api/models/restore", { model: item.model }));
       toggle.addEventListener("click", () =>
         run("/api/models/manual", { model: item.model, manual: !item.manual }),
       );
+      hide.addEventListener("click", () =>
+        run("/api/models/hide", { model: item.model, hidden: !item.hidden }),
+      );
       host.append(
         el("tr", {}, [
-          el("td", { class: "mono", text: item.model }),
+          el("td", {}, [
+            el("span", { class: "mono", text: item.model }),
+            item.hidden
+              ? el("span", {
+                  class: "warn",
+                  text: ` · ${t("已隐藏", "availability.hidden")}`,
+                })
+              : null,
+          ].filter(Boolean)),
           el("td", {
             class: item.disabled ? "warn" : "ok",
             text: item.disabled ? t("已禁用", "state.disabled") : t("已启用", "state.enabled"),
@@ -206,11 +226,13 @@ async function loadAvailability() {
           el("td", { class: "mono", text: date(item.checked_at) }),
           el("td", {
             class: "mono",
-            text: item.manual
-              ? t("手动控制，不自动探测", "availability.manualControl")
-              : date(item.next_check),
+            text: item.hidden
+              ? t("已隐藏，不探测", "availability.notProbed")
+              : item.manual
+                ? t("手动控制，不自动探测", "availability.manualControl")
+                : date(item.next_check),
           }),
-          el("td", {}, [el("div", { class: "key-actions" }, [restore, toggle])]),
+          el("td", {}, [el("div", { class: "key-actions" }, [restore, toggle, hide])]),
         ]),
       );
     }

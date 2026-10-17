@@ -436,6 +436,7 @@
                         <th data-i18n="diagnostics.models.col.eligibility">匿名资格</th>
                         <th data-i18n="diagnostics.models.col.source">判断来源</th>
                         <th class="num" data-i18n="diagnostics.models.col.cost">成本 input / output</th>
+                        <th data-i18n="diagnostics.models.col.actions">操作</th>
                       </tr>
                     </thead>
                     <tbody id="diagnostic-models"></tbody>
@@ -661,7 +662,7 @@
                   <div>
                     <h2 class="section-title" data-i18n="availability.title">免费模型探测</h2>
                     <p class="section-caption" data-i18n="availability.desc">
-                      检查名称含 free 或零价未弃用的模型；仅明确失效才禁用并在 24 小时后复测，临时错误不新增禁用。手动控制的模型保持启用，不自动探测。
+                      检查名称含 free 或零价未弃用的模型；仅明确失效才禁用并在 24 小时后复测，临时错误不新增禁用。手动控制的模型保持启用，不自动探测。隐藏的模型不会出现在 /v1/models，不会被路由，也不再探测；它们仍列在此处（排在末尾）以便恢复显示。
                     </p>
                   </div>
                   <button id="availability-refresh" class="btn btn-sm" data-i18n="availability.refresh">

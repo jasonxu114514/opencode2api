@@ -223,6 +223,10 @@ When only anonymous access is configured, `/v1/models` exposes only models eligi
 
 Free models never need a Zen key: with `anonymous: true` they are served by the public lane, and a configured key is only their fallback. To keep keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models may still fall back to the configured keys.
 
+### Hidden models
+
+`models.hidden` lists model IDs that clients must not see. A hidden model disappears from `/v1/models`, is rejected as a direct request target, is never picked by model fallback, and is not a valid rotation alias member — the same visibility rules as `free_only`, applied per model. Unlike a disabled model it is not "broken": its last probe result is kept for reference, but a hidden model is no longer probed at all — it generates no upstream traffic while it is hidden. IDs do not have to exist yet, so a model can be pre-hidden before its provider publishes it; such an entry is only removed from the config file, because the page can only list models the catalog already knows. The WebUI toggles this list from the free-model availability page and from the model routing table under diagnostics (`POST /api/models/hide`); a console save never clears it. Hiding from the routing table keeps the row in place: it collapses to the tail of the table (dimmed, model name struck through) and can be unhidden there, without leaving the page. Hidden rows also sort to the tail of the availability table, so the models a client can actually use stay at the top.
+
 ### Free model availability
 
 The gateway probes models whose IDs contain `free` (case-insensitive), or whose metadata reports zero input/output cost without deprecation, with a short request using its native protocol. It tries the enabled anonymous lane first and then one configured Zen Key. A valid completed response on either lane keeps the model enabled; the model is disabled in discovery and routing only when every attempted lane explicitly reports that the model does not exist or has been retired. Authentication errors, rate limits, timeouts, transport errors, 5xx responses, and malformed replies are inconclusive: they do not create a new disable, and are checked again in one hour. Probe traffic does not alter production key/proxy cooldowns or request statistics. It still reaches the upstream and may consume its free allowance.
@@ -267,6 +271,7 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
+| `models.hidden`             | `[]`; model IDs kept hidden from clients, routing, fallback and probing.    |
 | `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
 | `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |
 

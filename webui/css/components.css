@@ -444,6 +444,17 @@ textarea {
   gap: var(--sp-1);
 }
 
+/* Hidden models stay in the routing table, collapsed at the tail, so the
+   operator can unhide them without leaving the page. */
+.table tbody tr.row-hidden td {
+  opacity: 0.55;
+}
+
+.table tbody tr.row-hidden td .mono {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-3);
+}
+
 .filters {
   display: grid;
   grid-template-columns: 140px 160px minmax(180px, 1fr) auto;

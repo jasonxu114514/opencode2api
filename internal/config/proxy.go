@@ -131,3 +131,27 @@ func trimList(items *[]string) {
 	}
 	*items = out
 }
+
+// normalizeHidden trims the model blocklist, drops empty entries, and removes
+// duplicates while keeping the operator's order. Model IDs are case-sensitive
+// on purpose: the catalog keys on the upstream spelling.
+func normalizeHidden(cfg *Config) {
+	if len(cfg.Models.Hidden) == 0 {
+		cfg.Models.Hidden = nil
+		return
+	}
+	seen := make(map[string]struct{}, len(cfg.Models.Hidden))
+	out := make([]string, 0, len(cfg.Models.Hidden))
+	for _, item := range cfg.Models.Hidden {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	cfg.Models.Hidden = out
+}

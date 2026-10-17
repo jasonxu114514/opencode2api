@@ -71,6 +71,9 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
+	// Hidden blocks models from discovery and routing without removing them
+	// from the catalog, so the operator can unhide them later.
+	Hidden []string `json:"hidden,omitempty"`
 }
 
 type LoggingConfig struct {
@@ -170,6 +173,7 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if err := resolveProxyFiles(path, &cfg); err != nil {
 		return Config{}, err
 	}
+	normalizeHidden(&cfg)
 	if cfg.Prefer != TierZen && cfg.Prefer != TierGo {
 		return Config{}, errors.New("prefer must be \"zen\" or \"go\"")
 	}
@@ -359,6 +363,9 @@ func Clone(cfg Config) Config {
 			protocols[key] = value
 		}
 		cfg.Models.Protocols = protocols
+	}
+	if cfg.Models.Hidden != nil {
+		cfg.Models.Hidden = append([]string(nil), cfg.Models.Hidden...)
 	}
 	if cfg.Reasoning.EffortByModel != nil {
 		efforts := make(map[string]string, len(cfg.Reasoning.EffortByModel))

@@ -44,3 +44,23 @@ func (a *Server) handleManualModel(w http.ResponseWriter, r *http.Request) {
 	}
 	a.handleAvailability(w, r)
 }
+
+func (a *Server) handleHideModel(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Model  string `json:"model"`
+		Hidden *bool  `json:"hidden"`
+	}
+	if err := decodeAdminJSON(w, r, &input); err != nil {
+		writeAdminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	if input.Hidden == nil {
+		writeAdminError(w, 400, "invalid_request", "hidden is required")
+		return
+	}
+	if err := a.manager.SetHiddenModel(input.Model, *input.Hidden); err != nil {
+		writeAdminError(w, 400, "hide_failed", a.manager.Redact(err.Error()))
+		return
+	}
+	a.handleAvailability(w, r)
+}

@@ -107,7 +107,7 @@ const DICTIONARY = {
       "availability.title": "Probe free models",
       "availability.refresh": "Refresh status",
       "availability.desc":
-        "Probes models whose metadata name contains free or whose price is 0 and that have not been excluded. The anonymous channel is tried first, and a Zen Key only after that; a model is disabled once it is genuinely broken and retried after 24 hours. Transient errors do not add extra disabled models: an enabled model is retried after 1 hour, and a disabled one keeps its old reason and is retried after 24 hours. When a model is re-enabled or switched to manual control it stays enabled and is no longer probed automatically; when it switches back to automatic, the next scheduler tick schedules the probe. System One uses its own dedicated 1+1 decision question set. With the effort set to auto, the highest probed and verified effort is shown.",
+        "Probes models whose metadata name contains free or whose price is 0 and that have not been excluded. The anonymous channel is tried first, and a Zen Key only after that; a model is disabled once it is genuinely broken and retried after 24 hours. Transient errors do not add extra disabled models: an enabled model is retried after 1 hour, and a disabled one keeps its old reason and is retried after 24 hours. When a model is re-enabled or switched to manual control it stays enabled and is no longer probed automatically; when it switches back to automatic, the next scheduler tick schedules the probe. System One uses its own dedicated 1+1 decision question set. With the effort set to auto, the highest probed and verified effort is shown. Hidden models are not listed in /v1/models and are never routed, but they are still probed and shown here.",
       "availability.col.model": "Model",
       "availability.col.state": "State",
       "availability.col.channel": "Channel / result",
@@ -226,6 +226,9 @@ const DICTIONARY = {
       "diagnostics.models.col.eligibility": "Anonymous eligibility",
       "diagnostics.models.col.source": "Evaluation source",
       "diagnostics.models.col.cost": "Input / output cost",
+      "diagnostics.models.col.actions": "Actions",
+      "diagnostics.models.hide": "Hide from clients",
+      "diagnostics.models.hiddenRoute": "Hidden — not routed",
       "diagnostics.requests.title": "Request routing",
       "diagnostics.requests.caption":
         "The key tail or anonymous channel actually used per request; only the 100 most recent records are shown.",
@@ -543,6 +546,12 @@ const DICTIONARY = {
       "availability.restore": "Re-enable",
       "availability.switchAuto": "Switch back to automatic",
       "availability.switchManual": "Switch to manual",
+      "availability.hide": "Hide from clients",
+      "availability.unhide": "Show to clients",
+      "availability.hidden": "hidden",
+      "availability.notProbed": "Hidden — not probed",
+      "toast.model.hidden": "Model hidden from clients — row collapsed at the tail of the table",
+      "toast.model.visible": "Model visible to clients again",
       "availability.noneEligible":
         "No model in the current catalog qualifies as free.",
 
@@ -653,7 +662,7 @@ const DICTIONARY = {
       "availability.title": "Dò mô hình miễn phí",
       "availability.refresh": "Làm mới trạng thái",
       "availability.desc":
-        "Kiểm tra các mô hình có tên chứa free hoặc giá bằng 0 trong metadata và chưa bị loại bỏ. Ưu tiên kênh ẩn danh, sau đó mới thử Zen Key; chỉ vô hiệu hóa khi mô hình hẳn đã hỏng và thử lại sau 24 giờ. Lỗi tạm thời không tạo thêm mô hình bị vô hiệu hóa: mô hình đang bật thử lại sau 1 giờ, mô hình đã tắt giữ nguyên lý do cũ và thử lại sau 24 giờ. Khi khôi phục bật hoặc chuyển sang điều khiển thủ công, mô hình giữ nguyên bật và không còn được dò tự động; khi chuyển lại tự động, lượt định tuyến kế tiếp sẽ sắp xếp lần dò. System One dùng bộ câu hỏi quyết định riêng 1+1. Khi đặt cường độ auto, hiển thị bậc cao nhất đã được dò xác minh.",
+        "Kiểm tra các mô hình có tên chứa free hoặc giá bằng 0 trong metadata và chưa bị loại bỏ. Ưu tiên kênh ẩn danh, sau đó mới thử Zen Key; chỉ vô hiệu hóa khi mô hình hẳn đã hỏng và thử lại sau 24 giờ. Lỗi tạm thời không tạo thêm mô hình bị vô hiệu hóa: mô hình đang bật thử lại sau 1 giờ, mô hình đã tắt giữ nguyên lý do cũ và thử lại sau 24 giờ. Khi khôi phục bật hoặc chuyển sang điều khiển thủ công, mô hình giữ nguyên bật và không còn được dò tự động; khi chuyển lại tự động, lượt định tuyến kế tiếp sẽ sắp xếp lần dò. System One dùng bộ câu hỏi quyết định riêng 1+1. Khi đặt cường độ auto, hiển thị bậc cao nhất đã được dò xác minh. Mô hình bị ẩn không còn trong /v1/models và không được định tuyến, nhưng vẫn được dò và hiển thị tại đây.",
       "availability.col.model": "Mô hình",
       "availability.col.state": "Trạng thái",
       "availability.col.channel": "Kênh / Kết quả",
@@ -772,6 +781,9 @@ const DICTIONARY = {
       "diagnostics.models.col.eligibility": "Điều kiện ẩn danh",
       "diagnostics.models.col.source": "Nguồn đánh giá",
       "diagnostics.models.col.cost": "Chi phí input / output",
+      "diagnostics.models.col.actions": "Thao tác",
+      "diagnostics.models.hide": "Ẩn khỏi client",
+      "diagnostics.models.hiddenRoute": "Đã ẩn — không định tuyến",
       "diagnostics.requests.title": "Định tuyến request",
       "diagnostics.requests.caption":
         "Đuôi Key hoặc anonymous thực sự được dùng cho từng request; hiển thị tối đa 100 bản ghi gần nhất.",
@@ -1090,6 +1102,12 @@ const DICTIONARY = {
       "availability.restore": "Khôi phục bật",
       "availability.switchAuto": "Chuyển lại tự động",
       "availability.switchManual": "Chuyển sang thủ công",
+      "availability.hide": "Ẩn khỏi client",
+      "availability.unhide": "Hiện cho client",
+      "availability.hidden": "đã ẩn",
+      "availability.notProbed": "Đã ẩn — không dò",
+      "toast.model.hidden": "Đã ẩn mô hình khỏi client — hàng đã gộp xuống cuối bảng",
+      "toast.model.visible": "Mô hình đã hiện lại cho client",
       "availability.noneEligible":
         "Danh mục mô hình hiện tại không có mô hình nào đủ điều kiện miễn phí.",
 

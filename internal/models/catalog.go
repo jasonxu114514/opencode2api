@@ -46,6 +46,10 @@ type RouteDiagnostic struct {
 	KeyTiers             []config.Tier                 `json:"key_tiers,omitempty"`
 	AnonymousEligibility AnonymousDecision             `json:"anonymous_eligibility"`
 	RouteError           string                        `json:"route_error,omitempty"`
+	// Hidden mirrors models.hidden for the routing table. It is display state
+	// only: hidden models keep their diagnostic row so the operator can unhide
+	// them in place, sorted to the tail of the table.
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 type Catalog struct {
@@ -67,6 +71,7 @@ type Catalog struct {
 	stale           bool
 	refreshAfter    time.Duration
 	freeOnly        bool
+	hidden          map[string]bool
 }
 
 type CatalogSnapshot struct {
@@ -88,6 +93,7 @@ func NewCatalog(prefer config.Tier, overrides map[string]string) *Catalog {
 		zen: map[string]bool{}, goModels: map[string]bool{}, protocols: protocols,
 		nativeProtocols: map[config.Tier]map[string]wire.Protocol{config.TierZen: {}, config.TierGo: {}},
 		unsupported:     map[config.Tier]map[string]bool{config.TierZen: {}, config.TierGo: {}}, prefer: prefer,
+		hidden:      map[string]bool{},
 		cacheSource: "none",
 	}
 }
@@ -141,6 +147,36 @@ func (c *Catalog) SetFreeOnly(enabled bool) {
 func (c *Catalog) freeOnlyErrorLocked(model string) error {
 	if c.freeOnly && !c.anonymousDecision(model).Allowed {
 		return fmt.Errorf("model %q is not free and models.free_only is enabled", model)
+	}
+	return nil
+}
+
+// SetHidden replaces the operator's blocklist. Hidden models disappear from
+// discovery, routing, rotation and diagnostics, but stay in the catalog so the
+// availability page can still list them and unhide them later.
+func (c *Catalog) SetHidden(models []string) {
+	set := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model = strings.TrimSpace(model); model != "" {
+			set[model] = true
+		}
+	}
+	c.mu.Lock()
+	c.hidden = set
+	c.mu.Unlock()
+}
+
+// IsHidden reports whether the operator blocked a model.
+func (c *Catalog) IsHidden(model string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.hidden[model]
+}
+
+// hiddenErrorLocked rejects blocked models on both routing entry points.
+func (c *Catalog) hiddenErrorLocked(model string) error {
+	if c.hidden[model] {
+		return fmt.Errorf("model %q is hidden by models.hidden", model)
 	}
 	return nil
 }
@@ -226,6 +262,9 @@ func (c *Catalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous 
 		return Route{}, fmt.Errorf("model %q is disabled after a failed availability check; restore it in the WebUI or wait for the next probe", model)
 	}
 	if err := c.freeOnlyErrorLocked(model); err != nil {
+		return Route{}, err
+	}
+	if err := c.hiddenErrorLocked(model); err != nil {
 		return Route{}, err
 	}
 	keyTiers := c.keyTierOrderLocked(model, hasZenKeys, hasGoKeys)
@@ -328,6 +367,9 @@ func (c *Catalog) RouteForTier(model string, tier config.Tier, hasZenKeys, hasGo
 	if err := c.freeOnlyErrorLocked(model); err != nil {
 		return Route{}, err
 	}
+	if err := c.hiddenErrorLocked(model); err != nil {
+		return Route{}, err
+	}
 	catalogPending := len(c.zen) == 0 && len(c.goModels) == 0
 	advertised := c.zen[model]
 	if tier == config.TierGo {
@@ -392,7 +434,7 @@ func (c *Catalog) Diagnostic(model string, requested wire.Protocol, hasZenKeys, 
 	}
 	diagnostic := RouteDiagnostic{
 		Model: model, RequestedProtocol: requested, NativeProtocol: protocol, NativeProtocols: nativeProtocols, ProtocolSource: source,
-		AvailableZen: zen, AvailableGo: goModel, AnonymousEligibility: c.anonymousDecision(model),
+		AvailableZen: zen, AvailableGo: goModel, AnonymousEligibility: c.anonymousDecision(model), Hidden: c.hidden[model],
 	}
 	route, err := c.Route(model, hasZenKeys, hasGoKeys, hasAnonymous)
 	if err != nil {
@@ -417,6 +459,22 @@ func (c *Catalog) List() []string {
 	models := ids[:0]
 	for _, model := range ids {
 		if c.supportedLocked(model) {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+// ListAll returns every protocol-supported model, hidden ones included. Only
+// the availability page and its admin API consult it: everything that routes or
+// advertises models stays on List.
+func (c *Catalog) ListAll() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ids := c.modelIDsLocked()
+	models := ids[:0]
+	for _, model := range ids {
+		if c.supportedAnyLocked(model) {
 			models = append(models, model)
 		}
 	}
@@ -522,6 +580,15 @@ func (c *Catalog) MetadataForTier(model string, tier config.Tier) Metadata {
 }
 
 func (c *Catalog) supportedLocked(model string) bool {
+	if c.hidden[model] {
+		return false
+	}
+	return c.supportedAnyLocked(model)
+}
+
+// supportedAnyLocked answers the protocol question without consulting the
+// blocklist, so the availability page can list hidden models.
+func (c *Catalog) supportedAnyLocked(model string) bool {
 	if len(c.zen) == 0 && len(c.goModels) == 0 {
 		return true
 	}

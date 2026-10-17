@@ -83,6 +83,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 	catalog := models.NewCatalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
+	catalog.SetHidden(cfg.Models.Hidden)
 	return &Gateway{
 		cfg:            cfg,
 		rotation:       rotationManager,
@@ -145,6 +146,17 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// rejectHiddenModel answers a model blocked by models.hidden with a message
+// that names the real cause; the generic "unsupported protocol" error would be
+// misleading, because a hidden model can still be perfectly routable.
+func (g *Gateway) rejectHiddenModel(w http.ResponseWriter, p wire.Protocol, model string) bool {
+	if !g.catalog.IsHidden(model) {
+		return false
+	}
+	wire.WriteError(w, p, http.StatusNotFound, fmt.Sprintf("model %q is hidden by the operator and is not exposed to clients", model), "invalid_request_error", "model")
+	return true
+}
+
 func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
@@ -168,6 +180,9 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		}
 		if id := g.rotation.GroupID(model); id != "" {
 			g.handleRotation(w, r, external, payload, id, model)
+			return
+		}
+		if g.rejectHiddenModel(w, external, model) {
 			return
 		}
 		if !g.catalog.Supported(model) {
@@ -353,6 +368,9 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 	}
 	if model == "" {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
+		return
+	}
+	if g.rejectHiddenModel(w, wire.SystemOne, model) {
 		return
 	}
 	if !g.catalog.Supported(model) {

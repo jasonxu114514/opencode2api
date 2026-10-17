@@ -260,29 +260,65 @@ function renderRouteModels() {
     .forEach((item) => {
       const eligibility = item.anonymous_eligibility || {};
       const plan = [...(item.anonymous ? ["anonymous"] : []), ...(item.key_tiers || [])];
-      host.append(
-        el("tr", {}, [
-          el("td", { class: "mono", text: item.model }),
-          el("td", { text: `${item.native_protocol} · ${item.protocol_source}` }),
-          el("td", {
-            class: item.route_error ? "bad" : "",
-            text: item.route_error || (plan.length ? plan.join(" → ") : "—"),
-          }),
-          el("td", {
-            class: eligibility.allowed ? "ok" : "warn",
-            text: eligibility.allowed ? t("允许", "common.allowed") : t("拒绝", "common.denied"),
-          }),
-          el("td", { text: eligibility.source || "—" }),
-          el("td", {
-            class: "num",
-            text: `${eligibility.input_cost == null ? "?" : eligibility.input_cost} / ${
-              eligibility.output_cost == null ? "?" : eligibility.output_cost
-            }`,
-          }),
-        ]),
-      );
+      const hide = el("button", {
+        type: "button",
+        class: "btn btn-sm btn-ghost",
+        text: item.hidden
+          ? t("对客户端显示", "availability.unhide")
+          : t("对客户端隐藏", "diagnostics.models.hide"),
+      });
+      hide.addEventListener("click", async () => {
+        hide.disabled = true;
+        try {
+          await api("/api/models/hide", {
+            method: "POST",
+            body: JSON.stringify({ model: item.model, hidden: !item.hidden }),
+          });
+          await loadDebugModels();
+          toast(
+            item.hidden
+              ? t("已恢复对客户端显示", "toast.model.visible")
+              : t("已从客户端隐藏，行已折叠到表格末尾", "toast.model.hidden"),
+          );
+        } catch (error) {
+          hide.disabled = false;
+          toast(error.message, true);
+        }
+      });
+      const cells = [
+        el("td", {}, [
+          el("span", { class: "mono", text: item.model }),
+          item.hidden
+            ? el("span", {
+                class: "warn",
+                text: ` · ${t("已隐藏", "availability.hidden")}`,
+              })
+            : null,
+        ].filter(Boolean)),
+        el("td", { text: `${item.native_protocol} · ${item.protocol_source}` }),
+        el("td", {
+          class: item.hidden ? "" : item.route_error ? "bad" : "",
+          text: item.hidden
+            ? t("已隐藏，不参与路由", "diagnostics.models.hiddenRoute")
+            : item.route_error || (plan.length ? plan.join(" → ") : "—"),
+        }),
+        el("td", {
+          class: eligibility.allowed ? "ok" : "warn",
+          text: eligibility.allowed ? t("允许", "common.allowed") : t("拒绝", "common.denied"),
+        }),
+        el("td", { text: eligibility.source || "—" }),
+        el("td", {
+          class: "num",
+          text: `${eligibility.input_cost == null ? "?" : eligibility.input_cost} / ${
+            eligibility.output_cost == null ? "?" : eligibility.output_cost
+          }`,
+        }),
+        el("td", {}, [el("div", { class: "key-actions" }, [hide])]),
+      ];
+      const row = el("tr", { class: item.hidden ? "row-hidden" : "" }, cells);
+      host.append(row);
     });
-  if (!host.children.length) emptyRow(host, 6, t("没有匹配模型", "diag.noMatch"));
+  if (!host.children.length) emptyRow(host, 7, t("没有匹配模型", "diag.noMatch"));
 }
 
 let activeTab = "playground";

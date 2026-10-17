@@ -18,13 +18,17 @@ type EffortProbe struct {
 }
 
 type Availability struct {
-	Model           string      `json:"model"`
-	Disabled        bool        `json:"disabled"`
-	CheckedAt       time.Time   `json:"checked_at,omitempty"`
-	NextCheck       time.Time   `json:"next_check"`
-	Reason          string      `json:"reason,omitempty"`
-	Channel         string      `json:"channel,omitempty"`
-	Manual          bool        `json:"manual,omitempty"`
+	Model     string    `json:"model"`
+	Disabled  bool      `json:"disabled"`
+	CheckedAt time.Time `json:"checked_at,omitempty"`
+	NextCheck time.Time `json:"next_check"`
+	Reason    string    `json:"reason,omitempty"`
+	Channel   string    `json:"channel,omitempty"`
+	Manual    bool      `json:"manual,omitempty"`
+	// Hidden mirrors models.hidden for the availability page. It is display
+	// state only: a hidden model keeps its real probe result rather than being
+	// reported as healthy.
+	Hidden          bool        `json:"hidden,omitempty"`
 	Generation      uint64      `json:"-"`
 	ProbeVersion    int         `json:"probe_version,omitempty"`
 	AutoEffort      EffortProbe `json:"auto_effort,omitempty"`

@@ -5,23 +5,39 @@ import (
 
 	"errors"
 
+	"strings"
+
 	"time"
 
+	"opencode2api/internal/config"
 	"opencode2api/internal/models"
 )
 
 func (m *RuntimeManager) AvailabilitySnapshot() []models.Availability {
 	items := []models.Availability{}
+	hiddenItems := []models.Availability{}
 	r := m.current.Load()
 	if r == nil {
 		return items
 	}
-	for _, model := range r.gateway.catalog.List() {
-		if r.gateway.catalog.IsFreeModel(model) {
-			items = append(items, r.availability.Get(model))
+	for _, model := range r.gateway.catalog.ListAll() {
+		hidden := r.gateway.catalog.IsHidden(model)
+		// The page probes free models, but it is also the only place to unhide
+		// a model, so hidden ones are listed even when they are not free.
+		if !hidden && !r.gateway.catalog.IsFreeModel(model) {
+			continue
 		}
+		item := r.availability.Get(model)
+		item.Hidden = hidden
+		// Hidden models are not probed and cannot be routed to, but this page is
+		// the only place to unhide them, so they stay listed at the tail.
+		if hidden {
+			hiddenItems = append(hiddenItems, item)
+			continue
+		}
+		items = append(items, item)
 	}
-	return items
+	return append(items, hiddenItems...)
 }
 
 func (m *RuntimeManager) RestoreModel(model string) error {
@@ -56,6 +72,37 @@ func (m *RuntimeManager) SetManualModel(model string, manual bool) error {
 	return errors.New("unknown free model")
 }
 
+// SetHiddenModel adds or removes a model from the operator blocklist. The model
+// does not have to exist yet: pre-hiding an upcoming model is allowed, which is
+// why the ID is not validated against the catalog. Update() re-reads the live
+// configuration and persists the change, so a console save racing this call
+// cannot drop the edit.
+func (m *RuntimeManager) SetHiddenModel(model string, hidden bool) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return errors.New("model is required")
+	}
+	_, err := m.Update(func(candidate *config.Config) error {
+		next := make([]string, 0, len(candidate.Models.Hidden)+1)
+		found := false
+		for _, item := range candidate.Models.Hidden {
+			if item == model {
+				found = true
+				if !hidden {
+					continue
+				}
+			}
+			next = append(next, item)
+		}
+		if hidden && !found {
+			next = append(next, model)
+		}
+		candidate.Models.Hidden = next
+		return nil
+	})
+	return err
+}
+
 func (m *RuntimeManager) startAvailabilityChecks() {
 	ctx, cancel := context.WithCancel(m.root)
 	m.availabilityCancel = cancel
@@ -77,6 +124,12 @@ func (m *RuntimeManager) checkFreeModels(ctx context.Context) {
 	for _, item := range m.AvailabilitySnapshot() {
 		if ctx.Err() != nil {
 			return
+		}
+		// The operator blocklist is a true blocklist: a hidden model is not
+		// exposed, not routed, and not probed. Skipping it here keeps a model
+		// nobody can call from generating upstream traffic every minute.
+		if item.Hidden {
+			continue
 		}
 		r := m.current.Load()
 		if r == nil {

@@ -351,13 +351,21 @@ func (m *RuntimeManager) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcat
 		return nil, modelcatalog.MetadataSnapshot{}
 	}
 	gateway := runtime.gateway
-	models := gateway.catalog.List()
-	result := make([]modelcatalog.RouteDiagnostic, 0, len(models))
-	for _, model := range models {
-		result = append(result, gateway.catalog.Diagnostic(model, "", len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0, gateway.cfg.Anonymous))
+	// ListAll keeps hidden models in the routing table (tail, collapsed) so the
+	// operator can unhide them in place; everything that routes or advertises
+	// models stays on List.
+	all := gateway.catalog.ListAll()
+	visible := make([]modelcatalog.RouteDiagnostic, 0, len(all))
+	hidden := make([]modelcatalog.RouteDiagnostic, 0)
+	for _, model := range all {
+		diagnostic := gateway.catalog.Diagnostic(model, "", len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0, gateway.cfg.Anonymous)
+		if diagnostic.Hidden {
+			hidden = append(hidden, diagnostic)
+			continue
+		}
+		visible = append(visible, diagnostic)
 	}
-	metadata := gateway.catalog.MetadataSnapshot()
-	return result, metadata
+	return append(visible, hidden...), gateway.catalog.MetadataSnapshot()
 }
 
 func (m *RuntimeManager) DebugRoute(model string, requested protocol.Protocol) modelcatalog.RouteDiagnostic {
