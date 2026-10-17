@@ -19,7 +19,10 @@ import (
 type probeResult struct {
 	success, attempted, effortRejected bool
 	reason, channel                    string
-	effort                             models.EffortProbe
+	// proxy is the redacted exit that served the reported attempt, so a
+	// per-IP 403/429 can be told apart from a broken proxy or a bad model.
+	proxy  string
+	effort models.EffortProbe
 }
 
 func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.Protocol) string {
@@ -65,6 +68,15 @@ func probePayload(model string, protocol wire.Protocol, effort string, legacy bo
 	return shaped, nil
 }
 
+// Probe scans are bounded: one probe is a full upstream request, so sweeping
+// every configured exit on every availability cycle would multiply probe
+// traffic by the pool size. Two siblings per lane are enough to distinguish
+// "this exit is out of quota" from "the model is gone".
+const (
+	maxProbeAnonymousExits = 2
+	maxProbeKeys           = 2
+)
+
 func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult {
 	if !g.catalog.IsFreeModel(model) {
 		return probeResult{reason: "not_free"}
@@ -78,21 +90,44 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	type lane struct {
 		key, name, baseURL string
 		client             *http.Client
+		proxy              string
 	}
 	var lanes []lane
 	if g.cfg.Anonymous {
+		// Probe a couple of sibling anonymous exits, not just the
+		// affinity-pinned first one: the anonymous lane is rate-limited per
+		// exit IP, so one quota-exhausted exit must not fail the whole model
+		// while others serve it fine. The scan is capped because every probe
+		// is a real upstream request and an unbounded sweep would multiply
+		// probe traffic by the number of configured exits.
 		cursor := g.anonymous.CursorFor(ids.Session)
-		if node := cursor.Next(); node != nil {
+		exits := 0
+		for attempt := 0; attempt < g.anonymous.Len() && exits < maxProbeAnonymousExits; attempt++ {
+			node := cursor.Next()
+			if node == nil {
+				break
+			}
+			exits++
 			// Prefer the legacy /zen/v1 lane before falling back to /inference.
 			for _, baseURL := range g.anonymousUpstreams() {
-				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, node.proxy.client})
+				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, node.proxy.client, config.RedactURL(node.proxy.name)})
 			}
 		}
 	}
-	cursor := g.zenNodes.CursorFor(ids.Session)
-	if node := cursor.Next(); node != nil {
+	// Likewise, one bad key must not decide the verdict while sibling keys
+	// in the same tier are healthy. Bounded for the same traffic reason.
+	seen := make(map[*upstreamNode]bool, g.zenNodes.Len())
+	zcursor := g.zenNodes.CursorFor(ids.Session)
+	keys := 0
+	for i := 0; i < g.zenNodes.Len() && keys < maxProbeKeys; i++ {
+		node := zcursor.Next()
+		if node == nil || seen[node] {
+			break
+		}
+		seen[node] = true
 		if proxy := g.zenNodes.Proxy(node); proxy != nil {
-			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, proxy.client})
+			keys++
+			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, proxy.client, config.RedactURL(proxy.name)})
 		}
 	}
 	result := probeResult{reason: "no_probe_channel"}
@@ -106,6 +141,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 		}
 		result = run("")
 		result.channel = lane.name
+		result.proxy = lane.proxy
 		if result.success {
 			if g.cfg.ForcedEffort(model) == "auto" && protocol != wire.SystemOne {
 				if !g.catalog.MetadataForTier(model, config.TierZen).Reasoning {

@@ -6,6 +6,12 @@
   "anonymous": false,
   "proxies": ["direct"],
   "proxyfile": "",
+  "proxy_by_model": {},
+  "proxy_retry": {
+    "max_attempts": 0,
+    "interval_seconds": 0
+  },
+  "model_fallback": {},
   "upstream": {
     "zen": "https://opencode.ai/zen",
     "go": "https://opencode.ai/zen/go",

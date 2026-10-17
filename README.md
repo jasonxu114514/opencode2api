@@ -247,6 +247,39 @@ Without an explicit ID, the first user message is used as a seed. Conversations 
 
 Cooldowns grow exponentially up to eight times `performance.failure_cooldown_seconds`, and a longer `Retry-After` is honored. If every authenticated key is cooling down, routing may try the key whose cooldown ends first. Anonymous nodes still in cooldown are skipped.
 
+### Per-model proxies
+
+`proxy_by_model` gives each model its own allowed exit pool (a subset of the
+global `proxies`/`proxyfile` list, in priority order). Unlisted models use the
+global pool; `"*"` is an optional default override.
+
+```json
+{
+  "proxies": ["direct", "http://us1:7890", "http://us2:7890"],
+  "proxy_by_model": {
+    "us-only-model": ["http://us1:7890", "http://us2:7890"],
+    "global-model": ["direct"]
+  },
+  "proxy_retry": { "max_attempts": 3, "interval_seconds": 2 },
+  "model_fallback": { "us-only-model": "global-model" }
+}
+```
+
+- Values must already exist in the global proxy list (`direct` included);
+  typos are rejected on save/startup instead of silently falling back.
+  Values accept raw URLs or proxy fingerprints, so the WebUI checkbox builder
+  can reference credentialed proxies without pasting passwords.
+- `rotation` aliases (`sota`/`sweet`) are resolved to the real model first,
+  then the real model's pool applies.
+- `proxy_retry.max_attempts: 0` means "use `retry.max_attempts`";
+  `interval_seconds` sleeps only between transport failures and never exceeds
+  `retry.timeout_seconds`.
+- `model_fallback` is a single hop (`A→C`, no chaining). If `A` exhausts its
+  pool with a retryable failure, `C` is tried with its own pool/tiers. No entry
+  means "fail the request" (`A` mode); an entry means "try `C`" (`B` mode).
+  Non-retryable `4xx` never falls back. Diagnostic single-key requests never
+  fall back.
+
 ## Configuration reference
 
 See [config.example.json](config.example.json) for a complete starting configuration. JSON supports `//` and `/* ... */` comments; unknown fields and invalid values are rejected.
@@ -264,6 +297,10 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `upstream.go`               | `https://opencode.ai/zen/go`.                                               |
 | `proxies`                   | Falls back to `["direct"]` when both proxy sources are empty.               |
 | `proxyfile`                 | Optional; relative paths resolve beside the configuration file.             |
+| `proxy_by_model`            | `{}`; per-model allowed proxy pools (subset of global proxies).            |
+| `proxy_retry.max_attempts`  | `0` (use `retry.max_attempts`); range 0–10.                                 |
+| `proxy_retry.interval_seconds` | `0` (immediate); range 0–60.                                             |
+| `model_fallback`            | `{}`; single-hop `A→C` fallback on retryable pool exhaustion.              |
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
@@ -344,6 +381,7 @@ Use it when the endpoint behind the URL already performs the rotation and the po
 | `retry.max_attempts`                    | `3`     | Attempts per authenticated tier, including the first.  |
 | `retry.timeout_seconds`                 | `300`   | Total inference timeout, including stream consumption. |
 | `performance.attempt_timeout_seconds`   | `0`     | Whole-attempt bound; 0 uses the request timeout.       |
+| `performance.first_event_timeout_seconds` | `0` | First SSE event wait; 0 disables. Try `15` for fewer hung streams. |
 | `performance.connect_timeout_seconds`   | `5`     | Connection establishment timeout.                      |
 | `performance.failure_cooldown_seconds`  | `15`    | Base failure cooldown.                                 |
 | `performance.max_idle_conns`            | `2048`  | Idle connection limit per proxy transport.             |
@@ -352,6 +390,52 @@ Use it when the endpoint behind the URL already performs the rotation and the po
 | `performance.idle_conn_timeout_seconds` | `120`   | Idle connection lifetime.                              |
 
 The per-attempt header timeout is capped by the request timeout. Set it below the total timeout if a slow upstream should leave time for fallback. Expired request contexts stop further attempts without penalizing unused keys or proxies.
+
+### Stream resilience (fewer broken tasks)
+
+Long agent tasks break in exactly one place that matters: **after HTTP 200,
+mid-stream**. Headers are out and partial tokens are already flushed, so the
+turn cannot be replayed — the gateway emits an `upstream_error` SSE event and
+the client must resume manually (opencode: type “继续”). Everything below
+exists to make that event rarer and the resume cheaper.
+
+Failure classes and what the gateway does with each:
+
+| Failure | Example | Retry? | Why |
+| ------- | ------- | ------ | --- |
+| `transport_error` (no HTTP status) | connect timeout, refused, DNS/TLS, proxy down | Yes, next key/proxy (+ `proxy_retry` sleep) | Nothing was sent upstream yet |
+| `429 / 5xx` | rate limit, overloaded, gateway error | Yes, next key/proxy; honors `Retry-After` | Transient by definition |
+| `401 / 403` | bad key, no permission | Rotate key, same request | This key will never work |
+| Other `4xx` | bad params, unknown model | No (leaves the tier) | Retrying the same bytes cannot help |
+| `200` then break before first SSE event | accepted but silent | Yes, next key/proxy (needs `first_event_timeout_seconds` > 0) | Nothing committed downstream yet |
+| `200` then break mid-stream (`stream_error`) | `Streaming response failed`, `transport` after 12s | **No replay**; cools the serving key/proxy briefly | Partial output already flushed; replay would duplicate it |
+| Upstream-sent error event | content filter, explicit error envelope | No cooling, error passed through | The exit behaved correctly |
+| Client gone (`client_canceled`) | closed tab, Ctrl+C | No cooling, no retry | Nothing to serve |
+
+Two mechanisms specifically protect long streams:
+
+- **First-event guard** (`performance.first_event_timeout_seconds`, try `15`):
+  a 200 that never emits is held back and retried pre-commit instead of
+  hanging the whole request budget. `0` disables it.
+- **Broken-exit cooling**: when a stream breaks mid-flight (and it was a real
+  connection break, not an upstream error event or a gone client), the exact
+  key/proxy that served it gets one short cooldown. Session affinity would
+  otherwise pin your “继续” straight back onto the same flaky exit.
+  Non-streaming body truncation is different — headers are still unwritten —
+  so it gets one safe fresh round automatically.
+
+Practical tuning for fewer interruptions:
+
+1. `first_event_timeout_seconds: 15`, `attempt_timeout_seconds` below
+   `retry.timeout_seconds` so one hung exit cannot eat the whole budget.
+2. Give region-sensitive models their own stable pool (`proxy_by_model`); keep
+   a flaky exit out of every pool instead of sharing it globally.
+3. `model_fallback` (`A→B`) only helps failures **before** commit. Mid-stream
+   breaks never fall back — by the time B could answer, A already spoke.
+4. In monitoring, `legs` (`key:status:ms`) show the attempt chain at a glance;
+   logs `stream_failed` / `attempt_transport_failed` / `stream_exit_cooled`
+   identify the bad exit; `proxy_unavailable` / `proxy_restored` track pool
+   health. If one proxy dominates the failures, remove or replace it.
 
 ### Logging and management
 

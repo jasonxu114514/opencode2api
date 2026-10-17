@@ -128,6 +128,13 @@ func emitUnexpectedStreamError(emitter *bridgeStreamEmitter, cause error) error 
 	return err
 }
 
+// UpstreamSignaledError reports whether stream processing stopped because the
+// upstream itself sent an error envelope (content filter, rejected request,
+// explicit error event). A true result means the exit did nothing wrong: the
+// key/proxy must not be cooled for it. Connection breaks (unexpected EOF,
+// reset, timeouts) return false so callers can cool the serving exit.
+func UpstreamSignaledError(err error) bool { return errors.Is(err, errStreamUpstreamFailure) }
+
 func ClientCanceled(ctx context.Context, streamErr error) bool {
 	if errors.Is(streamErr, context.Canceled) {
 		return true

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	"opencode2api/internal/models"
@@ -214,7 +215,29 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 		defer cancel()
-		resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
+		upstreamCtx := requestCtx
+		resp, upstreamRoute, err := g.doUpstream(upstreamCtx, route, bodies, ids)
+		if err != nil && shouldModelFallback(requestCtx, err, nil) {
+			if fallback := g.cfg.FallbackFor(model); fallback != "" {
+				if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
+					if fallbackResp, fallbackRoute, fallbackErr := g.tryModelFallback(upstreamCtx, external, payload, ids, model, fallback); fallbackErr == nil && fallbackResp != nil {
+						g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+						resp, upstreamRoute, err = fallbackResp, fallbackRoute, nil
+						model = fallback
+						if meta != nil {
+							meta.Model = fallback
+							meta.Effort = g.resolvedEffort(fallback, fallbackRoute.Tier, fallbackRoute.Protocol)
+						}
+						w.Header().Set("x-resolved-model", fallback)
+					} else {
+						g.logger.Warn("model fallback failed; keeping primary error", "component", "upstream", "event", "model_fallback_failed", "request_id", ids.Request, "from_model", model, "to_model", fallback, "error", fallbackErr)
+						if fallbackResp != nil {
+							httpx.DrainAndClose(fallbackResp.Body)
+						}
+					}
+				}
+			}
+		}
 		if err != nil {
 			finalTier := route.Tier
 			if meta != nil && meta.Tier != "" {
@@ -251,11 +274,54 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		if meta != nil {
 			meta.Tier = string(upstreamRoute.Tier)
 			meta.Protocol = upstreamRoute.Protocol
+			meta.Effort = g.resolvedEffort(model, upstreamRoute.Tier, upstreamRoute.Protocol)
 		}
 		w.Header().Set("x-request-id", ids.Request)
 		if resp.StatusCode/100 != 2 {
-			copyErrorResponse(w, external, resp, ids.Request)
-			return
+			if shouldModelFallback(requestCtx, nil, resp) {
+				if fallback := g.cfg.FallbackFor(model); fallback != "" {
+					if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
+						// Buffer the primary error body before draining it, so a
+						// failed fallback can still relay the real status and
+						// message; draining keeps the connection reusable.
+						primaryStatus, primaryBody := resp.StatusCode, readErrorBody(resp)
+						if fallbackResp, fallbackRoute, fallbackErr := g.tryModelFallback(upstreamCtx, external, payload, ids, model, fallback); fallbackErr == nil && fallbackResp != nil {
+							g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+							resp = fallbackResp
+							upstreamRoute = fallbackRoute
+							model = fallback
+							if meta != nil {
+								meta.Model = fallback
+								meta.Tier = string(upstreamRoute.Tier)
+								meta.Protocol = upstreamRoute.Protocol
+								meta.Effort = g.resolvedEffort(fallback, upstreamRoute.Tier, upstreamRoute.Protocol)
+							}
+							w.Header().Set("x-resolved-model", fallback)
+							defer resp.Body.Close()
+							if resp.StatusCode/100 != 2 {
+								copyErrorResponse(w, external, resp, ids.Request)
+								return
+							}
+						} else {
+							g.logger.Warn("model fallback failed; keeping primary error", "component", "upstream", "event", "model_fallback_failed", "request_id", ids.Request, "from_model", model, "to_model", fallback, "error", fallbackErr)
+							if fallbackResp != nil {
+								httpx.DrainAndClose(fallbackResp.Body)
+							}
+							writeUpstreamError(w, external, primaryStatus, primaryBody, ids.Request)
+							return
+						}
+					} else {
+						copyErrorResponse(w, external, resp, ids.Request)
+						return
+					}
+				} else {
+					copyErrorResponse(w, external, resp, ids.Request)
+					return
+				}
+			} else {
+				copyErrorResponse(w, external, resp, ids.Request)
+				return
+			}
 		}
 		var toolAlias string
 		if meta != nil {
@@ -296,6 +362,31 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			return
 		}
 		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		// The extra round is taken on the anonymous lane only. There a
+		// truncated body is a lost free-tier answer and replaying the turn
+		// costs nothing. A key tier has already generated (and billed) the
+		// tokens behind the truncated body, so replaying it would bill the
+		// same turn twice for an answer the client never saw; those requests
+		// get the explicit upstream_error instead.
+		_, _, anonymousLane := requestCredential(requestCtx)
+		if err != nil && anonymousLane {
+			// Downstream headers are still unwritten, so one fresh round is
+			// safe (nothing is duplicated). This covers truncation between
+			// headers and a complete non-streaming body.
+			resp.Body.Close()
+			g.logger.Debug("upstream body read failed; retrying once", "component", "stream", "event", "body_read_retry", "request_id", ids.Request, "model", model, "error", err)
+			if retryResp, retryRoute, retryErr := g.doUpstream(upstreamCtx, route, bodies, ids); retryErr == nil && retryResp != nil && retryResp.StatusCode/100 == 2 {
+				resp, upstreamRoute = retryResp, retryRoute
+				defer resp.Body.Close()
+				if meta != nil {
+					meta.Tier = string(upstreamRoute.Tier)
+					meta.Protocol = upstreamRoute.Protocol
+				}
+				responseBody, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+			} else if retryResp != nil {
+				httpx.DrainAndClose(retryResp.Body)
+			}
+		}
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
 			return
@@ -397,7 +488,26 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	}
 	requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
-	resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
+	upstreamCtx := requestCtx
+	resp, upstreamRoute, err := g.doUpstream(upstreamCtx, route, bodies, ids)
+	if err != nil && shouldModelFallback(requestCtx, err, nil) {
+		if fallback := g.cfg.FallbackFor(model); fallback != "" {
+			if fallbackResp, fallbackUpstream, fallbackErr := g.trySystemOneFallback(upstreamCtx, body, ids, model, fallback); fallbackErr == nil && fallbackResp != nil && fallbackResp.StatusCode/100 == 2 {
+				g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+				resp, upstreamRoute, err = fallbackResp, fallbackUpstream, nil
+				model = fallback
+				if meta != nil {
+					meta.Model = fallback
+				}
+				w.Header().Set("x-resolved-model", fallback)
+			} else {
+				g.logger.Warn("model fallback failed; keeping primary error", "component", "upstream", "event", "model_fallback_failed", "request_id", ids.Request, "from_model", model, "to_model", fallback, "error", fallbackErr)
+				if fallbackResp != nil {
+					httpx.DrainAndClose(fallbackResp.Body)
+				}
+			}
+		}
+	}
 	if err != nil {
 		finalTier := route.Tier
 		if meta != nil && meta.Tier != "" {
@@ -431,8 +541,42 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	}
 	w.Header().Set("x-request-id", ids.Request)
 	if resp.StatusCode/100 != 2 {
-		copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
-		return
+		if shouldModelFallback(requestCtx, nil, resp) {
+			if fallback := g.cfg.FallbackFor(model); fallback != "" {
+				primaryStatus, primaryBody := resp.StatusCode, readErrorBody(resp)
+				httpx.DrainAndClose(resp.Body)
+				if fallbackResp, fallbackUpstream, fallbackErr := g.trySystemOneFallback(upstreamCtx, body, ids, model, fallback); fallbackErr == nil && fallbackResp != nil {
+					g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+					resp = fallbackResp
+					upstreamRoute = fallbackUpstream
+					model = fallback
+					if meta != nil {
+						meta.Model = fallback
+						meta.Tier = string(upstreamRoute.Tier)
+						meta.Protocol = upstreamRoute.Protocol
+					}
+					w.Header().Set("x-resolved-model", fallback)
+					defer resp.Body.Close()
+					if resp.StatusCode/100 != 2 {
+						copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
+						return
+					}
+				} else {
+					g.logger.Warn("model fallback failed; keeping primary error", "component", "upstream", "event", "model_fallback_failed", "request_id", ids.Request, "from_model", model, "to_model", fallback, "error", fallbackErr)
+					if fallbackResp != nil {
+						httpx.DrainAndClose(fallbackResp.Body)
+					}
+					writeUpstreamError(w, wire.SystemOne, primaryStatus, primaryBody, ids.Request)
+					return
+				}
+			} else {
+				copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
+				return
+			}
+		} else {
+			copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
+			return
+		}
 	}
 	if contentType := resp.Header.Get("Content-Type"); strings.HasPrefix(contentType, "text/event-stream") {
 		if meta != nil {
@@ -441,7 +585,9 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
+			g.logger.Warn("systemone stream relay failed", "component", "stream", "event", "stream_failed", "request_id", ids.Request, "model", model, "tier", upstreamRoute.Tier, "error", err)
+		}
 		return
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -506,14 +652,108 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 }
 
 func copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body := readErrorBody(resp)
 	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
 		w.Header().Set("Retry-After", retryAfter)
 	}
-	message := http.StatusText(resp.StatusCode)
+	writeUpstreamError(w, protocol, resp.StatusCode, body, requestID)
+}
+
+// readErrorBody buffers at most 4 MiB of an upstream error body, leaving the
+// connection reusable.
+func readErrorBody(resp *http.Response) []byte {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	return body
+}
+
+// writeUpstreamError relays an upstream error that has already been buffered,
+// so a failed model fallback can still answer with the primary model's real
+// status and message instead of a generic 502.
+func writeUpstreamError(w http.ResponseWriter, protocol wire.Protocol, status int, body []byte, requestID string) {
+	message := http.StatusText(status)
 	var value map[string]any
 	if json.Unmarshal(body, &value) == nil {
 		message = jsonutil.FirstString(jsonutil.StringAt(value, "error", "message"), jsonutil.StringAt(value, "message"), message)
 	}
-	wire.WriteError(w, protocol, resp.StatusCode, message, "upstream_error", requestID)
+	wire.WriteError(w, protocol, status, message, "upstream_error", requestID)
+}
+
+// trySystemOneFallback is the System One counterpart of tryModelFallback: the
+// request body is already encoded for the protocol, so it only re-routes the
+// model and reuses those bytes.
+func (g *Gateway) trySystemOneFallback(ctx context.Context, body []byte, ids identity.RequestIDs, fromModel, toModel string) (*http.Response, models.Route, error) {
+	if toModel == "" || toModel == fromModel {
+		return nil, models.Route{}, errors.New("invalid fallback model")
+	}
+	route, err := g.catalog.Route(toModel, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+	if err != nil {
+		return nil, models.Route{}, err
+	}
+	if route.Protocol != wire.SystemOne {
+		return nil, models.Route{}, fmt.Errorf("fallback model %q does not speak System One", toModel)
+	}
+	bodies := make(map[config.Tier][]byte, len(route.KeyTiers)+1)
+	bodies[route.Tier] = body
+	for _, tier := range route.KeyTiers {
+		bodies[tier] = body
+	}
+	return g.doUpstream(ctx, route, bodies, ids)
+}
+
+// tryModelFallback runs a single-hop retry with a different model ID using
+// the same client payload and request budget. It never chains further.
+func (g *Gateway) tryModelFallback(ctx context.Context, external wire.Protocol, payload map[string]any, ids identity.RequestIDs, fromModel, toModel string) (*http.Response, models.Route, error) {
+	if toModel == "" || toModel == fromModel {
+		return nil, models.Route{}, errors.New("invalid fallback model")
+	}
+	fallbackRoute, err := g.catalog.Route(toModel, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+	if err != nil {
+		return nil, models.Route{}, err
+	}
+	fallbackPayload := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		fallbackPayload[key] = value
+	}
+	fallbackPayload["model"] = toModel
+	fallbackBodies, err := g.prepareRouteBodies(external, fallbackRoute, fallbackPayload)
+	if err != nil {
+		return nil, models.Route{}, err
+	}
+	resp, effectiveRoute, err := g.doUpstream(ctx, fallbackRoute, fallbackBodies, ids)
+	if err != nil {
+		return nil, effectiveRoute, err
+	}
+	if resp == nil {
+		return nil, effectiveRoute, errors.New("fallback returned no response")
+	}
+	if resp.StatusCode/100 != 2 {
+		// Drain the body so the connection can be reused before the caller
+		// decides whether to surface this fallback error.
+		httpx.DrainAndClose(resp.Body)
+		return nil, effectiveRoute, errors.New("fallback upstream returned an error response")
+	}
+	return resp, effectiveRoute, nil
+}
+
+// shouldModelFallback reports whether a failed primary-model attempt may try
+// its configured model_fallback target. Non-retryable client responses and
+// expired request contexts never fall back. Only a single hop is allowed;
+// the caller must not chain fallbacks.
+func shouldModelFallback(ctx context.Context, err error, resp *http.Response) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return false
+		}
+		return true
+	}
+	if resp == nil {
+		return true
+	}
+	if isNonRetryableClientResponse(resp, nil) {
+		return false
+	}
+	return resp.StatusCode/100 != 2
 }

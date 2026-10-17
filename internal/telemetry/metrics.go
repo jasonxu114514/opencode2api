@@ -100,6 +100,7 @@ type UpstreamAttempt struct {
 	DurationMS int64     `json:"duration_ms"`
 	Success    bool      `json:"success"`
 	Outcome    string    `json:"outcome"`
+	Effort     string    `json:"effort,omitempty"`
 }
 
 // UpstreamRequest is the credential route that was actually used for one
@@ -121,6 +122,8 @@ type UpstreamRequest struct {
 	DurationMS  int64     `json:"duration_ms"`
 	Success     bool      `json:"success"`
 	Outcome     string    `json:"outcome"`
+	Effort      string    `json:"effort,omitempty"`
+	Stream      bool      `json:"stream,omitempty"`
 }
 
 type attemptBucket struct {
@@ -336,7 +339,7 @@ func (m *Monitor) Record(endpoint string, status int, duration time.Duration, me
 				Time: time.Now().UTC(), RequestID: meta.Request, Session: meta.Session, ServerKeyID: meta.ServerKeyID, Model: meta.Model, Tier: meta.Tier,
 				KeyID: meta.KeyID, Channel: meta.Channel, Anonymous: meta.Anonymous, Proxy: meta.Proxy,
 				Attempts: meta.Attempts, Status: status, DurationMS: max(duration.Milliseconds(), 0),
-				Success: success,
+				Success: success, Effort: meta.Effort, Stream: meta.Stream,
 			}
 			if request.Channel == "" {
 				request.Channel = "not_routed"

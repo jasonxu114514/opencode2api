@@ -44,3 +44,19 @@ func (a *Server) handleManualModel(w http.ResponseWriter, r *http.Request) {
 	}
 	a.handleAvailability(w, r)
 }
+
+func (a *Server) handleProbeModel(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Model string `json:"model"`
+	}
+	if err := decodeAdminJSON(w, r, &input); err != nil {
+		writeAdminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	result, err := a.manager.ProbeNow(input.Model)
+	if err != nil {
+		writeAdminError(w, 400, "probe_failed", a.manager.Redact(err.Error()))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"probe": result})
+}

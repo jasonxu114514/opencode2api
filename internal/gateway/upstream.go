@@ -268,11 +268,30 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 // including an HTTP error response, advances to the next upstream or proxy.
 // Only a successful response ends the anonymous phase; exhausting the proxy
 // cursor returns control to the preferred authenticated tiers.
+//
+// When the model has a custom proxy_by_model pool, only allowed proxies are
+// tried, and transport failures sleep proxy_retry.interval_seconds between
+// attempts.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	var lastResponse *http.Response
 	var lastErr error
 	cursor := g.anonymous.CursorFor(ids.Session)
 	limit := g.anonymous.Len()
+	var allow map[int]bool
+	if g.cfg.HasCustomProxyPool(route.ID) {
+		allowlist := g.cfg.ProxyAllowlistFor(route.ID)
+		allow = allowedProxySet(g.transports, allowlist)
+		allowedCount := len(allow)
+		if allowedCount == 0 {
+			return nil, errors.New("no allowed proxy available for model"), 0
+		}
+		if effective := g.cfg.EffectiveProxyAttempts(); effective > limit {
+			limit = effective
+		}
+		if allowedCount > limit {
+			limit = allowedCount
+		}
+	}
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
 		limit = g.cfg.Retry.MaxAttempts
 	}
@@ -304,9 +323,23 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			break
 		}
-		node := cursor.Next()
+		node := cursor.NextAllowed(allow)
 		if node == nil {
-			break
+			// Custom pools may retry allowed exits: start a fresh scan so
+			// proxy_retry.max_attempts can exceed the pool size. Stop when
+			// no allowed proxy is healthy at all.
+			if allow != nil && attempts < limit {
+				cursor = g.anonymous.CursorFor(ids.Session)
+				node = cursor.NextAllowed(allow)
+			}
+			if node == nil {
+				break
+			}
+		}
+		if attempts > 0 && lastErr != nil && g.cfg.ProxyRetry.IntervalSeconds > 0 {
+			if !sleepWithContext(ctx, time.Duration(g.cfg.ProxyRetry.IntervalSeconds)*time.Second) {
+				break
+			}
 		}
 		proxies++
 		var nodeResp *http.Response
@@ -937,6 +970,9 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 }
 
 func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
+	if g.cfg.HasCustomProxyPool(route.ID) {
+		return g.doKeyUpstreamAllowed(ctx, route, bodies, ids, attemptOffset)
+	}
 	var lastResponse *http.Response
 	var lastErr error
 	nodes := g.zenNodes
@@ -1042,6 +1078,118 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 	return nil, lastErr, attempts
 }
 
+// doKeyUpstreamAllowed serves models with an explicit proxy_by_model pool.
+// Keys still rotate for auth diversity, but the exit is always chosen from
+// the model's allowed pool (in allowlist order, healthy first) instead of
+// the key's sticky binding. This keeps one shared key usable for models with
+// disjoint pools. Transport failures sleep proxy_retry.interval_seconds.
+func (g *Gateway) doKeyUpstreamAllowed(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
+	var lastResponse *http.Response
+	var lastErr error
+	nodes := g.zenNodes
+	baseURL := g.cfg.Upstream.Zen
+	if route.Tier == config.TierGo {
+		nodes = g.goNodes
+		baseURL = g.cfg.Upstream.Go
+	}
+	cursor := nodes.CursorFor(ids.Session)
+	if nodes.Len() == 0 {
+		return nil, fmt.Errorf("no %s nodes configured", route.Tier), 0
+	}
+	allowlist := g.cfg.ProxyAllowlistFor(route.ID)
+	allowed := allowedProxiesInOrder(g.transports, allowlist)
+	if len(allowed) == 0 {
+		return nil, fmt.Errorf("no allowed proxy available for model %q", route.ID), 0
+	}
+	maxAttempts := g.cfg.EffectiveProxyAttempts()
+	interval := time.Duration(g.cfg.ProxyRetry.IntervalSeconds) * time.Second
+	proxyStart := proxyAffinityOffset(ids.Session+"\x00"+route.ID, len(allowed))
+	attempts := 0
+	body := bodies[route.Tier]
+	if len(body) == 0 {
+		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
+	}
+	shaped, alias, changed := g.shapeKeyBody(body, route, route.Tier)
+	if changed {
+		body = shaped
+	}
+	if meta := telemetry.MetaFromContext(ctx); meta != nil {
+		meta.Shaped = changed
+		meta.ToolAlias = alias
+	}
+	for attempts < maxAttempts {
+		if ctx.Err() != nil {
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			break
+		}
+		if attempts > 0 && lastErr != nil && interval > 0 {
+			if !sleepWithContext(ctx, interval) {
+				break
+			}
+		}
+		node := cursor.Next()
+		if node == nil {
+			break
+		}
+		proxy := pickAllowedProxy(allowed, proxyStart, attempts)
+		if proxy == nil {
+			lastErr = errors.New("no allowed proxy available for model")
+			break
+		}
+		attempts++
+		if meta := telemetry.MetaFromContext(ctx); meta != nil {
+			meta.Attempts = attemptOffset + attempts
+			meta.Tier = string(route.Tier)
+		}
+		if lastResponse != nil {
+			httpx.DrainAndClose(lastResponse.Body)
+			lastResponse = nil
+		}
+		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
+		if err != nil {
+			return nil, err, attempts
+		}
+		keyID := config.KeyDisplayID(node.key)
+		setRequestCredential(ctx, route.Tier, keyID, "key", false, proxy)
+		attemptStarted := time.Now()
+		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+		attemptDuration := time.Since(attemptStarted)
+		if ctx.Err() != nil {
+			lastResponse, lastErr = resp, err
+			if lastErr == nil && lastResponse == nil {
+				lastErr = ctx.Err()
+			}
+			break
+		}
+		g.observeKeyResult(ctx, nodes, node, proxy, resp, err)
+		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
+		if err == nil && resp.StatusCode/100 == 2 {
+			g.logger.Debug("upstream accepted request", "component", "upstream", "event", "attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "status", resp.StatusCode, "duration_ms", attemptDuration.Milliseconds(), "model_pool", true)
+			return resp, nil, attempts
+		}
+		if isNonRetryableClientResponse(resp, err) {
+			g.logger.Debug("upstream rejected a non-retryable request", "component", "upstream", "event", "attempt_rejected", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "status", resp.StatusCode, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "model_pool", true)
+			return resp, nil, attempts
+		}
+		lastResponse = resp
+		lastErr = err
+		if err != nil {
+			g.logger.Debug("upstream transport attempt failed", "component", "upstream", "event", "attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "error", err, "model_pool", true)
+		} else {
+			g.logger.Debug("upstream returned a retryable response", "component", "upstream", "event", "attempt_retryable_response", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "status", resp.StatusCode, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "model_pool", true)
+		}
+	}
+	if lastResponse != nil {
+		return lastResponse, nil, attempts
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("model %q proxy pool exhausted", route.ID)
+	}
+	return nil, lastErr, attempts
+}
+
 // Diagnostics use the same routing and transports as production, but must not
 // update cooldowns, health, or bindings, including after successful attempts.
 func (g *Gateway) observeKeyResult(ctx context.Context, nodes *nodePool, node *upstreamNode, proxy *proxyTransport, resp *http.Response, err error) {
@@ -1143,6 +1291,7 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 		Time: time.Now().UTC(), RequestID: ids.Request, Model: route.ID, Tier: string(route.Tier), Attempt: attempt,
 		KeyID: keyID, Channel: channel, Anonymous: anonymous, Proxy: proxyName, Status: status,
 		DurationMS: max(duration.Milliseconds(), 0), Success: success, Outcome: outcome,
+		Effort: g.resolvedEffort(route.ID, route.Tier, route.Protocol),
 	})
 }
 

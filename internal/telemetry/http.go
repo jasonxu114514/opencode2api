@@ -49,6 +49,9 @@ type RequestMeta struct {
 	UsageReported  bool
 	AttemptOutcome string
 	Outcome        string
+	// Effort is the thinking level actually applied to the upstream request
+	// for the serving tier ("": client-specified or untouched).
+	Effort string
 }
 
 // PlaygroundServerKey buckets admin Playground traffic, which authenticates

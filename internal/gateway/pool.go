@@ -156,6 +156,32 @@ func (c *anonymousCursor) Next() *anonymousNode {
 	return nil
 }
 
+// NextAllowed is Next restricted to proxies whose transport index is in allow.
+// A nil allow means no restriction.
+func (c *anonymousCursor) NextAllowed(allow map[int]bool) *anonymousNode {
+	if allow == nil {
+		return c.Next()
+	}
+	if c.pool == nil || len(c.pool.nodes) == 0 {
+		return nil
+	}
+	now := time.Now().UnixNano()
+	for c.offset < len(c.pool.nodes) {
+		node := c.pool.nodes[(c.start+c.offset)%len(c.pool.nodes)]
+		c.offset++
+		if node.proxy == nil {
+			continue
+		}
+		if !allow[node.proxy.index] {
+			continue
+		}
+		if node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now {
+			return node
+		}
+	}
+	return nil
+}
+
 func (p *anonymousPool) MarkSuccess(node *anonymousNode) {
 	if node == nil {
 		return
@@ -569,6 +595,90 @@ func (c *nodeCursor) Next() *upstreamNode {
 	}
 	c.next = (choice + 1) % len(c.pool.nodes)
 	return c.pool.nodes[choice]
+}
+
+// allowedProxySet resolves an allowlist of proxy names to transport indices.
+func allowedProxySet(transports *transportPool, allowlist []string) map[int]bool {
+	if transports == nil || len(allowlist) == 0 {
+		return nil
+	}
+	byName := make(map[string]int, len(transports.items))
+	for _, item := range transports.items {
+		byName[item.name] = item.index
+	}
+	allow := make(map[int]bool, len(allowlist))
+	for _, name := range allowlist {
+		if idx, ok := byName[name]; ok {
+			allow[idx] = true
+		}
+	}
+	return allow
+}
+
+// allowedProxiesInOrder returns allowed transports in allowlist order.
+func allowedProxiesInOrder(transports *transportPool, allowlist []string) []*proxyTransport {
+	if transports == nil {
+		return nil
+	}
+	byName := make(map[string]*proxyTransport, len(transports.items))
+	for _, item := range transports.items {
+		byName[item.name] = item
+	}
+	out := make([]*proxyTransport, 0, len(allowlist))
+	for _, name := range allowlist {
+		if proxy, ok := byName[name]; ok && proxy != nil {
+			out = append(out, proxy)
+		}
+	}
+	return out
+}
+
+// pickAllowedProxy selects the attempt-th allowed proxy, preferring healthy
+// ones. If all allowed are unhealthy it still returns one to allow recovery.
+func pickAllowedProxy(allowed []*proxyTransport, start, attempt int) *proxyTransport {
+	if len(allowed) == 0 {
+		return nil
+	}
+	if len(allowed) == 1 {
+		return allowed[0]
+	}
+	// Prefer healthy in rotation order.
+	for offset := 0; offset < len(allowed); offset++ {
+		candidate := allowed[(start+attempt+offset)%len(allowed)]
+		if candidate.healthy.Load() {
+			return candidate
+		}
+	}
+	return allowed[(start+attempt)%len(allowed)]
+}
+
+// proxyAffinityOffset gives a stable starting proxy for a session+model so
+// the same conversation sticks to the same allowed exit when healthy.
+func proxyAffinityOffset(affinity string, size int) int {
+	if size <= 0 {
+		return 0
+	}
+	if affinity == "" {
+		return 0
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(affinity))
+	return int(hash.Sum64() % uint64(size))
+}
+
+// sleepWithContext sleeps d unless ctx ends first. Returns false if interrupted.
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (p *nodePool) MarkSuccess(node *upstreamNode) {

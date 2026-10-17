@@ -93,6 +93,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 				meta.Tier = "go"
 				meta.Protocol = route.Protocol
 				meta.Attempts = total
+				meta.Effort = g.resolvedEffort(token.Model, config.TierGo, route.Protocol)
 				meta.Usage = wire.Usage{}
 				meta.UsageReported = false
 			}
@@ -197,6 +198,14 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		return result
 	}
 	proxy := g.goNodes.Proxy(node)
+	if g.cfg.HasCustomProxyPool(route.ID) {
+		if allowed := allowedProxiesInOrder(g.transports, g.cfg.ProxyAllowlistFor(route.ID)); len(allowed) > 0 {
+			proxy = pickAllowedProxy(allowed, proxyAffinityOffset(ids.Session+"\x00"+route.ID, len(allowed)), attempt)
+		} else {
+			result.err = errors.New("no allowed proxy available for model")
+			return result
+		}
+	}
 	if proxy == nil {
 		result.err = errors.New("no proxy")
 		return result
@@ -281,6 +290,14 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 			result.reason = "quota_or_rate_limit"
 		} else if !committed && ctx.Err() != nil {
 			result.reason = "first_output_timeout"
+		}
+		if committed && err != nil && !result.quota && original.Context().Err() == nil && !wire.UpstreamSignaledError(err) {
+			var clientGone *wire.ClientWriteError
+			if !errors.As(err, &clientGone) {
+				// The model is already paused by the caller; also nudge the
+				// key so the next turn doesn't stick to the broken exit.
+				g.goNodes.MarkFailure(node, nil, err)
+			}
 		}
 		return result
 	}
