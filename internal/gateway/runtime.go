@@ -32,14 +32,18 @@ type ApplyResult struct {
 }
 
 type RuntimeManager struct {
-	rotation           *rotation.Manager
-	configPath         string
-	root               context.Context
-	logger             *slog.Logger
-	monitor            *telemetry.Monitor
-	hub                *telemetry.LogHub
-	redactor           *config.SecretRedactor
-	level              *slog.LevelVar
+	rotation   *rotation.Manager
+	configPath string
+	root       context.Context
+	logger     *slog.Logger
+	monitor    *telemetry.Monitor
+	hub        *telemetry.LogHub
+	redactor   *config.SecretRedactor
+	level      *slog.LevelVar
+	// logFile mirrors the JSON log stream to disk. It is owned by the
+	// process, not by a gateway runtime, so a configuration reload can
+	// retarget or disable it without rebuilding anything.
+	logFile            *telemetry.LogFile
 	current            atomic.Pointer[gatewayRuntime]
 	updateMu           sync.Mutex
 	effective          effectiveListeners
@@ -53,9 +57,9 @@ type effectiveListeners struct {
 	WebUIEnabled bool
 }
 
-func NewRuntimeManager(root context.Context, configPath string, cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor, hub *telemetry.LogHub, redactor *config.SecretRedactor, level *slog.LevelVar) (*RuntimeManager, error) {
+func NewRuntimeManager(root context.Context, configPath string, cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor, hub *telemetry.LogHub, redactor *config.SecretRedactor, level *slog.LevelVar, logFile *telemetry.LogFile) (*RuntimeManager, error) {
 	manager := &RuntimeManager{
-		configPath: configPath, root: root, logger: logger, monitor: monitor, hub: hub, redactor: redactor, level: level,
+		configPath: configPath, root: root, logger: logger, monitor: monitor, hub: hub, redactor: redactor, level: level, logFile: logFile,
 		effective: effectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
 	manager.metadata = modelcatalog.NewPricingStore(configPath, logger)
@@ -252,6 +256,13 @@ func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (App
 	result.RestartRequired = len(result.RestartFields) > 0
 	m.redactor.Replace(normalized)
 	telemetry.SetLogLevel(m.level, normalized.Logging.Level)
+	if m.logFile != nil {
+		// A file that cannot be opened must not block the rest of the
+		// configuration: report it and keep serving.
+		if err := m.logFile.Apply(normalized.Logging.FilePath); err != nil {
+			m.logger.Warn("file logging disabled", "component", "logging", "event", "log_file_open_failed", "path", normalized.Logging.FilePath, "error", err)
+		}
+	}
 	if current == nil || normalized.Logging.RingSize != current.config.Logging.RingSize {
 		m.hub.Resize(normalized.Logging.RingSize)
 	}

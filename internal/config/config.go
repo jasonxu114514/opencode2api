@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -80,6 +81,11 @@ type LoggingConfig struct {
 	// so retry and translation problems can be diagnosed without patching the
 	// binary. Off by default: the bodies contain conversation content.
 	DumpRequestBodies bool `json:"dump_request_bodies"`
+	// FilePath mirrors the structured JSON log stream to a file for offline
+	// analysis. Empty disables it. Relative paths resolve beside the
+	// configuration file. The stream is already redacted; note that enabling
+	// dump_request_bodies makes the file contain conversation content too.
+	FilePath string `json:"file_path,omitempty"`
 }
 
 type WebUIConfig struct {
@@ -156,6 +162,20 @@ func Load(path string) (Config, error) {
 	return Normalize(path, cfg)
 }
 
+// resolveLogFilePath trims the configured log file path and resolves a
+// relative one beside the configuration file, matching how proxyfile
+// resolves. An empty value disables file logging.
+func resolveLogFilePath(configPath, logPath string) string {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" {
+		return ""
+	}
+	if filepath.IsAbs(logPath) {
+		return logPath
+	}
+	return filepath.Join(filepath.Dir(configPath), logPath)
+}
+
 // Normalize resolves external inputs and validates a Config supplied by
 // either the JSON file or the authenticated management API.
 func Normalize(path string, cfg Config) (Config, error) {
@@ -170,6 +190,7 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if err := resolveProxyFiles(path, &cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.Logging.FilePath = resolveLogFilePath(path, cfg.Logging.FilePath)
 	if cfg.Prefer != TierZen && cfg.Prefer != TierGo {
 		return Config{}, errors.New("prefer must be \"zen\" or \"go\"")
 	}

@@ -33,6 +33,7 @@
   "logging": {
     "level": "info",
     "ring_size": 2000,
+    "file_path": "",
     "dump_request_bodies": false
   },
   "webui": {

@@ -359,6 +359,7 @@ The per-attempt header timeout is capped by the request timeout. Set it below th
 | ----------------------------- | ------------------------------------------------------------- |
 | `logging.level`               | `info`; accepts `debug`, `info`, `warn`, `error`.             |
 | `logging.ring_size`           | `2000`; range 100–50,000.                                     |
+| `logging.file_path`           | Empty (no file). Relative paths resolve beside the configuration file; the sink rotates to `.1` past 32 MB. |
 | `logging.dump_request_bodies` | `false`. Requires `debug` logging to emit outbound bodies.    |
 | `webui.enabled`               | `false` when omitted; the example sets it to `true`.          |
 | `webui.listen`                | `0.0.0.0:8081`.                                               |
@@ -368,6 +369,8 @@ The per-attempt header timeout is capped by the request timeout. Set it below th
 | `webui.session_ttl_minutes`   | `720`; range 5–10,080.                                        |
 
 On startup, a bootstrap password is hashed and removed from the configuration. The backup containing that bootstrap plaintext is deleted. Keep configuration files and backups private: upstream keys and proxy credentials remain necessary configuration secrets.
+
+Logs are written to standard output and to an in-memory ring buffer that backs the WebUI log page. Setting `logging.file_path` additionally mirrors the same redacted JSON lines to disk so they can be collected and analysed offline; an empty value disables it. The path may be absolute or relative to the configuration file. The sink opens on start and on every configuration save, so enabling, retargeting or disabling it never needs a restart. A console save that does not carry the field keeps the current path, so the form cannot silently switch file logging off; clearing the path is a configuration-file edit. It rotates to `<path>.1` once the active file passes 32 MB, keeping exactly one backup, and a path that cannot be opened is reported as a warning without affecting request handling.
 
 Body dumps are opt-in and capped at 64 KiB per prepared body. Configured secrets are redacted, but conversation content may still be sensitive.
 
@@ -533,3 +536,4 @@ Observations are persisted by upstream URL, model and native protocol, displayed
 SPDX-License-Identifier: GPL-3.0-or-later
 
 This project is free software: you may redistribute and modify it under the GNU General Public License as published by the Free Software Foundation, either version 3 or (at your option) any later version. It is distributed without any warranty. See [LICENSE](LICENSE) for the full terms.
+

@@ -131,8 +131,24 @@ type hubHandler struct {
 	groups   []string
 }
 
-func NewStructuredLogger(level *slog.LevelVar, hub *LogHub, redactor *config.SecretRedactor) *slog.Logger {
-	return newStructuredLogger(os.Stdout, level, hub, redactor)
+// multiSink fans every log record out to stdout and, when enabled, the
+// on-disk mirror. File failures are swallowed by LogFile.Write so the
+// service keeps logging to the console.
+type multiSink struct {
+	stdout io.Writer
+	file   *LogFile
+}
+
+func (m *multiSink) Write(p []byte) (int, error) {
+	n, err := m.stdout.Write(p)
+	if m.file != nil {
+		_, _ = m.file.Write(p)
+	}
+	return n, err
+}
+
+func NewStructuredLogger(level *slog.LevelVar, hub *LogHub, redactor *config.SecretRedactor, file *LogFile) *slog.Logger {
+	return newStructuredLogger(&multiSink{stdout: os.Stdout, file: file}, level, hub, redactor)
 }
 
 func newStructuredLogger(output io.Writer, level *slog.LevelVar, hub *LogHub, redactor *config.SecretRedactor) *slog.Logger {

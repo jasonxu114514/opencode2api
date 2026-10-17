@@ -47,9 +47,19 @@ func main() {
 	hub := telemetry.NewLogHub(cfg.Logging.RingSize)
 	redactor := config.NewSecretRedactor()
 	redactor.Replace(cfg)
-	logger := telemetry.NewStructuredLogger(level, hub, redactor)
+	logFile := telemetry.NewLogFile()
+	logger := telemetry.NewStructuredLogger(level, hub, redactor, logFile)
+	// The sink reports its own problems through the same logger, so a broken
+	// path is visible in the console stream instead of failing silently.
+	logFile.SetErrorReporter(func(err error) {
+		logger.Warn("log file sink problem", "component", "logging", "event", "log_file_error", "error", err)
+	})
+	if err := logFile.Apply(cfg.Logging.FilePath); err != nil {
+		logger.Warn("file logging disabled", "component", "logging", "event", "log_file_open_failed", "path", cfg.Logging.FilePath, "error", err)
+	}
+	defer logFile.Close()
 	monitor := telemetry.NewMonitor()
-	manager, err := gateway.NewRuntimeManager(ctx, *configPath, cfg, logger, monitor, hub, redactor, level)
+	manager, err := gateway.NewRuntimeManager(ctx, *configPath, cfg, logger, monitor, hub, redactor, level, logFile)
 	if err != nil {
 		logger.Error("failed to initialize runtime", "component", "runtime", "event", "runtime_initialization_failed", "error", err)
 		os.Exit(1)

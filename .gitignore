@@ -7,6 +7,8 @@ opencode/
 /opencode2api
 /opencode2api.exe
 *.log
+*.log.*
+logs/
 .tmp/
 .gocache/
 *.models.catalog.json
