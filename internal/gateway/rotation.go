@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,19 +21,109 @@ import (
 	"opencode2api/internal/telemetry"
 )
 
-func (g *Gateway) syncRotation() {
-	available := map[string]bool{}
+// availableRotationModels lists the models a rotation group may use. A group
+// draws from both authenticated tiers (Zen and Go) in prefer order, mirroring
+// normal inference; the anonymous lane is not part of a rotation.
+func (g *Gateway) availableRotationModels() []string {
+	hasZen := len(g.cfg.ZenKeys) > 0
+	hasGo := len(g.cfg.GoKeys) > 0
+	models := make([]string, 0, len(g.catalog.List()))
 	for _, model := range g.catalog.List() {
-		if route, err := g.catalog.RouteForTier(model, config.TierGo, false, g.goNodes.Len() > 0); err == nil && route.Protocol != wire.SystemOne {
-			available[model] = true
+		if route, err := g.catalog.Route(model, hasZen, hasGo, false); err == nil && route.Protocol != wire.SystemOne {
+			models = append(models, model)
 		}
 	}
-	g.rotation.Sync(available)
+	sort.Strings(models)
+	return models
+}
+func (g *Gateway) syncRotation() {
+	g.rotation.Sync(g.rotationFacts())
+}
+func (g *Gateway) rotationFacts() []config.ModelFacts {
+	return g.catalog.Facts(len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, false)
 }
 func (m *RuntimeManager) RotationSnapshot() rotation.Snapshot {
 	r := m.current.Load()
 	r.gateway.syncRotation()
-	return m.rotation.Snapshot()
+	snapshot := m.rotation.Snapshot()
+	snapshot.AvailableModels = r.gateway.availableRotationModels()
+	snapshot.QueryFields = queryFields(r.gateway.rotationFacts())
+	snapshot.SortFields = config.SortFields()
+	snapshot.SortDirections = config.SortDirections()
+	return snapshot
+}
+
+// queryFields describes the queryable fields and, for the closed fields
+// (protocol, tier, modalities), appends any extra values observed in the live
+// catalog to the canonical list so the WebUI offers exactly what exists.
+func queryFields(facts []config.ModelFacts) []config.QueryField {
+	fields := config.QueryFields()
+	observed := map[string]map[string]bool{}
+	add := func(field, value string) {
+		if value == "" {
+			return
+		}
+		if observed[field] == nil {
+			observed[field] = map[string]bool{}
+		}
+		observed[field][value] = true
+	}
+	for _, fact := range facts {
+		add("protocol", fact.Protocol)
+		for _, tier := range fact.Tier {
+			add("tier", tier)
+		}
+		for _, modality := range fact.InputModalities {
+			add("input_modalities", modality)
+		}
+		for _, modality := range fact.OutputModalities {
+			add("output_modalities", modality)
+		}
+	}
+	for i := range fields {
+		extra := observed[fields[i].Name]
+		if len(extra) == 0 {
+			continue
+		}
+		seen := map[string]bool{}
+		merged := append([]string(nil), fields[i].Values...)
+		for _, value := range merged {
+			seen[value] = true
+		}
+		rest := make([]string, 0, len(extra))
+		for value := range extra {
+			if !seen[value] {
+				rest = append(rest, value)
+			}
+		}
+		sort.Strings(rest)
+		fields[i].Values = append(merged, rest...)
+	}
+	return fields
+}
+
+// PreviewRotation resolves a query, sort and pin list against the live catalog
+// without touching rotation state, so the WebUI can preview group membership.
+func (m *RuntimeManager) PreviewRotation(query config.RotationQuery, groupSort *config.GroupSort, pin []string) []config.ModelFacts {
+	r := m.current.Load()
+	if r == nil {
+		return nil
+	}
+	facts := r.gateway.rotationFacts()
+	factMap := make(map[string]config.ModelFacts, len(facts))
+	matched := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		factMap[fact.ID] = fact
+		if query.Evaluate(fact) {
+			matched = append(matched, fact.ID)
+		}
+	}
+	order := config.ResolveOrder(matched, factMap, groupSort, pin, nil)
+	ordered := make([]config.ModelFacts, 0, len(order))
+	for _, id := range order {
+		ordered = append(ordered, factMap[id])
+	}
+	return ordered
 }
 func (m *RuntimeManager) SelectRotation(id, model string) error {
 	m.updateMu.Lock()
@@ -81,8 +172,8 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 			break
 		}
 		visited[token.Model] = true
-		route, err := g.catalog.RouteForTier(token.Model, config.TierGo, false, g.goNodes.Len() > 0)
-		if err != nil {
+		route, err := g.catalog.Route(token.Model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, false)
+		if err != nil || route.Protocol == wire.SystemOne {
 			continue
 		}
 		counted := false
@@ -90,7 +181,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 			total++
 			if meta != nil {
 				meta.Model = token.Model
-				meta.Tier = "go"
+				meta.Tier = string(route.Tier)
 				meta.Protocol = route.Protocol
 				meta.Attempts = total
 				meta.Usage = wire.Usage{}
@@ -181,11 +272,20 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.reason = "request_conversion_error"
 		return result
 	}
-	body, toolAlias, shaped := g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
+	body, toolAlias, shaped := g.shapeKeyBody(bodies[route.Tier], route, route.Tier)
 	if meta := telemetry.MetaFromContext(parent); meta != nil {
 		meta.ToolAlias = toolAlias
 	}
-	cursor := g.goNodes.CursorFor(ids.Session)
+	// A group rotates across the authenticated tiers the model advertises.
+	// route.Tier is the preferred tier, so a model present on both Zen and Go
+	// follows prefer; a model on only one tier uses that tier's key pool.
+	nodes := g.zenNodes
+	baseURL := g.cfg.Upstream.Zen
+	if route.Tier == config.TierGo {
+		nodes = g.goNodes
+		baseURL = g.cfg.Upstream.Go
+	}
+	cursor := nodes.CursorFor(ids.Session)
 	var node *upstreamNode
 	// Each group attempt is exactly one HTTP call. Key selection may change,
 	// but there is no nested retry, stale-reasoning replay, or model-wide key ban.
@@ -193,15 +293,15 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		node = cursor.Next()
 	}
 	if node == nil {
-		result.err = errors.New("no Go key")
+		result.err = fmt.Errorf("no %s key", route.Tier)
 		return result
 	}
-	proxy := g.goNodes.Proxy(node)
+	proxy := nodes.Proxy(node)
 	if proxy == nil {
 		result.err = errors.New("no proxy")
 		return result
 	}
-	req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
+	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(route.Tier), body, ids, node.key)
 	if err != nil {
 		result.err = err
 		return result
@@ -210,7 +310,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	req.GetBody = nil
 	client := *proxy.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
+	setRequestCredential(parent, route.Tier, config.KeyDisplayID(node.key), "key", false, proxy)
 	started := time.Now()
 	resp, err := client.Do(req)
 	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
