@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -56,8 +57,24 @@ func main() {
 	}
 	defer manager.Shutdown()
 
+	// Fail fast on a misconfigured listen address instead of discovering it
+	// in ListenAndServe after the runtime is already up.
+	if _, err := net.ResolveTCPAddr("tcp", cfg.Listen); err != nil {
+		logger.Error("invalid listen address", "component", "server", "event", "invalid_listen_address", "address", cfg.Listen, "error", err)
+		os.Exit(1)
+	}
+	if cfg.WebUI.Enabled {
+		if _, err := net.ResolveTCPAddr("tcp", cfg.WebUI.Listen); err != nil {
+			logger.Error("invalid webui listen address", "component", "server", "event", "invalid_listen_address", "address", cfg.WebUI.Listen, "error", err)
+			os.Exit(1)
+		}
+	}
+	// ReadTimeout bounds slowloris-style request bodies. WriteTimeout stays
+	// unset on purpose: SSE/chat streams legitimately stay open for many
+	// minutes, and a server-wide write deadline would sever them. Upstream
+	// attempt budgets and the shutdown grace period bound handler lifetime.
 	apiServer := &http.Server{
-		Addr: cfg.Listen, Handler: manager.Handler(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,
+		Addr: cfg.Listen, Handler: manager.Handler(), ReadHeaderTimeout: 15 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second,
 	}
 	servers := []*http.Server{apiServer}
 	go serveHTTP(cancel, logger, apiServer, "api")
@@ -65,7 +82,7 @@ func main() {
 	if cfg.WebUI.Enabled {
 		admin := adminui.New(manager, monitor, hub, logger)
 		webServer := &http.Server{
-			Addr: cfg.WebUI.Listen, Handler: admin.Handler(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,
+			Addr: cfg.WebUI.Listen, Handler: admin.Handler(), ReadHeaderTimeout: 15 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second,
 		}
 		servers = append(servers, webServer)
 		go serveHTTP(cancel, logger, webServer, "webui")

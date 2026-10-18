@@ -191,10 +191,16 @@ func (p *anonymousPool) RestoreProxy(proxy *proxyTransport) int {
 // anonymous lane to the same 8x ceiling as its exponential backoff. The lane
 // is rate limited per exit IP and, unlike key lanes, has no earliest-expiry
 // fallback: a quota response asking for hours would keep the exit skipped long
-// after a network change gave it a fresh allowance. Key lanes keep honoring
-// Retry-After in full, since their cursor already falls back to the node that
-// recovers first.
+// after a network change gave it a fresh allowance.
 const maxAnonymousRetryAfterMultiplier = 8
+
+// maxKeyRetryAfterMultiplier bounds an upstream Retry-After on key lanes to
+// the same 8x ceiling. Key cursors do fall back to the node that recovers
+// first, so ordinary quota delays still steer traffic correctly — but a single
+// absurd value (hours, or a far-future HTTP date) must not shelve a key
+// almost permanently, which in a single-key deployment stalls the whole lane.
+// A capped key is simply retried sooner; a genuine quota answers 429 again.
+const maxKeyRetryAfterMultiplier = 8
 
 func (p *anonymousPool) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
 	if node == nil || (node.proxy != nil && node.proxy.pool) {
@@ -585,7 +591,7 @@ func (p *nodePool) MarkFailure(node *upstreamNode, resp *http.Response, err erro
 	delay := p.cooldown * multiplier
 	if resp != nil {
 		if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > delay {
-			delay = retryAfter
+			delay = min(retryAfter, p.cooldown*time.Duration(maxKeyRetryAfterMultiplier))
 		}
 	}
 	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())

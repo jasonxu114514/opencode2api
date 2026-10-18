@@ -21,6 +21,11 @@ import (
 var (
 	errFirstEventTimeout = fmt.Errorf("upstream first SSE event timed out: %w", context.DeadlineExceeded)
 	errAttemptTimeout    = fmt.Errorf("upstream attempt timed out: %w", context.DeadlineExceeded)
+	// errPreludeTooLarge signals a chatty pre-first-event prelude (long
+	// comment/keepalive banners). The caller abandons the wait and streams
+	// what it has instead of failing the attempt: killing a healthy key or
+	// proxy over banner bytes would punish the wrong party.
+	errPreludeTooLarge = errors.New("upstream SSE prelude exceeds 1 MiB")
 )
 
 // attemptTrace records how far a single attempt got before it failed. The
@@ -218,6 +223,18 @@ func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeou
 		cancel(errFirstEventTimeout)
 	}
 	if err != nil {
+		if errors.Is(err, errPreludeTooLarge) {
+			// Chatty prelude: give up waiting for the first event but keep
+			// the attempt — the buffered bytes replay below, so nothing is
+			// lost and no key/proxy is cooled over banner traffic.
+			if cause := commitDeadline(); cause != nil {
+				cancel(nil)
+				resp.Body.Close()
+				return nil, &phasedError{err: cause, phase: trace.phase()}
+			}
+			resp.Body = &attemptBody{Reader: io.MultiReader(bytes.NewReader(prefix), reader), body: resp.Body, cancel: cancel}
+			return resp, nil
+		}
 		if cause := context.Cause(ctx); cause != nil {
 			err = cause
 		}
@@ -241,7 +258,8 @@ func readFirstEvent(reader *bufio.Reader) ([]byte, error) {
 	for {
 		part, err := reader.ReadSlice('\n')
 		if len(prefix)+len(part) > maxPrelude {
-			return nil, errors.New("upstream SSE prelude exceeds 1 MiB")
+			prefix = append(prefix, part...)
+			return prefix, errPreludeTooLarge
 		}
 		prefix = append(prefix, part...)
 		line = append(line, part...)

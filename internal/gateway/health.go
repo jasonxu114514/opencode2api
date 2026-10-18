@@ -81,7 +81,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if len(issues) > 0 {
 		status = "degraded"
 	}
-	blocking := modelStatus == "pending" || modelStatus == "empty" || proxyHealthy == 0
+	blocking := modelStatus == "pending" || modelStatus == "empty" || proxyHealthy == 0 || (zenKeys+goKeys == 0 && !g.cfg.Anonymous)
 	httpStatus := http.StatusOK
 	ready := !blocking
 	if blocking {

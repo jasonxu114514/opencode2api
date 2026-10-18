@@ -56,7 +56,14 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 }
 
 func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
-	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
+	return g.doUpstreamOffset(ctx, route, bodies, ids, 0)
+}
+
+// doUpstreamOffset continues attempt numbering from a previous round (the
+// non-streaming body-read retry) so monitoring never shows duplicate attempt
+// numbers for one request and meta.Attempts keeps counting up.
+func (g *Gateway) doUpstreamOffset(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, error) {
+	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, attemptOffset)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
 		return resp, effectiveRoute, err
 	}
@@ -107,7 +114,7 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	// the reply from the chain the client still holds; the stale references are
 	// already removed from the payload itself.
 	g.logger.Info("retrying upstream without stale reasoning references", "component", "upstream", "event", "reasoning_reference_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "attempt_offset", attempts)
-	retryResp, retryRoute, _, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, ids, attempts)
+	retryResp, retryRoute, _, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, ids, attemptOffset+attempts)
 	if retryErr != nil || retryResp == nil || retryResp.StatusCode/100 != 2 {
 		retryStatus := 0
 		if retryResp != nil {
