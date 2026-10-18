@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"opencode2api/internal/jsonutil"
 )
@@ -152,41 +153,23 @@ func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// StreamResumer fetches a replacement upstream SSE segment after the
+// previous one died mid-flight. partial is the visible text already
+// delivered downstream; reasoning is the thinking text delivered downstream
+// when the stream died before any visible text was produced.
+type StreamResumer interface {
+	ResumeSegment(partial string, reasoning string) (io.Reader, error)
+}
+
+type StreamResumeObserver interface {
+	ResumeEligible(visibleBytes, reasoningBytes int, toolSeen bool)
+	ResumeSkipped(reason string, visibleBytes, reasoningBytes int, toolSeen bool)
+}
+
+// ForwardStream relays one upstream SSE stream to the client with no resume
+// support; it is the thin wrapper that pins the historical behavior.
 func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
-	}
-	observer := newStreamUsageObserver(protocol)
-	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
-	usage := observer.Finish()
-	if observer.ErrorTermination() {
-		if copyErr != nil {
-			return usage, observer.Reported(), copyErr
-		}
-		return usage, observer.Reported(), errStreamUpstreamFailure
-	}
-	if observer.NormalTermination() && observer.ParseError() == nil {
-		return usage, observer.Reported(), copyErr
-	}
-	if ClientCanceled(ctx, copyErr) {
-		if copyErr == nil {
-			copyErr = ctx.Err()
-		}
-		return usage, observer.Reported(), copyErr
-	}
-	cause := observer.ParseError()
-	if copyErr != nil {
-		cause = copyErr
-	}
-	if cause == nil {
-		cause = errSSEUnexpectedEOF
-	}
-	emitter := newBridgeStreamEmitter(w, flusher, protocol, model)
-	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
-		return usage, observer.Reported(), err
-	}
-	return usage, observer.Reported(), cause
+	return ForwardStreamResumable(ctx, w, reader, protocol, model, nil, 0)
 }
 
 // RenameStreamReader wraps an SSE stream reader and rewrites tool call names
@@ -395,6 +378,18 @@ type streamUsageObserver struct {
 	normal   bool
 	error    bool
 	parseErr error
+	// text accumulates the visible deltas already delivered downstream. A
+	// mid-stream resume needs exactly this text to build the continuation
+	// request, so it is capped at 1 MiB to bound per-request memory.
+	// trackContent gates both builders: without a mounted resumer the
+	// disabled path must not pay any copy cost (review: "disabled path
+	// not free").
+	text           strings.Builder
+	reasoning      strings.Builder
+	trackContent   bool
+	toolSeen       bool
+	visibleBytes   int
+	reasoningBytes int
 }
 
 func newStreamUsageObserver(protocol Protocol) *streamUsageObserver {
@@ -433,6 +428,47 @@ func (observer *streamUsageObserver) ErrorTermination() bool { return observer.e
 
 func (observer *streamUsageObserver) ParseError() error { return observer.parseErr }
 
+// Text returns the visible text delivered downstream so far, capped at 1 MiB.
+func (observer *streamUsageObserver) Text() string { return observer.text.String() }
+
+// TextRunes reports the delivered visible text length in runes; resume
+// eligibility keys on this, not on bytes.
+func (observer *streamUsageObserver) TextRunes() int {
+	return utf8.RuneCountInString(observer.text.String())
+}
+
+func (observer *streamUsageObserver) Reasoning() string { return observer.reasoning.String() }
+
+func (observer *streamUsageObserver) ReasoningRunes() int {
+	return utf8.RuneCountInString(observer.reasoning.String())
+}
+
+// ToolSeen reports whether any tool call delta appeared; a stream broken
+// inside a tool call must never be resumed as plain text.
+func (observer *streamUsageObserver) ToolSeen() bool { return observer.toolSeen }
+
+// TailRunes returns the last n runes of the delivered text, rune-safe, for
+// the LCP overlap window of a continuation segment.
+func (observer *streamUsageObserver) TailRunes(n int) string {
+	runes := []rune(observer.text.String())
+	if len(runes) <= n {
+		return string(runes)
+	}
+	return string(runes[len(runes)-n:])
+}
+
+// Pending returns a copy of the bytes delivered after the most recent frame
+// boundary. A stream that died mid-frame left its torn frame here; the
+// resume splice must terminate it before appending a new segment, or the
+// next frame joins the torn event and is swallowed by the client parser.
+// Must be called before Finish, which clears the buffer.
+func (observer *streamUsageObserver) Pending() []byte {
+	if len(observer.buffer) == 0 {
+		return nil
+	}
+	return append([]byte(nil), observer.buffer...)
+}
+
 func (observer *streamUsageObserver) consume(frame []byte) {
 	_ = readSSE(strings.NewReader(string(frame)), func(eventName, data string) error {
 		events, err := observer.parser.Parse(eventName, data)
@@ -448,6 +484,20 @@ func (observer *streamUsageObserver) consume(frame []byte) {
 				observer.normal = true
 			case "error":
 				observer.error = true
+			case "text":
+				observer.visibleBytes += len(event.Text)
+				// Stop appending once the cap is reached; the continuation
+				// body guard rejects partials this large anyway.
+				if observer.trackContent && event.Text != "" && observer.text.Len() < 1<<20 {
+					observer.text.WriteString(event.Text)
+				}
+			case "reasoning":
+				observer.reasoningBytes += len(event.Text) + len(event.Encrypted)
+				if observer.trackContent && event.Text != "" && observer.reasoning.Len() < 512<<10 {
+					observer.reasoning.WriteString(event.Text)
+				}
+			case "tool_start", "tool_delta":
+				observer.toolSeen = true
 			}
 			if event.Usage != nil {
 				observer.reported = true
