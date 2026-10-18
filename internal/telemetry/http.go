@@ -49,6 +49,21 @@ type RequestMeta struct {
 	UsageReported  bool
 	AttemptOutcome string
 	Outcome        string
+	// Continued counts mid-stream continuation resumes that returned a
+	// usable segment on a new exit for this request.
+	Continued int
+	// ResumeAttempts/Successes/Failures count continuation fetches actually
+	// dispatched upstream; ResumeSkipped records why a resume was declined
+	// before any fetch (tool_seen, no_visible_text, client_canceled,
+	// budget_disabled). Continued remains the legacy success counter.
+	ResumeAttempts       int
+	ResumeSuccesses      int
+	ResumeFailures       int
+	ResumeSkipped        string
+	ResumeKind           string
+	ResumeVisibleBytes   int
+	ResumeReasoningBytes int
+	ResumeToolSeen       bool
 }
 
 // PlaygroundServerKey buckets admin Playground traffic, which authenticates
@@ -131,13 +146,20 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 				logger.Info("request routed", "component", "http", "event", "request_routed", "method", r.Method,
 					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
 					"model", meta.Model, "model_alias", meta.ModelAlias, "session", meta.Session, "server_key_id", meta.ServerKeyID, "tier", meta.Tier, "key_id", meta.KeyID,
-					"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "outcome", outcome,
+					"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "continued", meta.Continued,
+					"resume_attempts", meta.ResumeAttempts, "resume_successes", meta.ResumeSuccesses, "resume_failures", meta.ResumeFailures, "resume_skipped", meta.ResumeSkipped,
+					"resume_kind", meta.ResumeKind,
+					"resume_visible_bytes", meta.ResumeVisibleBytes, "resume_reasoning_bytes", meta.ResumeReasoningBytes, "resume_tool_seen", meta.ResumeToolSeen,
+					"outcome", outcome,
 					"stop", meta.Stop, "in", meta.Usage.Input, "out", meta.Usage.Output, "reasoning_tokens", meta.Usage.Reasoning, "cached", meta.Usage.Cached, "tail", meta.Tail)
 			}
 			logger.Debug("request completed", "component", "http", "event", "request_complete", "method", r.Method,
 				"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "bytes", writer.bytes,
 				"request_id", meta.Request, "model", meta.Model, "model_alias", meta.ModelAlias, "tier", meta.Tier, "key_id", meta.KeyID,
-				"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "stream", meta.Stream, "outcome", outcome)
+				"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "stream", meta.Stream,
+				"continued", meta.Continued, "resume_attempts", meta.ResumeAttempts, "resume_successes", meta.ResumeSuccesses,
+				"resume_failures", meta.ResumeFailures, "resume_skipped", meta.ResumeSkipped, "resume_kind", meta.ResumeKind,
+				"resume_visible_bytes", meta.ResumeVisibleBytes, "resume_reasoning_bytes", meta.ResumeReasoningBytes, "resume_tool_seen", meta.ResumeToolSeen, "outcome", outcome)
 		}()
 		next.ServeHTTP(writer, r)
 	})
