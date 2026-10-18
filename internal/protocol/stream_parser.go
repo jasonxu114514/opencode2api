@@ -9,12 +9,16 @@ import (
 )
 
 type bridgeStreamParser struct {
-	protocol          Protocol
-	started           bool
-	tools             map[string]bool
-	toolIDs           map[string]string
-	toolNames         map[string]string
-	toolOrder         []string
+	protocol  Protocol
+	started   bool
+	tools     map[string]bool
+	toolIDs   map[string]string
+	toolNames map[string]string
+	toolOrder []string
+	// keylessSeq numbers Chat tool fragments that carry neither index nor
+	// id so each gets an independent accumulation key instead of sharing
+	// one empty key (whose arguments would interleave across parallel calls).
+	keylessSeq        int
 	responseArgs      map[string]bool
 	responseReasoning map[string]bool
 }
@@ -70,12 +74,30 @@ func (parser *bridgeStreamParser) parseChatEvent(eventName string, value map[str
 		if reasoning := jsonutil.FirstString(jsonutil.StringAt(delta, "reasoning_content"), jsonutil.StringAt(delta, "reasoning")); reasoning != "" {
 			events = append(events, bridgeStreamEvent{Kind: "reasoning", Text: reasoning})
 		}
+		// Some Chat-compatible providers sign reasoning in-stream (the
+		// non-streaming decoder already reads message.reasoning_signature).
+		// Without this the signature never reaches the emitter and the
+		// collapsed turn loses it.
+		if signature := jsonutil.FirstString(jsonutil.StringAt(delta, "reasoning_signature"), jsonutil.StringAt(delta, "signature")); signature != "" {
+			events = append(events, bridgeStreamEvent{Kind: "reasoning_signature", Signature: signature})
+		}
 		if text := jsonutil.StringAt(delta, "content"); text != "" {
 			events = append(events, bridgeStreamEvent{Kind: "text", Text: text})
 		}
 		for _, rawCall := range jsonutil.SliceAt(delta, "tool_calls") {
 			call, _ := rawCall.(map[string]any)
 			key := fmt.Sprint(jsonutil.FirstAny(call["index"], jsonutil.StringAt(call, "id")))
+			if key == "" && len(parser.toolOrder) == 1 && strings.HasPrefix(parser.toolOrder[0], "\x00chat-keyless-") {
+				// A lone keyless tool's later fragments still belong to the
+				// single open synthetic call. The prefix guard matters: when
+				// the open call has a real index/id, a keyless fragment is a
+				// different tool, not a continuation of it.
+				key = parser.toolOrder[0]
+			}
+			if key == "" {
+				parser.keylessSeq++
+				key = fmt.Sprintf("\x00chat-keyless-%d", parser.keylessSeq)
+			}
 			function := jsonutil.MapAt(call, "function")
 			id := jsonutil.StringAt(call, "id")
 			if _, seen := parser.tools[key]; !seen {

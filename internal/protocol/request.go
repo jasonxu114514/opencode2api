@@ -358,6 +358,13 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	}
 	switch protocol {
 	case Chat:
+		// The bridge carries a single choice end to end (the decoder keeps
+		// choices[0] and usage would silently bill N completions for one
+		// reply), so fail fast instead of downgrading n>1 behind the
+		// client's back.
+		if n := jsonutil.IntAt(input, "n"); n > 1 {
+			return request, fmt.Errorf("multiple choices (n=%d) are not supported; send n=1", n)
+		}
 		request.MaxTokens = jsonutil.FirstAny(input["max_completion_tokens"], input["max_tokens"])
 		request.Stop = input["stop"]
 		request.Reasoning = jsonutil.FirstAny(input["reasoning_effort"], input["reasoning"])
@@ -482,6 +489,11 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 						request.Developer = append(request.Developer, blocks...)
 					} else if role == "user" || role == "assistant" {
 						request.Messages = append(request.Messages, bridgeMessage{Role: role, Blocks: blocks})
+					} else {
+						// Unknown roles must fail loudly: silently dropping
+						// the turn would change what the model sees without
+						// any signal to the caller.
+						return request, fmt.Errorf("input[%d] has unsupported role %q", i, role)
 					}
 				default:
 					return request, fmt.Errorf("input[%d] has unsupported Responses item type %q", i, jsonutil.StringAt(item, "type"))
@@ -753,7 +765,6 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 				return nil, fmt.Errorf("messages[%d]: assistant message contains tool results", i)
 			}
 			encoded := map[string]any{"role": "assistant", "content": nil}
-			carryBudget(encoded)
 			if value, ok := bridgeReasoningText(reasoning); ok {
 				encoded["reasoning_content"] = value
 			}
@@ -783,8 +794,11 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 				encoded["tool_calls"] = toolCalls
 			}
 			if len(content) > 0 || len(reasoning) > 0 || len(calls) > 0 {
+				// The budget is marked carried only on a message that is
+				// actually kept: an empty assistant turn is dropped below,
+				// and marking first would lose the budget entirely.
+				carryBudget(encoded)
 				messages = append(messages, encoded)
-				budgetCarried = true
 			}
 			continue
 		}

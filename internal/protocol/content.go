@@ -16,6 +16,20 @@ func decodeOpenAIBlocks(value any) []bridgeBlock {
 }
 
 func decodeOpenAIBlocksChecked(value any) ([]bridgeBlock, error) {
+	return decodeOpenAIBlocksMode(value, true)
+}
+
+// decodeOpenAIBlocksLenient decodes upstream response content, skipping
+// block types the gateway does not know yet (providers add kinds like
+// refusal or mcp_tool_use; failing the whole turn on one novel block would
+// break every request until the gateway learns it). Client input keeps using
+// the strict Checked variant so malformed requests still fail loudly.
+func decodeOpenAIBlocksLenient(value any) []bridgeBlock {
+	blocks, _ := decodeOpenAIBlocksMode(value, false)
+	return blocks
+}
+
+func decodeOpenAIBlocksMode(value any, strict bool) ([]bridgeBlock, error) {
 	switch value := value.(type) {
 	case string:
 		if value == "" {
@@ -23,7 +37,7 @@ func decodeOpenAIBlocksChecked(value any) ([]bridgeBlock, error) {
 		}
 		return []bridgeBlock{{Kind: "text", Text: value}}, nil
 	case map[string]any:
-		return decodeOpenAIBlocksChecked([]any{value})
+		return decodeOpenAIBlocksMode([]any{value}, strict)
 	case []any:
 		blocks := make([]bridgeBlock, 0, len(value))
 		for _, raw := range value {
@@ -48,7 +62,10 @@ func decodeOpenAIBlocksChecked(value any) ([]bridgeBlock, error) {
 					Data:      jsonutil.FirstString(jsonutil.StringAt(part, "file_data"), jsonutil.StringAt(file, "file_data")),
 				})
 			default:
-				return nil, fmt.Errorf("unsupported OpenAI content block type %q", jsonutil.StringAt(part, "type"))
+				if strict {
+					return nil, fmt.Errorf("unsupported OpenAI content block type %q", jsonutil.StringAt(part, "type"))
+				}
+				continue
 			}
 		}
 		return blocks, nil
@@ -66,6 +83,17 @@ func decodeAnthropicBlocks(value any) []bridgeBlock {
 }
 
 func decodeAnthropicBlocksChecked(value any) ([]bridgeBlock, error) {
+	return decodeAnthropicBlocksMode(value, true)
+}
+
+// decodeAnthropicBlocksLenient mirrors the OpenAI lenient variant: unknown
+// upstream block types are skipped so one novel kind cannot fail a turn.
+func decodeAnthropicBlocksLenient(value any) []bridgeBlock {
+	blocks, _ := decodeAnthropicBlocksMode(value, false)
+	return blocks
+}
+
+func decodeAnthropicBlocksMode(value any, strict bool) ([]bridgeBlock, error) {
 	if text, ok := value.(string); ok {
 		if text == "" {
 			return nil, nil
@@ -124,7 +152,10 @@ func decodeAnthropicBlocksChecked(value any) ([]bridgeBlock, error) {
 				IsError: jsonutil.BoolAt(part, "is_error"),
 			})
 		default:
-			return nil, fmt.Errorf("unsupported Anthropic content block type %q", jsonutil.StringAt(part, "type"))
+			if strict {
+				return nil, fmt.Errorf("unsupported Anthropic content block type %q", jsonutil.StringAt(part, "type"))
+			}
+			continue
 		}
 	}
 	return blocks, nil
@@ -292,7 +323,10 @@ func encodeAnthropicBlocks(blocks []bridgeBlock) []any {
 				parts = append(parts, map[string]any{"type": "redacted_thinking", "data": block.Encrypted})
 				continue
 			}
-			part := map[string]any{"type": "thinking", "thinking": block.Text, "signature": block.Signature}
+			part := map[string]any{"type": "thinking", "thinking": block.Text}
+			if block.Signature != "" {
+				part["signature"] = block.Signature
+			}
 			parts = append(parts, part)
 		}
 	}

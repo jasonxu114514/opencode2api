@@ -123,13 +123,34 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 }
 
 // isStaleReasoningReference reports whether an upstream 400 body describes a
-// reasoning item/reference the server no longer recognizes, such as
-// "Referenced reasoning item 'rs_...' was not found or has expired".
+// stale reference this caller can no longer use upstream. Two distinct classes
+// match, and both are recoverable by dropping the stale pieces (reasoning items
+// and any previous_response_id chain link) and replaying once:
+//
+//  1. Gone or expired reasoning: "Referenced reasoning item 'rs_...' was not
+//     found or has expired", "reasoning reference does not exist".
+//  2. Dangling response-chain link: "referenced response not found or
+//     expired", or a previous_response_id that is not a resp_ id at all. It
+//     names no reasoning noun, but the repair is identical because
+//     stripStaleReasoningInputs also drops previous_response_id -- typically
+//     copied into a fresh window by a compression tool, or filled in by hand
+//     with a stale response id.
+//
 // Generic validation errors that merely mention reasoning (e.g. "unknown
-// reasoning field") must NOT match, so both the target phrase and the
-// gone/expired marker are required.
+// reasoning field", "reasoning effort is not supported") must NOT match.
 func isStaleReasoningReference(body []byte) bool {
 	text := strings.ToLower(string(body))
+	// Class 2 is checked first: it carries no reasoning noun, so the gate
+	// below would reject it. The message itself scopes the match to the
+	// response-chain field, and a gone/expired marker is still required.
+	if strings.Contains(text, "referenced response") || strings.Contains(text, "previous_response") {
+		for _, marker := range []string{"not found", "expir", "does not exist", "no longer", "must start with"} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+		return false
+	}
 	if !strings.Contains(text, "reasoning item") && !strings.Contains(text, "reasoning reference") {
 		return false
 	}

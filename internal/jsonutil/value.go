@@ -90,9 +90,24 @@ func SliceAt(object map[string]any, path ...string) []any {
 	return values
 }
 
+// The AtOK variants report presence alongside the value so critical reads
+// can tell "field absent" apart from "field explicitly zero". Prefer them
+// wherever a missing field must not silently behave like 0/false/"": the
+// plain At helpers below keep the historical lenient zero-value behavior
+// for the many tolerant call sites.
+func SliceAtOK(object map[string]any, path ...string) ([]any, bool) {
+	values, ok := AnyAt(object, path...).([]any)
+	return values, ok
+}
+
 func MapAt(object map[string]any, path ...string) map[string]any {
 	value, _ := AnyAt(object, path...).(map[string]any)
 	return value
+}
+
+func MapAtOK(object map[string]any, path ...string) (map[string]any, bool) {
+	value, ok := AnyAt(object, path...).(map[string]any)
+	return value, ok
 }
 
 func StringAt(object map[string]any, path ...string) string {
@@ -100,28 +115,51 @@ func StringAt(object map[string]any, path ...string) string {
 	return value
 }
 
+func StringAtOK(object map[string]any, path ...string) (string, bool) {
+	value, ok := AnyAt(object, path...).(string)
+	return value, ok
+}
+
 func BoolAt(object map[string]any, path ...string) bool {
 	value, _ := AnyAt(object, path...).(bool)
 	return value
 }
 
+func BoolAtOK(object map[string]any, path ...string) (bool, bool) {
+	value, ok := AnyAt(object, path...).(bool)
+	return value, ok
+}
+
 func IntAt(object map[string]any, path ...string) int {
+	value, _ := IntAtOK(object, path...)
+	return value
+}
+
+func IntAtOK(object map[string]any, path ...string) (int, bool) {
 	value := AnyAt(object, path...)
 	switch number := value.(type) {
 	case float64:
-		return int(number)
+		return int(number), true
 	case int:
-		return number
+		return number, true
 	case json.Number:
-		integer, _ := number.Int64()
-		return int(integer)
+		integer, err := number.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(integer), true
 	default:
-		return 0
+		return 0, false
 	}
 }
 
 func Int64At(object map[string]any, path ...string) int64 {
 	return int64(IntAt(object, path...))
+}
+
+func Int64AtOK(object map[string]any, path ...string) (int64, bool) {
+	value, ok := IntAtOK(object, path...)
+	return int64(value), ok
 }
 
 func AnyAt(object map[string]any, path ...string) any {

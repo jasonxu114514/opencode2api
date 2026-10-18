@@ -56,14 +56,12 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 		choice, _ := choices[0].(map[string]any)
 		message := jsonutil.MapAt(choice, "message")
 		response.Reasoning = decodeChatReasoning(message)
-		blocks, err := decodeOpenAIBlocksChecked(message["content"])
-		if err != nil {
-			return response, fmt.Errorf("chat response content: %w", err)
-		}
-		response.Text, err = responseTextBlocks(blocks, "Chat")
+		blocks := decodeOpenAIBlocksLenient(message["content"])
+		text, err := responseTextBlocks(blocks, "Chat")
 		if err != nil {
 			return response, err
 		}
+		response.Text = text
 		for _, raw := range jsonutil.SliceAt(message, "tool_calls") {
 			call, _ := raw.(map[string]any)
 			function := jsonutil.MapAt(call, "function")
@@ -83,10 +81,7 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 			case "reasoning":
 				response.Reasoning = append(response.Reasoning, decodeResponsesReasoning(item)...)
 			case "message":
-				blocks, err := decodeOpenAIBlocksChecked(item["content"])
-				if err != nil {
-					return response, fmt.Errorf("Responses response content: %w", err)
-				}
+				blocks := decodeOpenAIBlocksLenient(item["content"])
 				text, err := responseTextBlocks(blocks, "Responses")
 				if err != nil {
 					return response, err
@@ -118,10 +113,7 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 		if jsonutil.StringAt(input, "type") == "error" {
 			response.Error = jsonutil.FirstString(jsonutil.StringAt(input, "error", "message"), "upstream Anthropic request failed")
 		}
-		blocks, err := decodeAnthropicBlocksChecked(input["content"])
-		if err != nil {
-			return response, fmt.Errorf("Anthropic response content: %w", err)
-		}
+		blocks := decodeAnthropicBlocksLenient(input["content"])
 		for _, block := range blocks {
 			if block.Kind == "reasoning" {
 				response.Reasoning = append(response.Reasoning, block)
