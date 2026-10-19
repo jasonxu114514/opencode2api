@@ -13,7 +13,10 @@ import (
 //
 // It exists for upstream lanes that only serve streaming responses: the
 // gateway forces stream:true on the wire and collapses the events back so
-// downstream clients that asked for a plain JSON reply keep working.
+// downstream clients that asked for a plain JSON reply keep working. model is
+// the response's model name unless the stream's start event names one. A
+// stream that reports an error, cannot be parsed or ends without a terminal
+// event is an error.
 func CollapseStream(reader io.Reader, protocol Protocol, model string) ([]byte, error) {
 	parser := &bridgeStreamParser{
 		protocol:          protocol,
@@ -63,12 +66,18 @@ func CollapseStream(reader io.Reader, protocol Protocol, model string) ([]byte, 
 	return json.Marshal(encodeBridgeResponse(protocol, acc.response))
 }
 
+// collapseAccumulator folds bridge stream events into one bridgeResponse.
+// tools maps a stream tool key to its index in response.Tools, and reason
+// points at the reasoning block currently accepting deltas, if any.
 type collapseAccumulator struct {
 	response bridgeResponse
 	tools    map[string]int
 	reason   *bridgeBlock
 }
 
+// apply folds one stream event into the response. Reasoning text and
+// signatures accumulate into the open reasoning block, while encrypted
+// reasoning is stored in a block of its own that is closed at once.
 func (acc *collapseAccumulator) apply(event bridgeStreamEvent) {
 	switch event.Kind {
 	case "start":
@@ -106,9 +115,9 @@ func (acc *collapseAccumulator) apply(event bridgeStreamEvent) {
 	}
 }
 
-// reasoningBlock returns the reasoning block deltas accumulate into,
-// starting a fresh one when the previous block already carries encrypted
-// content (a different item on the wire).
+// reasoningBlock returns the open reasoning block that deltas accumulate into,
+// appending a new one when none is open: before the first reasoning event, and
+// after an encrypted event or splitReasoning has closed the previous block.
 func (acc *collapseAccumulator) reasoningBlock() *bridgeBlock {
 	if acc.reason == nil {
 		acc.response.Reasoning = append(acc.response.Reasoning, bridgeBlock{Kind: "reasoning"})
@@ -117,10 +126,14 @@ func (acc *collapseAccumulator) reasoningBlock() *bridgeBlock {
 	return acc.reason
 }
 
+// splitReasoning closes the open reasoning block, so the next reasoning delta
+// starts a new one.
 func (acc *collapseAccumulator) splitReasoning() {
 	acc.reason = nil
 }
 
+// toolBlock returns the tool call for a stream tool key, appending it on first
+// sight and filling in an ID or name that earlier events lacked.
 func (acc *collapseAccumulator) toolBlock(key, id, name string) *bridgeBlock {
 	if index, ok := acc.tools[key]; ok {
 		block := &acc.response.Tools[index]
@@ -137,6 +150,7 @@ func (acc *collapseAccumulator) toolBlock(key, id, name string) *bridgeBlock {
 	return &acc.response.Tools[len(acc.response.Tools)-1]
 }
 
+// firstNonEmpty returns the first non-empty string, or "".
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {

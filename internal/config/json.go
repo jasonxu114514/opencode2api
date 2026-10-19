@@ -5,9 +5,11 @@ import (
 	"errors"
 )
 
-// stripJSONComments removes // and /* */ comments without changing newlines,
-// so syntax errors still point at the correct line in config.json. Comment
-// markers inside JSON strings (for example, https:// URLs) are preserved.
+// stripJSONComments removes // and /* */ comments by overwriting each comment
+// byte with a space but keeping newlines, so a position in the result is on
+// the same line as in config.json. Comment markers inside JSON strings (for
+// example, https:// URLs) are preserved. A leading UTF-8 BOM is stripped, and
+// an unterminated /* comment is an error.
 func stripJSONComments(data []byte) ([]byte, error) {
 	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
 	out := make([]byte, 0, len(data))

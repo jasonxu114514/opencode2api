@@ -17,19 +17,29 @@ import (
 )
 
 // DebugKeySelection tells the Playground whether to use normal routing or to
-// exercise one explicitly chosen upstream key.
+// exercise one explicitly chosen upstream key. Mode is "auto" (empty means
+// auto) or "selected"; in selected mode, Tier and ID pick one of the keys that
+// DebugKeys lists.
 type DebugKeySelection struct {
 	Mode string      `json:"mode,omitempty"`
 	Tier config.Tier `json:"tier,omitempty"`
 	ID   string      `json:"id,omitempty"`
 }
 
+// DebugInferenceRequest is one Playground request: the protocol it is
+// expressed in, which upstream key to test (Mode "auto" or "selected", the
+// latter naming Tier and ID), and the request body itself.
 type DebugInferenceRequest struct {
 	Protocol protocol.Protocol `json:"protocol"`
 	Key      DebugKeySelection `json:"key,omitempty"`
 	Request  map[string]any    `json:"request"`
 }
 
+// DebugInferenceResult is the outcome of a Playground request: the status and
+// duration of the gateway's answer, the route it took (filled from the request
+// trace when one was recorded), the key that was tested and a verdict about
+// it, and the response body (or the raw text when it was not JSON), redacted
+// and with credential-bearing fields masked.
 type DebugInferenceResult struct {
 	OK          bool                         `json:"ok"`
 	HTTPStatus  int                          `json:"http_status"`
@@ -41,6 +51,9 @@ type DebugInferenceResult struct {
 	Response    any                          `json:"response"`
 }
 
+// handleDebugModels lists the routes, the per-key targets, the catalog and the
+// result of the last Playground request, so the page can render before the
+// first test runs.
 func (a *Server) handleDebugModels(w http.ResponseWriter, _ *http.Request) {
 	models, metadata := a.manager.DebugModels()
 	catalog := a.manager.Resources().Models
@@ -52,6 +65,12 @@ func (a *Server) handleDebugModels(w http.ResponseWriter, _ *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"models": models, "keys": keys, "metadata": metadata, "catalog": catalog, "last_inference": last})
 }
 
+// handleDebugInference runs a request through the gateway itself, in process
+// and always non-streaming, and reports what happened. Auto mode follows
+// normal routing; selected mode pins one upstream key and disables failover,
+// so the verdict describes that key alone. The request is authenticated with
+// the first enabled server key, which the gateway accounts to the Playground
+// bucket, and the result is kept for handleDebugModels.
 func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
 	if !a.allowDebug(clientIP(r)) {
 		writeAdminError(w, http.StatusTooManyRequests, "debug_rate_limited", "too many Playground requests; retry in one minute")
@@ -125,7 +144,7 @@ func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
-	recorder := newDebugResponseRecorder()
+	recorder := debugResponseRecorder()
 	started := time.Now()
 	a.manager.Handler().ServeHTTP(recorder, request)
 	duration := time.Since(started)
@@ -162,29 +181,38 @@ func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
-type debugResponseRecorder struct {
+// debugResponseCapture is a minimal http.ResponseWriter that keeps the status
+// and body of the gateway's answer instead of sending them.
+type debugResponseCapture struct {
 	header http.Header
 	body   bytes.Buffer
 	status int
 }
 
-func newDebugResponseRecorder() *debugResponseRecorder {
-	return &debugResponseRecorder{header: make(http.Header), status: http.StatusOK}
+// debugResponseRecorder returns a response writer that captures the gateway's
+// answer for inspection. It starts at 200 and keeps the first status other
+// than 200 that is written, so an explicit WriteHeader(200) after an error
+// does not hide the error.
+func debugResponseRecorder() *debugResponseCapture {
+	return &debugResponseCapture{header: make(http.Header), status: http.StatusOK}
 }
 
-func (recorder *debugResponseRecorder) Header() http.Header { return recorder.header }
+func (recorder *debugResponseCapture) Header() http.Header { return recorder.header }
 
-func (recorder *debugResponseRecorder) WriteHeader(status int) {
+func (recorder *debugResponseCapture) WriteHeader(status int) {
 	if recorder.status != http.StatusOK || status == http.StatusOK {
 		return
 	}
 	recorder.status = status
 }
 
-func (recorder *debugResponseRecorder) Write(data []byte) (int, error) {
+func (recorder *debugResponseCapture) Write(data []byte) (int, error) {
 	return recorder.body.Write(data)
 }
 
+// sanitizeDebugValue walks a decoded JSON value, replacing the values of keys
+// that name a credential (see sensitiveDebugKey) and running every string
+// through redact. Maps and slices are copied; other values are returned as is.
 func sanitizeDebugValue(value any, redact func(string) string) any {
 	switch current := value.(type) {
 	case map[string]any:
@@ -211,6 +239,9 @@ func sanitizeDebugValue(value any, redact func(string) string) any {
 	}
 }
 
+// allowDebug rate-limits Playground requests to 12 per client per minute and
+// counts the request as it is allowed. When more than 4096 clients are
+// tracked, windows older than a minute are dropped.
 func (a *Server) allowDebug(client string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -257,6 +288,8 @@ func classifyKeyTest(status int, attemptOutcome string) string {
 	}
 }
 
+// sensitiveDebugKey reports whether a lowercased JSON key names a credential
+// that must not be shown in the Playground.
 func sensitiveDebugKey(key string) bool {
 	for _, hint := range []string{
 		"authorization", "cookie", "password", "secret", "api_key", "api-key", "x-api-key",

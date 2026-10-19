@@ -245,9 +245,9 @@ Các endpoint quản trị (cần đăng nhập; ghi còn cần CSRF): `GET /api
 
 Các key ban đầu được phân bố trên nhiều proxy. Lưu lượng thật có thể kích hoạt kiểm tra proxy, gán lại key và cooldown. Proxy không khoẻ được kiểm tra lại mỗi 15 phút bằng Cloudflare trace.
 
-Một hash session ổn định chọn key hoặc proxy ẩn danh ưu tiên. Gửi `x-session-id` tường minh để tách các hội thoại độc lập. Gateway cũng chấp nhận `x-opencode-session`, `x-session-affinity`, `conversation-id`, `conversation_id` và `metadata.session_id`.
+Một hash session ổn định chọn key hoặc proxy ẩn danh ưu tiên. Gửi `x-session-id` tường minh để tách các hội thoại độc lập. Gateway cũng chấp nhận các header `x-opencode-session`, `x-session-affinity`, `session_id`, `conversation-id`, `conversation_id`, các trường body `conversation_id`, `metadata.session_id`, và session ID nằm trong `metadata.user_id` của Claude Code.
 
-Không có ID tường minh, tin nhắn người dùng đầu tiên được dùng làm seed. Vì vậy các hội thoại mở đầu bằng nội dung giống nhau có thể dùng chung affinity. Thay đổi thành phần nhóm có thể làm đổi nút được chọn.
+Session và project do gateway tự tạo được tách theo server key của bên gọi, nên các key khác nhau không bao giờ dùng chung session upstream, key ưu tiên hay proxy ẩn danh. Session OpenCode chính thức (`ses_…`) do client gửi được giữ nguyên. Không có ID tường minh, system prompt cùng tin nhắn người dùng đầu tiên được dùng làm seed. Vì vậy các hội thoại trong cùng một key có system prompt và nội dung mở đầu giống nhau vẫn có thể dùng chung affinity; hãy cấp server key riêng cho những người dùng cần tách biệt. Thay đổi thành phần nhóm có thể làm đổi nút được chọn.
 
 Cooldown tăng theo cấp số nhân tối đa tám lần `performance.failure_cooldown_seconds`, và giá trị `Retry-After` dài hơn sẽ được tôn trọng. Nếu mọi key có xác thực đều đang nghỉ, định tuyến có thể thử key mà cooldown kết thúc sớm nhất. Các nút ẩn danh còn trong cooldown sẽ bị bỏ qua.
 
@@ -264,8 +264,9 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 | `zen_keys`, `go_keys`      | Cần ít nhất một key upstream trừ khi bật truy cập ẩn danh.       |
 | `anonymous`                | `false`.                                                         |
 | `prefer`                   | `go`; nhận `go` hoặc `zen`.                                      |
-| `upstream.zen`             | `https://opencode.ai/inference/openai`.                          |
+| `upstream.zen`             | `https://opencode.ai/zen`.                                       |
 | `upstream.go`              | `https://opencode.ai/zen/go`.                                    |
+| `upstream.anonymous`       | `https://opencode.ai/inference`; upstream dự phòng của kênh ẩn danh sau `/zen`. |
 | `proxies`                  | Rơi về `["direct"]` khi cả hai nguồn proxy đều rỗng.              |
 | `proxyfile`                | Không bắt buộc; đường dẫn tương đối được phân giải cạnh file cấu hình. |
 | `models.refresh_seconds`   | `300`; tối thiểu 1.                                              |

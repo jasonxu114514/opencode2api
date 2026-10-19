@@ -14,6 +14,9 @@ import (
 	"opencode2api/internal/telemetry"
 )
 
+// APIKeyView is a server key as the API keys page lists it: its Fingerprint
+// ID, its name (a numbered placeholder when none is stored), the masked value,
+// whether it is enabled, and its usage.
 type APIKeyView struct {
 	ID        string      `json:"id"`
 	Name      string      `json:"name"`
@@ -23,8 +26,9 @@ type APIKeyView struct {
 	Usage     APIKeyUsage `json:"usage"`
 }
 
-// APIKeyUsage is in-memory like the rest of the monitor: it restarts from zero
-// with the process and survives hot reloads.
+// APIKeyUsage is in-memory like the rest of telemetry.Metrics: it restarts
+// from zero with the process and survives hot reloads. Window covers the last
+// hour.
 type APIKeyUsage struct {
 	Lifetime telemetry.ServerKeyUsage `json:"lifetime"`
 	Window   telemetry.ServerKeyUsage `json:"last_hour"`
@@ -58,6 +62,7 @@ func (a *Server) handleListAPIKeys(w http.ResponseWriter, _ *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"keys": a.apiKeyViews(a.manager.Config())})
 }
 
+// validateKeyName requires a name of 1-80 characters.
 func validateKeyName(name string) error {
 	if name == "" || len([]rune(name)) > 80 {
 		return errors.New("名称需为 1–80 个字符")
@@ -65,6 +70,9 @@ func validateKeyName(name string) error {
 	return nil
 }
 
+// addAPIKey appends key as a new server key named name. The name must have
+// 1-80 characters and the key 16-256 characters from [A-Za-z0-9._-]; at most
+// 200 keys are allowed, and a key whose fingerprint already exists is refused.
 func addAPIKey(cfg *config.Config, name, key string) error {
 	if err := validateKeyName(name); err != nil {
 		return err
@@ -94,6 +102,9 @@ func addAPIKey(cfg *config.Config, name, key string) error {
 	return nil
 }
 
+// handleCreateAPIKey adds a server key, generating "sk-local-" plus 48 hex
+// digits when the request carries no value, and answers with the plaintext
+// key next to the updated, masked list.
 func (a *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name  string `json:"name"`
@@ -121,6 +132,9 @@ func (a *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, 201, map[string]any{"key": key, "keys": a.apiKeyViews(a.manager.Config())})
 }
 
+// changeAPIKey renames, enables or disables, or (with remove) deletes the
+// server key whose fingerprint is id. A change that would leave no enabled
+// key is refused.
 func changeAPIKey(cfg *config.Config, id string, name *string, enabled *bool, remove bool) error {
 	index := -1
 	for i, key := range cfg.ServerKeys {

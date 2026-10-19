@@ -1,4 +1,15 @@
 // Package gateway routes inference requests through managed upstream pools.
+//
+// Upstreams fall into two lanes, named after the OpenCode client generation
+// whose request shape they expect, not after their URL path: both lanes
+// append the /v1/... route segment. The v1 lane is the https://opencode.ai/zen
+// origin (models.V1Base, also the default upstream.zen), which
+// models.IsV1Upstream detects. It expects the OpenCode 1.x client shape: the
+// 1.x User-Agent, the x-opencode-request header, a git-commit-shaped project
+// and, on the free tier, the single "read" tool. The v2 lane is the /inference
+// origin (upstream.anonymous) and the Go plan's /zen/go origin, which expect
+// the OpenCode 2.x CLI shape. The anonymous free tier tries the v1 origin
+// first and falls back to the configured v2 /inference origin.
 package gateway
 
 import (
@@ -25,11 +36,14 @@ import (
 
 const maxRequestBody = 32 << 20
 
+// anonymousZenKey is the shared credential the anonymous free tier sends as
+// its API key.
 const anonymousZenKey = "public"
 
-// attemptDeadline is the per-attempt context deadline. It is armed only when
-// attempt_timeout_seconds is set: otherwise the request-level budget already
-// bounds the single attempt it would cover.
+// attemptDeadline returns the per-attempt deadline, capped at the request
+// timeout. It is zero unless attempt_timeout_seconds is set: AttemptTimeout
+// would otherwise fall back to the request timeout, which the request context
+// already enforces.
 func attemptDeadline(cfg config.Config) time.Duration {
 	if cfg.Performance.AttemptTimeoutSeconds <= 0 {
 		return 0
@@ -41,46 +55,61 @@ func attemptDeadline(cfg config.Config) time.Duration {
 // gateway could answer, so the failure is neither upstream nor ours.
 const statusClientClosedRequest = 499
 
-// proxyUnavailableMessage is returned when every attempt died on the proxy
-// route itself, so operators look at their proxies instead of the upstream.
+// proxyUnavailableMessage is the 503 message sent when the error a request
+// finally failed with is tagged errProxyUnavailable: its last attempt never
+// reached the upstream because the proxy route failed, or the anonymous lane
+// had no proxy to try while none was healthy. Only that final error is
+// inspected; earlier attempts may have failed for other reasons. The message
+// points operators at their proxies instead of the upstream.
 const proxyUnavailableMessage = "all proxies are unavailable; the upstream could not be reached"
 
+// Gateway serves the local inference API for one configuration. It owns the
+// proxy transports and the key and anonymous node pools built from that
+// config; applying a new config builds a new Gateway (see RuntimeController)
+// instead of mutating this one.
 type Gateway struct {
 	rotation     *rotation.Manager
 	cfg          config.Config
 	logger       *slog.Logger
-	transports   *transportPool
-	zenNodes     *nodePool
-	goNodes      *nodePool
-	anonymous    *anonymousPool
-	catalog      *models.Catalog
-	monitor      *telemetry.Monitor
-	availability *models.AvailabilityStore
-	// attemptTimeout bounds a whole upstream attempt (dial + write + headers +
-	// first event), not just the header wait. Zero keeps the legacy behavior.
+	transports   *proxyTransports
+	zenNodes     *upstreamNodes
+	goNodes      *upstreamNodes
+	anonymous    *anonymousNodes
+	catalog      *models.ModelCatalog
+	monitor      *telemetry.Metrics
+	availability *models.AvailabilityRegistry
+	// attemptTimeout bounds a whole upstream attempt (dial + write + headers
+	// and, when the first-event wait is enabled, the first event), not just
+	// the header wait. Zero arms no per-attempt deadline: each attempt is then
+	// bounded only by the request-level budget.
 	attemptTimeout time.Duration
 }
 
-func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
+// New builds a Gateway for cfg: one proxy transport per runtime proxy (a
+// single direct transport when none is configured), Zen and Go key pools
+// bound to those transports, the anonymous node pool and a model catalog. Its
+// rotation manager is not persisted; RuntimeController replaces it with the
+// shared one.
+func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics) (*Gateway, error) {
 	cfg.Rotation.Defaults()
 	rotationManager, err := rotation.New("", cfg.Rotation)
 	if err != nil {
 		return nil, err
 	}
-	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
+	transports, err := transportPool(cfg.RuntimeProxies(), cfg.Performance, cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
 	if err != nil {
 		return nil, err
 	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
-	zenNodes, err := newNodePool(cfg.ZenKeys, transports, cooldown)
+	zenNodes, err := nodePool(cfg.ZenKeys, transports, cooldown)
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
 	}
-	goNodes, err := newNodePool(cfg.GoKeys, transports, cooldown)
+	goNodes, err := nodePool(cfg.GoKeys, transports, cooldown)
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}
-	catalog := models.NewCatalog(cfg.Prefer, cfg.Models.Protocols)
+	catalog := models.Catalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
 	return &Gateway{
@@ -90,13 +119,16 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 		transports:     transports,
 		zenNodes:       zenNodes,
 		goNodes:        goNodes,
-		anonymous:      newAnonymousPool(cfg.Anonymous, transports, cooldown),
+		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown),
 		catalog:        catalog,
 		monitor:        monitor,
 		attemptTimeout: attemptDeadline(cfg),
 	}, nil
 }
 
+// Handler returns the gateway's HTTP API: the server-key authenticated /v1
+// model, inference and System One routes plus the open /healthz, wrapped in
+// panic recovery.
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", g.authenticate(g.handleModels))
@@ -108,6 +140,10 @@ func (g *Gateway) Handler() http.Handler {
 	return telemetry.Recover(g.logger, mux)
 }
 
+// authenticate admits a request whose x-api-key header or Bearer token
+// matches an enabled server key, and stores the caller's fingerprint in the
+// request context and telemetry metadata. Anything else gets a 401 shaped for
+// the endpoint: Anthropic for /v1/messages, Chat otherwise.
 func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		candidates := []string{strings.TrimSpace(r.Header.Get("x-api-key"))}
@@ -133,20 +169,58 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 			wire.WriteError(w, protocol, http.StatusUnauthorized, "invalid local API key", "authentication_error", "")
 			return
 		}
-		if meta := telemetry.MetaFromRequest(r); meta != nil {
-			// The Playground borrows the first enabled key to pass this check, so
-			// its traffic gets its own bucket instead of being billed to that key.
-			meta.ServerKeyID = config.Fingerprint(matched)
-			if isDiagnosticRequest(r.Context()) {
-				meta.ServerKeyID = telemetry.PlaygroundServerKey
-			}
+		// The Playground borrows the first enabled key to pass this check, so
+		// its traffic gets its own bucket instead of being billed to that key.
+		caller := config.Fingerprint(matched)
+		if isDiagnosticRequest(r.Context()) {
+			caller = telemetry.PlaygroundServerKey
 		}
-		next(w, r)
+		if meta := telemetry.MetaFromRequest(r); meta != nil {
+			meta.ServerKeyID = caller
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), callerContextKey{}, caller)))
 	}
+}
+
+type callerContextKey struct{}
+
+// callerScope returns the authenticated caller that request identities are
+// scoped to, so different server keys never share an upstream session.
+func callerScope(ctx context.Context) string {
+	caller, _ := ctx.Value(callerContextKey{}).(string)
+	return caller
+}
+
+// handleInference serves a message endpoint whose wire protocol is external.
+// A rotation group alias is handed to handleRotation. Any other model is
+// routed through the catalog, encoded per upstream tier, sent through
+// doUpstream and translated back into external, streaming or not.
+type requestShapeContextKey struct{}
+
+type requestShape struct {
+	shaped    bool
+	toolAlias string
+}
+
+func setRequestShape(ctx context.Context, shaped bool, toolAlias string) {
+	if state, ok := ctx.Value(requestShapeContextKey{}).(*requestShape); ok {
+		state.shaped, state.toolAlias = shaped, toolAlias
+	}
+	if meta := telemetry.MetaFromContext(ctx); meta != nil {
+		meta.Shaped, meta.ToolAlias = shaped, toolAlias
+	}
+}
+
+func requestShapeFrom(ctx context.Context) requestShape {
+	if state, ok := ctx.Value(requestShapeContextKey{}).(*requestShape); ok && state != nil {
+		return *state
+	}
+	return requestShape{}
 }
 
 func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(context.WithValue(r.Context(), requestShapeContextKey{}, &requestShape{}))
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadRequest, "request body is too large or unreadable", "invalid_request_error", "")
@@ -206,7 +280,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
 			return
 		}
-		ids := identity.DeriveRequestIDs(r, payload)
+		ids := identity.DeriveRequestIDs(r, payload, callerScope(r.Context()))
 		if meta != nil {
 			meta.Request = ids.Request
 			meta.Session = ids.Session
@@ -232,8 +306,9 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				return
 			}
 			g.logger.Warn("all upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous, "error", err)
-			// The request never reached the upstream because the proxy route
-			// failed; report that instead of blaming the upstream with a 502.
+			// The final attempt never reached the upstream because its proxy
+			// route failed; report that instead of blaming the upstream with
+			// a 502.
 			if errors.Is(err, errProxyUnavailable) {
 				wire.WriteError(w, external, http.StatusServiceUnavailable, proxyUnavailableMessage, "proxy_error", ids.Request)
 				return
@@ -257,10 +332,8 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			copyErrorResponse(w, external, resp, ids.Request)
 			return
 		}
-		var toolAlias string
-		if meta != nil {
-			toolAlias = meta.ToolAlias
-		}
+		shape := requestShapeFrom(r.Context())
+		toolAlias := shape.toolAlias
 		if stream {
 			if meta != nil {
 				meta.Stream = true
@@ -273,7 +346,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
-			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
+			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, v1ReadTool, toolAlias)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
@@ -300,21 +373,20 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
 			return
 		}
-		if upstreamRoute.Anonymous || (meta != nil && meta.Shaped) {
-			// Key-tier shaped requests were force-streamed like the
-			// anonymous lane; collapse the same way.
-			// The anonymous lane is served streaming (see prepareAnonymousBody);
-			// collapse the events back into the single document this
-			// non-streaming client asked for.
+		if upstreamRoute.Anonymous || shape.shaped {
+			// The anonymous lane, and a key-tier request shaped like it, is
+			// force-streamed upstream (see prepareAnonymousBody); collapse
+			// the events back into the single document this non-streaming
+			// client asked for.
 			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
 			if err != nil {
-				g.logger.Warn("anonymous stream collapse failed", "component", "conversion", "event", "anonymous_collapse_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "error", err)
+				g.logger.Warn("forced stream collapse failed", "component", "conversion", "event", "stream_collapse_failed", "request_id", ids.Request, "model", model, "anonymous", upstreamRoute.Anonymous, "source_protocol", upstreamRoute.Protocol, "error", err)
 				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
 				return
 			}
 			responseBody = collapsed
 		}
-		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
+		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, v1ReadTool, toolAlias)
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
@@ -390,7 +462,7 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	for _, tier := range route.KeyTiers {
 		bodies[tier] = body
 	}
-	ids := identity.DeriveRequestIDs(r, payload)
+	ids := identity.DeriveRequestIDs(r, payload, callerScope(r.Context()))
 	if meta != nil {
 		meta.Request = ids.Request
 		meta.Session = ids.Session
@@ -457,6 +529,11 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	_, _ = w.Write(responseBody)
 }
 
+// prepareRouteBodies encodes input once for each key tier the route may use,
+// the preferred tier first and then its KeyTiers, in that tier's upstream
+// protocol and with any forced reasoning effort applied. A fallback tier the
+// request cannot be converted for is skipped; only a conversion failure on
+// the preferred tier is an error.
 func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, input map[string]any) (map[config.Tier][]byte, error) {
 	tiers := make([]config.Tier, 0, len(route.KeyTiers)+1)
 	seen := make(map[config.Tier]bool, len(route.KeyTiers)+1)
@@ -505,6 +582,10 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 	return bodies, nil
 }
 
+// copyErrorResponse relays a non-2xx upstream reply as an error in the
+// client's protocol. It keeps the status and any Retry-After, and takes the
+// message from a JSON body's error.message or message, falling back to the
+// status text.
 func copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {

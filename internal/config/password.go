@@ -20,6 +20,9 @@ const (
 	argonKeyLength   = 32
 )
 
+// HashPassword returns an argon2id hash of password with a random 16-byte
+// salt, in the "$argon2id$v=19$m=...,t=...,p=...$salt$hash" form that
+// VerifyPassword reads. Passwords shorter than 10 bytes are rejected.
 func HashPassword(password string) (string, error) {
 	if len(password) < 10 {
 		return "", errors.New("webui password must contain at least 10 characters")
@@ -33,6 +36,10 @@ func HashPassword(password string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
+// VerifyPassword reports whether password matches an encoded argon2id hash.
+// A malformed hash never matches, and neither does one whose parameters,
+// salt or key length fall outside fixed bounds, so a crafted hash cannot
+// demand excessive memory or time. The final comparison is constant-time.
 func VerifyPassword(encoded, password string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
@@ -60,6 +67,8 @@ func VerifyPassword(encoded, password string) bool {
 	return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
+// parseArgonParameter parses one "name=value" element of the argon2 parameter
+// list.
 func parseArgonParameter(value, name string) (uint64, error) {
 	prefix := name + "="
 	if !strings.HasPrefix(value, prefix) {

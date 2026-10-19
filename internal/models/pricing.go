@@ -20,12 +20,18 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// metadataDefaultURL is the OpenCode metadata endpoint, metadataRefresh the
+// interval between refreshes, metadataRetry the delay after a failed refresh,
+// and metadataTimeout the limit of one fetch.
 const (
-	modelsDevDefaultURL = CapabilitiesURL
-	modelsDevRefresh    = 24 * time.Hour
-	modelsDevTimeout    = 30 * time.Second
+	metadataDefaultURL = CapabilitiesURL
+	metadataRefresh    = 24 * time.Hour
+	metadataRetry      = time.Minute
+	metadataTimeout    = 30 * time.Second
 )
 
+// Price is the pricing and limit metadata of one model. A nil cost means the
+// metadata did not state it.
 type Price struct {
 	ID            string   `json:"id"`
 	Input         *float64 `json:"input_cost,omitempty"`
@@ -38,6 +44,11 @@ type Price struct {
 	Deprecated    bool     `json:"deprecated"`
 }
 
+// AnonymousDecision reports whether a model counts as free, which admits it to
+// the anonymous lane and keeps it visible under models.free_only. Source names
+// the rule that decided, such as "name_free", "metadata_free" or
+// "metadata_paid". Known reports whether the metadata lists the model; it is
+// also false for "metadata_cost_unknown".
 type AnonymousDecision struct {
 	Allowed    bool     `json:"allowed"`
 	Source     string   `json:"source"`
@@ -47,6 +58,10 @@ type AnonymousDecision struct {
 	OutputCost *float64 `json:"output_cost,omitempty"`
 }
 
+// MetadataSnapshot reports the freshness of the pricing metadata. Ready means
+// models were loaded from the cache or the endpoint. Stale means the last
+// successful refresh is older than the refresh interval. NextRefresh is the
+// next scheduled refresh, or nil when the refresh loop has not started.
 type MetadataSnapshot struct {
 	Ready       bool       `json:"ready"`
 	Models      int        `json:"models"`
@@ -57,15 +72,21 @@ type MetadataSnapshot struct {
 	NextRefresh *time.Time `json:"next_refresh,omitempty"`
 }
 
+// modelMetadataCache is the on-disk copy of the last successful refresh.
 type modelMetadataCache struct {
 	UpdatedAt time.Time        `json:"updated_at"`
 	Models    map[string]Price `json:"models"`
 }
 
-type PricingStore struct {
+// PricingRegistry holds the per-model pricing and limit metadata from the
+// OpenCode metadata endpoint, keyed by model ID. It decides which models are
+// free and keeps the last good response in a cache file so a restart has data
+// before the first refresh.
+type PricingRegistry struct {
 	mu             sync.RWMutex
 	models         map[string]Price
 	updatedAt      time.Time
+	nextRefresh    time.Time
 	lastError      string
 	cachePath      string
 	endpoint       string
@@ -74,14 +95,20 @@ type PricingStore struct {
 	logger         *slog.Logger
 }
 
-func NewPricingStore(configPath string, logger *slog.Logger) *PricingStore {
+// PricingStore creates a PricingRegistry whose cache file lives beside
+// configPath (none when configPath is empty) and loads that cache. A missing
+// cache is not an error; any other load failure is kept as the snapshot's
+// LastError.
+func PricingStore(configPath string, logger *slog.Logger) *PricingRegistry {
 	cachePath := ""
 	if configPath != "" {
+		// The suffix predates the switch to the OpenCode metadata endpoint and
+		// is kept so existing caches keep loading after an upgrade.
 		cachePath = configPath + ".models.dev.json"
 	}
-	store := &PricingStore{
-		models: make(map[string]Price), cachePath: cachePath, endpoint: modelsDevDefaultURL,
-		client: &http.Client{Timeout: modelsDevTimeout}, logger: logger,
+	store := &PricingRegistry{
+		models: make(map[string]Price), cachePath: cachePath, endpoint: metadataDefaultURL,
+		client: &http.Client{Timeout: metadataTimeout}, logger: logger,
 	}
 	if err := store.loadCache(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		store.lastError = "load metadata cache: " + err.Error()
@@ -90,15 +117,17 @@ func NewPricingStore(configPath string, logger *slog.Logger) *PricingStore {
 }
 
 // SetClientProvider supplies candidate HTTP clients for refresh attempts, most
-// preferred first. It lets the periodic models.dev refresh ride the proxy
+// preferred first. It lets the periodic OpenCode metadata refresh ride the proxy
 // transports exposed by whichever gateway runtime is currently active.
-func (store *PricingStore) SetClientProvider(provider func() []*http.Client) {
+func (store *PricingRegistry) SetClientProvider(provider func() []*http.Client) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.clientProvider = provider
 }
 
-func (store *PricingStore) refreshClients() []*http.Client {
+// refreshClients returns the provider's clients, or the registry's own direct
+// client when no provider is set or it offers none.
+func (store *PricingRegistry) refreshClients() []*http.Client {
 	store.mu.RLock()
 	provider := store.clientProvider
 	store.mu.RUnlock()
@@ -112,35 +141,58 @@ func (store *PricingStore) refreshClients() []*http.Client {
 	return clients
 }
 
-func (store *PricingStore) Start(ctx context.Context) {
+// Start refreshes the metadata at once and then periodically until ctx ends.
+// Failed refreshes are logged and retried after metadataRetry.
+func (store *PricingRegistry) Start(ctx context.Context) {
 	go func() {
-		store.refreshAndLog(ctx)
-		ticker := time.NewTicker(modelsDevRefresh)
-		defer ticker.Stop()
 		for {
+			if ctx.Err() != nil {
+				return
+			}
+			store.setNextRefresh(time.Time{})
+			delay := metadataRetry
+			if store.refreshAndLog(ctx) {
+				delay = metadataRefresh
+			}
+			store.setNextRefresh(time.Now().Add(delay))
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
+				store.setNextRefresh(time.Time{})
 				return
-			case <-ticker.C:
-				store.refreshAndLog(ctx)
+			case <-timer.C:
+				store.setNextRefresh(time.Time{})
 			}
 		}
 	}()
 }
 
-func (store *PricingStore) refreshAndLog(ctx context.Context) {
-	if err := store.Refresh(ctx); err != nil {
-		if store.logger != nil {
-			store.logger.Warn("models.dev metadata refresh failed", "component", "models", "event", "metadata_refresh_failed", "error", err)
-		}
-		return
-	}
-	if store.logger != nil {
-		store.logger.Info("models.dev metadata refreshed", "component", "models", "event", "metadata_refreshed", "models", store.Snapshot().Models)
-	}
+func (store *PricingRegistry) setNextRefresh(next time.Time) {
+	store.mu.Lock()
+	store.nextRefresh = next
+	store.mu.Unlock()
 }
 
-func (store *PricingStore) Refresh(ctx context.Context) error {
+func (store *PricingRegistry) refreshAndLog(ctx context.Context) bool {
+	if err := store.Refresh(ctx); err != nil {
+		if store.logger != nil {
+			store.logger.Warn("OpenCode metadata refresh failed", "component", "models", "event", "metadata_refresh_failed", "error", err)
+		}
+		return false
+	}
+	if store.logger != nil {
+		store.logger.Info("OpenCode metadata refreshed", "component", "models", "event", "metadata_refreshed", "models", store.Snapshot().Models)
+	}
+	return true
+}
+
+// Refresh fetches the metadata, trying each refresh client in turn until one
+// gets a 2xx response. That response is final: a decode or cache write error
+// is returned without trying the remaining clients. The cache file is written
+// before the in-memory data is replaced, so a failed write keeps the previous
+// data. The final failure is also kept as LastError.
+func (store *PricingRegistry) Refresh(ctx context.Context) error {
 	var lastErr error
 	for _, client := range store.refreshClients() {
 		data, err := store.fetch(ctx, client)
@@ -148,7 +200,7 @@ func (store *PricingStore) Refresh(ctx context.Context) error {
 			lastErr = err
 			continue
 		}
-		models, err := decodeModelsDev(data)
+		models, err := decodeMetadata(data)
 		if err != nil {
 			return store.recordError(err)
 		}
@@ -165,39 +217,43 @@ func (store *PricingStore) Refresh(ctx context.Context) error {
 		return nil
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no HTTP client available for models.dev refresh")
+		lastErr = errors.New("no HTTP client available for OpenCode metadata refresh")
 	}
 	return store.recordError(lastErr)
 }
 
-func (store *PricingStore) fetch(ctx context.Context, client *http.Client) ([]byte, error) {
-	refreshCtx, cancel := context.WithTimeout(ctx, modelsDevTimeout)
+func (store *PricingRegistry) fetch(ctx context.Context, client *http.Client) ([]byte, error) {
+	refreshCtx, cancel := context.WithTimeout(ctx, metadataTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(refreshCtx, http.MethodGet, store.endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", httpx.UserAgent())
+	req.Header.Set("User-Agent", httpx.V2UserAgent())
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("models.dev returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("OpenCode metadata endpoint returned HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 }
 
-func (store *PricingStore) recordError(err error) error {
+func (store *PricingRegistry) recordError(err error) error {
 	store.mu.Lock()
 	store.lastError = err.Error()
 	store.mu.Unlock()
 	return err
 }
 
-func (store *PricingStore) Decide(model string) AnonymousDecision {
+// Decide reports whether model counts as free. A name containing "free" in any
+// case always qualifies. Otherwise the metadata must list the model, not
+// deprecated, at zero input and output cost; until the metadata is ready only
+// the name rule applies.
+func (store *PricingRegistry) Decide(model string) AnonymousDecision {
 	store.mu.RLock()
 	price, exists := store.models[model]
 	ready := !store.updatedAt.IsZero() && len(store.models) > 0
@@ -244,27 +300,34 @@ func (store *PricingStore) Decide(model string) AnonymousDecision {
 	return decision
 }
 
-func (store *PricingStore) Price(model string) (Price, bool) {
+// Price returns the metadata of model and whether the metadata lists it.
+func (store *PricingRegistry) Price(model string) (Price, bool) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	price, ok := store.models[model]
 	return price, ok
 }
 
-func (store *PricingStore) Snapshot() MetadataSnapshot {
+// Snapshot reports the freshness of the metadata; see MetadataSnapshot.
+func (store *PricingRegistry) Snapshot() MetadataSnapshot {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	snapshot := MetadataSnapshot{Ready: !store.updatedAt.IsZero() && len(store.models) > 0, Models: len(store.models), LastError: store.lastError, CachePath: store.cachePath}
 	if !store.updatedAt.IsZero() {
 		updated := store.updatedAt.UTC()
-		next := updated.Add(modelsDevRefresh)
-		snapshot.UpdatedAt, snapshot.NextRefresh = &updated, &next
-		snapshot.Stale = time.Since(updated) > modelsDevRefresh
+		snapshot.UpdatedAt = &updated
+		snapshot.Stale = time.Since(updated) > metadataRefresh
+	}
+	if !store.nextRefresh.IsZero() {
+		next := store.nextRefresh.UTC()
+		snapshot.NextRefresh = &next
 	}
 	return snapshot
 }
 
-func (store *PricingStore) loadCache() error {
+// loadCache installs the cache file. It takes no lock, so it must only run
+// while PricingStore constructs the registry.
+func (store *PricingRegistry) loadCache() error {
 	if store.cachePath == "" {
 		return nil
 	}
@@ -285,10 +348,15 @@ func (store *PricingStore) loadCache() error {
 	return nil
 }
 
-func decodeModelsDev(data []byte) (map[string]Price, error) {
+// decodeMetadata extracts a Price for every model of the OpenCode providers in
+// the metadata endpoint's provider map. The opencode, opencode-zen and
+// opencode_zen entries rank first; any other provider whose key contains
+// "opencode" is read only when its id or name does too, and every other
+// provider is ignored. It fails when no OpenCode model is found.
+func decodeMetadata(data []byte) (map[string]Price, error) {
 	var providers map[string]json.RawMessage
 	if err := json.Unmarshal(data, &providers); err != nil {
-		return nil, fmt.Errorf("decode models.dev: %w", err)
+		return nil, fmt.Errorf("decode OpenCode metadata: %w", err)
 	}
 	keys := make([]string, 0, len(providers))
 	for key := range providers {
@@ -337,9 +405,12 @@ func decodeModelsDev(data []byte) (map[string]Price, error) {
 	if len(result) > 0 {
 		return result, nil
 	}
-	return nil, errors.New("models.dev contains no OpenCode model metadata")
+	return nil, errors.New("OpenCode metadata contains no OpenCode models")
 }
 
+// metadataProviderRank orders metadata provider keys: 0 for opencode,
+// opencode-zen and opencode_zen, 1 for any other key containing "opencode",
+// and 2 for the providers decodeMetadata ignores.
 func metadataProviderRank(key string) int {
 	lower := strings.ToLower(key)
 	if lower == "opencode" || lower == "opencode-zen" || lower == "opencode_zen" {
@@ -363,6 +434,9 @@ func numberPointer(object map[string]any, key string) *float64 {
 	return &number
 }
 
+// metadataDeprecated reports whether a metadata model is flagged deprecated,
+// carries a deprecated, retired or disabled status or lifecycle, or names a
+// deprecation or retirement date.
 func metadataDeprecated(model map[string]any) bool {
 	if jsonutil.BoolAt(model, "deprecated") {
 		return true
@@ -374,6 +448,9 @@ func metadataDeprecated(model map[string]any) bool {
 	return model["deprecated_at"] != nil || model["retirement_date"] != nil
 }
 
+// saveMetadataCache writes cache through a 0600 temporary file and a rename.
+// On Windows the existing file is first moved to path+".replace" and put back
+// if the final rename fails.
 func saveMetadataCache(path string, cache modelMetadataCache) error {
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {

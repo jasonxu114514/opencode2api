@@ -212,7 +212,7 @@ const DICTIONARY = {
 
       "diagnostics.metadata.title": "Model metadata",
       "diagnostics.metadata.caption":
-        "Status of the OpenCode price cache from models.dev; a price of 0 or a name containing free is enough to qualify for the anonymous channel.",
+        "Status of the price cache from the OpenCode metadata endpoint; a price of 0 or a name containing free is enough to qualify for the anonymous channel.",
       "diagnostics.last.title": "Latest playground run",
       "diagnostics.last.caption":
         "Only the last run is retained in the current admin process.",
@@ -758,7 +758,7 @@ const DICTIONARY = {
 
       "diagnostics.metadata.title": "Metadata mô hình",
       "diagnostics.metadata.caption":
-        "Trạng thái cache giá OpenCode từ models.dev; giá bằng 0 hoặc tên chứa free là đủ điều kiện vào kênh ẩn danh.",
+        "Trạng thái cache giá từ điểm cuối metadata OpenCode; giá bằng 0 hoặc tên chứa free là đủ điều kiện vào kênh ẩn danh.",
       "diagnostics.last.title": "Playground gần nhất",
       "diagnostics.last.caption":
         "Chỉ giữ lần theo dõi cuối cùng trong tiến trình quản trị hiện tại.",

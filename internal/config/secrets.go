@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 )
 
+// MaskValue hides a secret for display: "••••" followed by its last five
+// characters, or "••••" alone when the value has five characters or fewer.
 func MaskValue(value string) string {
 	runes := []rune(value)
 	if len(runes) <= 5 {
@@ -17,6 +19,9 @@ func MaskValue(value string) string {
 	return "••••" + string(runes[len(runes)-5:])
 }
 
+// RedactURL renders a proxy entry or URL for display with any userinfo
+// replaced by "***". A pool entry gets a #pool fragment when it has none, and
+// an unparsable value becomes "<invalid>".
 func RedactURL(raw string) string {
 	clean, pool := ParseProxyEntry(raw)
 	if clean != "" {
@@ -35,17 +40,28 @@ func RedactURL(raw string) string {
 	return u.String()
 }
 
-type SecretRedactor struct {
+// Redactor scrubs configured secrets from text such as log lines and error
+// messages. It is safe for concurrent use: Replace swaps the whole secret set
+// atomically.
+type Redactor struct {
 	values atomic.Value
 }
 
-func NewSecretRedactor() *SecretRedactor {
-	r := &SecretRedactor{}
+// SecretRedactor returns a Redactor with no secrets loaded; Replace loads
+// them.
+func SecretRedactor() *Redactor {
+	r := &Redactor{}
 	r.values.Store([]string(nil))
 	return r
 }
 
-func (r *SecretRedactor) Replace(cfg Config) {
+// Replace loads the secrets of cfg: the server, Zen and Go keys, the WebUI
+// plaintext password, each upstream URL that carries userinfo (whole, plus its
+// username and password), and each entry of RuntimeProxies other than
+// "direct" (as written and as its clean URL, plus any username and password).
+// Longer secrets are replaced first, so a secret that contains a shorter one
+// is scrubbed whole.
+func (r *Redactor) Replace(cfg Config) {
 	values := make([]string, 0, len(cfg.ServerKeys)+len(cfg.ZenKeys)+len(cfg.GoKeys)+2)
 	values = append(values, cfg.ServerKeys...)
 	values = append(values, cfg.ZenKeys...)
@@ -77,7 +93,9 @@ func (r *SecretRedactor) Replace(cfg Config) {
 	r.values.Store(values)
 }
 
-func (r *SecretRedactor) String(value string) string {
+// String returns value with every loaded secret of at least four bytes
+// replaced by "***".
+func (r *Redactor) String(value string) string {
 	for _, secret := range r.values.Load().([]string) {
 		if len(secret) >= 4 {
 			value = strings.ReplaceAll(value, secret, "***")
@@ -86,14 +104,20 @@ func (r *SecretRedactor) String(value string) string {
 	return value
 }
 
+// Fingerprint returns the first 16 hex digits of the SHA-256 of value. It is
+// the stable ID of a secret in config, session and usage bookkeeping
+// (ServerKeyMetadata is keyed by it), and it doubles as the id of the masked
+// secrets, API keys and Playground key choices that the WebUI shows and sends
+// back.
 func Fingerprint(value string) string {
 	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])[:10]
+	return hex.EncodeToString(sum[:])[:16]
 }
 
-// keyDisplayID is intentionally separate from secretFingerprint. The latter
-// is an internal stable identifier used by session/config bookkeeping; this
-// value is safe for logs and the operator UI and shows only the key suffix.
+// KeyDisplayID returns the last five characters of value, or the whole value
+// when it has five characters or fewer. It is intentionally separate from
+// Fingerprint: it is meant to be read by a person, and it is the key_id of an
+// upstream key in logs, request telemetry and the key status list.
 func KeyDisplayID(value string) string {
 	runes := []rune(value)
 	if len(runes) <= 5 {

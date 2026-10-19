@@ -6,13 +6,25 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// Placeholder reasoning texts. toolReasoningPlaceholder fills the reasoning a
+// tool-call turn is missing, and anthropicRedactedThinkingPlaceholder stands
+// in for encrypted reasoning wherever a readable text is required.
 const (
 	toolReasoningPlaceholder             = "tool call"
 	anthropicRedactedThinkingPlaceholder = "[redacted thinking]"
 )
 
+// reasoningVendorHints are substrings of a model ID or upstream URL that
+// identify the reasoning vendors whose endpoints reject tool-call turns
+// without reasoning history (see normalizeToolReasoningHistory).
 var reasoningVendorHints = [...]string{"moonshot", "kimi", "deepseek", "mimo", "xiaomimimo"}
 
+// bridgeBlock is one content block of the protocol-neutral bridge model. Kind
+// is "text", "image", "file", "reasoning", "tool_call" or "tool_result", and
+// only the fields that kind uses are set. A tool call carries its input as
+// decoded Arguments (from Anthropic) or as raw ArgumentsJSON (from Chat and
+// Responses). A tool result's Result is the client's raw content, or a
+// []bridgeBlock once decodeToolImages has parsed images out of it.
 type bridgeBlock struct {
 	Kind          string
 	Text          string
@@ -44,11 +56,20 @@ type bridgeTool struct {
 	Strict      bool
 }
 
+// bridgeToolChoice is a decoded tool_choice. Mode is "auto", "none",
+// "required" or "named" (with Name set), or empty when the client chose
+// nothing; a mode the target protocol cannot express is not encoded.
 type bridgeToolChoice struct {
 	Mode string
 	Name string
 }
 
+// bridgeRequest is a client request decoded into the protocol-neutral form
+// every request encoder reads. System and Developer instructions stay apart so
+// the Chat and Responses encoders can keep them distinct; the Anthropic
+// encoder merges them. Reasoning holds the client's reasoning controls as an
+// opaque value that reasoningEffort, responsesReasoning and anthropicThinking
+// project onto each target.
 type bridgeRequest struct {
 	Model       string
 	System      []bridgeBlock
@@ -64,25 +85,35 @@ type bridgeRequest struct {
 	Reasoning   any
 	Metadata    any
 	// Sampling and response-shape knobs are carried across the bridge as
-	// opaque values. Each protocol accepts a different shape, so a value that
-	// cannot be expressed natively is omitted rather than rejected: dropping a
-	// knob silently was the old behavior and it made clients believe (for
-	// example) that JSON mode had been honored.
+	// opaque values. The bridge used to drop them all, which made clients
+	// believe (for example) that JSON mode had been honored. Each encoder now
+	// re-emits the knobs its protocol can express: ResponseFormat and
+	// ParallelToolCalls for Chat and Responses, the two penalties and Seed for
+	// Chat only. A knob or format the target cannot express is omitted rather
+	// than rejected, and the Anthropic encoder emits none of them.
 	ResponseFormat    any
 	ParallelToolCalls any
 	FrequencyPenalty  any
 	PresencePenalty   any
 	Seed              any
-	// Native-fidelity knobs decoded from the client body and re-emitted
-	// upstream. prompt_cache_key is the big one: native opencode sends the
-	// session-sliced ID here and rides prompt-cache affinity; without it
-	// every proxied turn pays full attention over the whole history.
+	// Native-fidelity knobs, decoded from Chat and Responses bodies and
+	// re-emitted only by the Chat and Responses encoders; the Anthropic
+	// decoder and encoder ignore them. prompt_cache_key is the big one: native
+	// OpenCode sends the session-sliced ID here and rides prompt-cache
+	// affinity; without it every proxied turn pays full attention over the
+	// whole history.
 	PromptCacheKey   any
 	SafetyIdentifier any
 	ServiceTier      any
 	Store            any
 }
 
+// Usage is the token accounting of one response in bridge form. Decoders
+// normalize each protocol's usage object into it and encoders split it back
+// out. Output is the completion output, Total the reported total (Input+Output
+// when the upstream reports none), Cached and CacheCreation the cache-read and
+// cache-write parts of Input, and Reasoning the reasoning tokens an
+// OpenAI-style upstream reports as part of Output.
 type Usage struct {
 	// Input is the total prompt input, including cache reads and writes. This
 	// matches OpenAI's prompt_tokens semantics and lets each output encoder
@@ -95,6 +126,8 @@ type Usage struct {
 	Reasoning     int
 }
 
+// bridgeResponse is a complete (non-streaming) response in protocol-neutral
+// form, as decoded by decodeBridgeResponse or accumulated by CollapseStream.
 type bridgeResponse struct {
 	ID        string
 	Model     string
@@ -107,6 +140,11 @@ type bridgeResponse struct {
 	Created   int64
 }
 
+// ConvertRequest converts a decoded client request body from one protocol to
+// another. A same-protocol body is deep-cloned unchanged, so provider-specific
+// fields survive; any other body is decoded into the bridge model and
+// re-encoded for the target. The error reports content that is malformed or
+// that the target protocol cannot represent.
 func ConvertRequest(from, to Protocol, input map[string]any) (map[string]any, error) {
 	if from == to {
 		return jsonutil.CloneMap(input), nil
@@ -118,6 +156,9 @@ func ConvertRequest(from, to Protocol, input map[string]any) (map[string]any, er
 	return encodeBridgeRequest(to, request)
 }
 
+// normalizeResponsesRole maps a bridge message role onto a Responses message
+// role: assistant stays, everything else becomes user. Bridge messages only
+// ever carry user and assistant, so this is a guard rather than a conversion.
 func normalizeResponsesRole(role string) string {
 	if role == "assistant" {
 		return "assistant"
@@ -125,6 +166,8 @@ func normalizeResponsesRole(role string) string {
 	return "user"
 }
 
+// schemaOrDefault substitutes an empty object schema for a tool that declared
+// no parameters.
 func schemaOrDefault(value any) any {
 	if value == nil {
 		return map[string]any{"type": "object", "properties": map[string]any{}}
@@ -191,14 +234,20 @@ func responsesTextFormat(format any) any {
 }
 
 // reasoningEffort projects a bridge-level reasoning value onto the OpenAI Chat
-// "reasoning_effort" field.
+// "reasoning_effort" field. A nil result omits the field.
 //
-// Precedence matters: a level the client stated explicitly (the "effort" field,
-// whether or not it arrived next to a thinking block) wins over anything
-// inferred from a thinking budget. Before this, an Anthropic request carrying
-// both thinking.budget_tokens and output_config.effort threw the explicit
-// effort away and reported the budget bucket instead, so a client asking for
-// "max" was served as "high".
+// Precedence matters: a level the client stated explicitly (an "effort" or
+// "reasoning_effort" key, whether or not it arrived next to a thinking block)
+// wins over anything inferred from a thinking budget. Before this, an
+// Anthropic request carrying both thinking.budget_tokens and
+// output_config.effort threw the explicit effort away and reported the budget
+// bucket instead, so a client asking for "max" was served as "high".
+//
+// Without a stated level, an object of type "disabled" yields nil, one of type
+// "enabled"/"adaptive" the effortForThinkingBudget rung of its budget_tokens,
+// and any other object its "type" value as the level (nil when it has none). A
+// non-object value passes through unchanged, except that the strings "none"
+// and "disabled" yield nil.
 func reasoningEffort(value any) any {
 	if object, ok := value.(map[string]any); ok {
 		if effort, ok := explicitEffort(object); ok {
@@ -220,9 +269,11 @@ func reasoningEffort(value any) any {
 }
 
 // explicitEffort reports the effort a client stated verbatim in a reasoning
-// object and whether the object carried one at all. A stated effort outranks a
-// budget, including inside a thinking block that also has budget_tokens:
-// budget 2048 plus effort "max" is a request for "max", not for "low".
+// object and whether the object carried one at all. It looks at "effort" first
+// and at "reasoning_effort" when "effort" states nothing; a key holding a blank
+// or non-string value counts as stating nothing. A stated effort outranks a
+// budget, including inside a thinking block that also has budget_tokens: budget
+// 2048 plus effort "max" is a request for "max", not for "low".
 //
 // The second return is ok, not "effort != nil": the stated value nil means the
 // client named "none"/"disabled" explicitly, which must clear an inferred level
@@ -239,10 +290,11 @@ func explicitEffort(object map[string]any) (any, bool) {
 }
 
 // normalizeEffortValue validates an effort a client stated explicitly. A
-// non-empty string is passed through verbatim (case preserved) so unsupported
+// non-blank string is passed through verbatim (case preserved) so unsupported
 // levels are not silently rewritten or dropped; only "none"/"disabled" mean
-// "no reasoning" and clear the value. Everything else, nil included, reports
-// ok=false so the caller can fall back to a budget-derived level.
+// "no reasoning" and clear the value. Everything else, a blank string or any
+// non-string value (nil included), reports ok=false so the caller can fall
+// back to a budget-derived level.
 func normalizeEffortValue(value any) (any, bool) {
 	text, ok := value.(string)
 	if !ok {
@@ -261,12 +313,15 @@ func normalizeEffortValue(value any) (any, bool) {
 
 // anthropicThinking maps a bridge-level reasoning value back onto the Anthropic
 // "thinking" block plus the "output_config" that carries the effort natively.
+// Both are nil when the value disables reasoning or says nothing about it.
 //
 // The budget reproduced here keeps the Anthropic payload self-consistent and
-// mirrors what the inverse direction (effortForThinkingBudget) reads back, so
-// the two are inverse on every rung. A budget the client originally named is
-// restored verbatim rather than re-derived from the level, so an Anthropic ->
-// Chat -> Anthropic round trip does not rewrite 32000 into an 8192 rung.
+// mirrors what the inverse direction (effortForThinkingBudget) reads back, so a
+// synthesized budget maps back to the same level, except that "minimal" comes
+// back as "low". A budget the client originally named is restored verbatim
+// rather than re-derived from the level, so an Anthropic -> Chat -> Anthropic
+// round trip does not rewrite 32000 into 16384, the budget budgetForEffort
+// synthesizes for the "xhigh" rung 32000 falls on.
 //
 // The emitted number is a float64 because that is the shape a decoded JSON
 // number has, which keeps converted payloads indistinguishable from the ones
@@ -281,7 +336,7 @@ func anthropicThinking(value any) (any, map[string]any) {
 		// A budget is what makes the round trip lossless, so it is read before
 		// the effort: a value that reached the bridge as a thinking block still
 		// names the budget the client sent, and re-deriving one from the level
-		// would fold 32000 back down to the 16384 rung.
+		// would fold 32000 back down to 16384, the budget of its "xhigh" rung.
 		budget = jsonutil.IntAt(object, "budget_tokens")
 		if effort, stated := explicitEffort(object); stated {
 			// "none"/"disabled" clears the reasoning configuration entirely.
@@ -293,8 +348,15 @@ func anthropicThinking(value any) (any, map[string]any) {
 		if kind == "disabled" {
 			return nil, nil
 		}
-		// A level carried in "type" (Chat's {"reasoning":{"type":"high"}}), or a
-		// one-sided {"type":"enabled"} whose only control is its budget.
+		// "enabled"/"adaptive" are thinking modes, not levels: the level comes
+		// from the budget, as in reasoningEffort, and a missing budget means
+		// "high". Passing the mode through would send output_config.effort
+		// "enabled", which no upstream accepts.
+		if kind == "enabled" || kind == "adaptive" {
+			effort := effortForThinkingBudget(budget)
+			return thinkingFor(effort, budget), map[string]any{"effort": effort}
+		}
+		// A level carried in "type", as in Chat's {"reasoning":{"type":"high"}}.
 		if effort, stated := normalizeEffortValue(object["type"]); stated {
 			if effort == nil {
 				return nil, nil
@@ -310,8 +372,8 @@ func anthropicThinking(value any) (any, map[string]any) {
 	effort, ok := normalizeEffortValue(value)
 	if !ok {
 		if number, isNumber := numericValue(value); isNumber {
-			// A reasoning value that only carries a budget: keep the budget and
-			// publish the level it maps to, so no rung is invented.
+			// A bare number is a budget: keep it and publish the level it maps
+			// to, so no rung is invented.
 			if number <= 0 {
 				return nil, nil
 			}
@@ -330,8 +392,8 @@ func anthropicThinking(value any) (any, map[string]any) {
 }
 
 // thinkingFor builds the Anthropic "thinking" block for an effort, reusing the
-// budget the client named when there is one and synthesizing the rung's
-// lower bound otherwise.
+// budget the client named when there is one and synthesizing the level's
+// budgetForEffort budget otherwise.
 func thinkingFor(effort any, budget int) map[string]any {
 	if budget <= 0 {
 		budget = budgetForEffort(effort)
@@ -340,7 +402,15 @@ func thinkingFor(effort any, budget int) map[string]any {
 }
 
 // reasoningBudget reports the thinking budget a bridge-level reasoning value
-// names, or 0 when the value carries none.
+// names, or 0 when the value carries none. Only an object can name one: a bare
+// effort string states a level, not a budget, and a bare number is not read as
+// a budget here (only anthropicThinking treats it as one).
+//
+// The budget is normally the object's budget_tokens, which holds both an
+// Anthropic thinking budget and one the Chat decoder read back from an
+// assistant message's reasoning_budget_tokens. An object without it may still
+// name a budget under its own "reasoning_budget_tokens" key, but that key is
+// read only when the object also states an effort.
 func reasoningBudget(value any) int {
 	object, ok := value.(map[string]any)
 	if !ok {
@@ -352,13 +422,14 @@ func reasoningBudget(value any) int {
 	if _, ok := explicitEffort(object); !ok {
 		return 0
 	}
-	// An effort states a level, not a budget. A Chat client that sends only
-	// {"reasoning_effort":"high"} has no budget to carry.
+	// A stated effort may carry its budget under the Chat field name.
 	return numericValueOrZero(object["reasoning_budget_tokens"])
 }
 
 // withReasoningBudget attaches a budget to a bridge-level reasoning value,
-// keeping any effort already present alongside it.
+// keeping any effort already present alongside it: an object is copied with
+// budget_tokens set, and any other value becomes the "effort" of a new object.
+// A non-positive budget leaves the value unchanged.
 func withReasoningBudget(value any, budget int) any {
 	if budget <= 0 {
 		return value
@@ -376,8 +447,9 @@ func withReasoningBudget(value any, budget int) any {
 	}
 }
 
-// numericValue reads a JSON number out of a decoded body, which reports every
-// number as float64.
+// numericValue reads a number as an int, truncating any fraction. A decoded
+// JSON body reports every number as float64; int and int64 are accepted too,
+// so a value built in Go rather than decoded is read as well.
 func numericValue(value any) (int, bool) {
 	switch number := value.(type) {
 	case float64:
@@ -391,15 +463,19 @@ func numericValue(value any) (int, bool) {
 	}
 }
 
+// numericValueOrZero is numericValue with a zero for anything that is not a
+// number.
 func numericValueOrZero(value any) int {
 	number, _ := numericValue(value)
 	return number
 }
 
-// budgetForEffort is the inverse of effortForThinkingBudget: the smallest
-// lower-bound budget that maps back to the same rung. Only "high" and above
-// need a real number, since Anthropic requires budget_tokens to be at least
-// 1024 and a top-of-range budget already means "max".
+// budgetForEffort synthesizes a thinking budget for a level when an Anthropic
+// body needs one the client never named: "minimal" and "low" get 1024 (the
+// smallest budget_tokens Anthropic accepts), "medium" 4096, "high" 8192,
+// "xhigh" 16384 and "max" 32768. It is the inverse of effortForThinkingBudget:
+// each budget maps back to its own level, except that "minimal" comes back as
+// "low". Any other value gets the "medium" budget.
 func budgetForEffort(value any) int {
 	text, _ := value.(string)
 	switch strings.ToLower(strings.TrimSpace(text)) {
@@ -419,16 +495,18 @@ func budgetForEffort(value any) int {
 }
 
 // effortForThinkingBudget buckets an Anthropic thinking budget onto an OpenAI
-// reasoning level. The rungs are ordered and pairwise distinct so that a
-// budget a client chose deliberately stays distinguishable: before this,
-// everything at or above 8192 collapsed to "high" and the ladder had no rung
-// above it, so 32000 and 8192 were indistinguishable and an Anthropic -> Chat
-// -> Anthropic round trip rewrote 32000 into 8192.
+// reasoning level: a positive budget up to 2048 is "low", 2049..8191
+// "medium", 8192..16383 "high", 16384..32767 "xhigh" and 32768 or more
+// "max". The rungs are ordered and pairwise distinct so that a budget a client
+// chose deliberately stays distinguishable: before this, everything at or
+// above 8192 collapsed to "high" and the ladder had no rung above it, so 32000
+// and 8192 were indistinguishable and an Anthropic -> Chat -> Anthropic round
+// trip rewrote 32000 into 8192.
 //
 // A missing budget keeps the historical "high": thinking:{type:"adaptive"}
 // with no budget_tokens is the common shape, and it must not silently change
-// level. An explicit "max"/"xhigh" effort is how a client asks for a rung
-// above "high", and that path does not consult the budget.
+// level. A client that wants a higher rung states "xhigh" or "max" explicitly,
+// and that level is taken as stated instead of being derived from a budget.
 func effortForThinkingBudget(budget int) string {
 	switch {
 	case budget <= 0:
@@ -438,8 +516,8 @@ func effortForThinkingBudget(budget int) string {
 	case budget >= 16384:
 		return "xhigh"
 	case budget > 8192:
-		// 8193..16383 sits above the old "high" boundary; folding it into
-		// "high" would report a larger budget as the same level.
+		// 8193..16383 is still "high": the "xhigh" rung starts at 16384, the
+		// budget budgetForEffort synthesizes for it.
 		return "high"
 	case budget >= 8192:
 		// The threshold itself keeps its historical bucket.
@@ -451,6 +529,8 @@ func effortForThinkingBudget(budget int) string {
 	}
 }
 
+// bridgeBlocksText concatenates the text of the "text" blocks and ignores
+// every other kind.
 func bridgeBlocksText(blocks []bridgeBlock) string {
 	var text strings.Builder
 	for _, block := range blocks {
@@ -461,6 +541,10 @@ func bridgeBlocksText(blocks []bridgeBlock) string {
 	return text.String()
 }
 
+// asPrefix returns id in the target protocol's ID style, prefix plus "_". An
+// id that already has that prefix is returned unchanged; otherwise any
+// "chatcmpl_", "resp_" or "msg_" prefix is stripped first, so one upstream ID
+// maps consistently onto every protocol.
 func asPrefix(id, prefix string) string {
 	if strings.HasPrefix(id, prefix+"_") {
 		return id

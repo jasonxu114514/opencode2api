@@ -22,10 +22,13 @@ import (
 	"opencode2api/webui"
 )
 
+// Server serves the management API and the embedded WebUI. All mutable state
+// here is guarded by mu; quotaCache has its own quotaMu because a quota
+// refresh holds it across network calls.
 type Server struct {
-	manager       *gateway.RuntimeManager
-	monitor       *telemetry.Monitor
-	logs          *telemetry.LogHub
+	manager       *gateway.RuntimeController
+	monitor       *telemetry.Metrics
+	logs          *telemetry.LogBroker
 	logger        *slog.Logger
 	mu            sync.Mutex
 	sessions      map[string]adminSession
@@ -36,13 +39,19 @@ type Server struct {
 	quotaCache    map[string]quotaCacheEntry
 }
 
-func New(manager *gateway.RuntimeManager, monitor *telemetry.Monitor, logs *telemetry.LogHub, logger *slog.Logger) *Server {
+// New returns a Server for manager, reporting to monitor and logs.
+func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *telemetry.LogBroker, logger *slog.Logger) *Server {
 	return &Server{
 		manager: manager, monitor: monitor, logs: logs, logger: logger, sessions: make(map[string]adminSession),
 		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow),
 	}
 }
 
+// Handler returns the management routes: the API under /api/ and the embedded
+// WebUI for anything else. Every API route except login requires a session,
+// and every mutating one also requires a CSRF token. Unknown /api/ paths
+// answer 404 as JSON, and a path that is not an embedded asset falls back to
+// index.html so the single-page app can route it.
 func (a *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
@@ -73,6 +82,8 @@ func (a *Server) Handler() http.Handler {
 	return a.securityHeaders(telemetry.Recover(a.logger, mux))
 }
 
+// staticHandler serves the embedded WebUI assets, with the index fallback
+// described on Handler.
 func (a *Server) staticHandler() http.Handler {
 	assets := webui.Assets
 	files := http.FileServer(http.FS(assets))
@@ -90,6 +101,9 @@ func (a *Server) staticHandler() http.Handler {
 	})
 }
 
+// securityHeaders sets the CSP and the other hardening headers the WebUI
+// relies on: no inline or third-party scripts or styles, no referrer, no
+// framing and no embedding.
 func (a *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:")
@@ -102,11 +116,17 @@ func (a *Server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// SecretView is a configured secret as the config page shows it: the
+// fingerprint to send back when the value is unchanged, and the masked display
+// text.
 type SecretView struct {
 	ID      string `json:"id"`
 	Display string `json:"display"`
 }
 
+// ConfigView is the configuration as GET /api/config returns it: every secret
+// masked, plus the listeners that are actually in effect and the fields whose
+// change needs a restart.
 type ConfigView struct {
 	Listen      string                   `json:"listen"`
 	ServerKeys  []SecretView             `json:"server_keys"`
@@ -127,12 +147,16 @@ type ConfigView struct {
 	Restart     []string                 `json:"restart_required_fields,omitempty"`
 }
 
+// EffectiveView is the set of listeners the running process actually bound,
+// which may differ from the configured ones until a restart.
 type EffectiveView struct {
 	Listen       string `json:"listen"`
 	WebUIListen  string `json:"webui_listen"`
 	WebUIEnabled bool   `json:"webui_enabled"`
 }
 
+// WebUIView is the writable part of the WebUI configuration; the password and
+// its hash are never exposed.
 type WebUIView struct {
 	Enabled           bool   `json:"enabled"`
 	Listen            string `json:"listen"`
@@ -140,11 +164,16 @@ type WebUIView struct {
 	SessionTTLMinutes int    `json:"session_ttl_minutes"`
 }
 
+// SecretInput is one secret in a configuration update: a new Value, or the ID
+// of an existing secret to keep unchanged.
 type SecretInput struct {
 	ID    string `json:"id,omitempty"`
 	Value string `json:"value,omitempty"`
 }
 
+// ConfigUpdate is the body of PUT /api/config. Secrets carry either a new
+// value or the ID of the existing one. The WebUI username and password are
+// not changed here; they go through /api/account.
 type ConfigUpdate struct {
 	Listen      string                   `json:"listen"`
 	ServerKeys  []SecretInput            `json:"server_keys"`
@@ -165,11 +194,16 @@ type ConfigUpdate struct {
 	WebUI     WebUIView               `json:"webui"`
 }
 
+// handleGetConfig answers with the current configuration, secrets masked.
 func (a *Server) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, a.configView())
 }
 
+// handlePutConfig resolves the submitted secrets against the current ones,
+// keeps what the update omits (rotation, server key metadata, the WebUI
+// username and password hash, and reasoning when the field is absent), and
+// hands the result to the runtime, which validates, applies and persists it.
 func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	var update ConfigUpdate
 	if err := decodeAdminJSON(w, r, &update); err != nil {
@@ -218,6 +252,8 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"result": result, "config": a.configView()})
 }
 
+// handleReload re-reads config.json and applies it, so an edit made on disk
+// takes effect without a restart.
 func (a *Server) handleReload(w http.ResponseWriter, _ *http.Request) {
 	result, err := a.manager.Reload()
 	if err != nil {
@@ -227,6 +263,8 @@ func (a *Server) handleReload(w http.ResponseWriter, _ *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
+// handleReveal returns the plaintext server, Zen, Go and proxy secrets after
+// verifying the current WebUI password, and logs that it happened.
 func (a *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Password string `json:"password"`
@@ -245,6 +283,8 @@ func (a *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"server_keys": cfg.ServerKeys, "zen_keys": cfg.ZenKeys, "go_keys": cfg.GoKeys, "proxies": cfg.Proxies})
 }
 
+// handleMonitor answers with the build version, the metrics snapshot and the
+// current resource counts.
 func (a *Server) handleMonitor(w http.ResponseWriter, _ *http.Request) {
 	metrics := a.monitor.Snapshot()
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -252,6 +292,8 @@ func (a *Server) handleMonitor(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// handleLogs returns the buffered log events after the "after" sequence,
+// newest "limit" of them, and whether older events have already expired.
 func (a *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -259,6 +301,11 @@ func (a *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"events": events, "gap": gap})
 }
 
+// handleLogStream streams log events as server-sent events, starting after the
+// Last-Event-ID header or the "after" query parameter. A gap event marks a
+// cursor that has already expired, and a keepalive is sent every 20 seconds;
+// a keepalive that finds the session no longer valid ends the stream, since
+// nothing re-authenticates it mid-stream.
 func (a *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -311,6 +358,8 @@ func (a *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sessionTokenValid reports whether token still names a live session that
+// belongs to the current username and password hash.
 func (a *Server) sessionTokenValid(token string) bool {
 	a.mu.Lock()
 	session, ok := a.sessions[tokenDigest(token)]
@@ -326,6 +375,7 @@ func (a *Server) sessionTokenValid(token string) bool {
 	return session.Username == cfg.WebUI.Username && session.AuthVersion == config.Fingerprint(cfg.WebUI.PasswordHash)
 }
 
+// configView builds the masked view of the current configuration.
 func (a *Server) configView() ConfigView {
 	cfg := a.manager.Config()
 	effective, restart := a.manager.RestartStatus()
@@ -339,6 +389,8 @@ func (a *Server) configView() ConfigView {
 	}
 }
 
+// maskSecrets turns secrets into views carrying their fingerprint and either
+// the masked value or, for proxies, the URL with its credentials redacted.
 func maskSecrets(values []string, proxy bool) []SecretView {
 	result := make([]SecretView, 0, len(values))
 	for _, value := range values {
@@ -351,6 +403,9 @@ func maskSecrets(values []string, proxy bool) []SecretView {
 	return result
 }
 
+// resolveSecrets rebuilds a secret list from the update: an item with a value
+// supplies it, an item with only an ID keeps the existing secret it names. An
+// unknown ID is an error, which is how a stale page is detected.
 func resolveSecrets(inputs []SecretInput, existing []string) ([]string, error) {
 	known := make(map[string]string, len(existing))
 	for _, value := range existing {
@@ -374,6 +429,8 @@ func resolveSecrets(inputs []SecretInput, existing []string) ([]string, error) {
 	return result, nil
 }
 
+// decodeAdminJSON decodes one JSON value of at most 2 MiB into target,
+// rejecting unknown fields and any trailing value.
 func decodeAdminJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
 	decoder.DisallowUnknownFields()
@@ -390,6 +447,7 @@ func decodeAdminJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	return nil
 }
 
+// writeAdminError answers with {"error":{"code":...,"message":...}}.
 func writeAdminError(w http.ResponseWriter, status int, code, message string) {
 	httpx.WriteJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }

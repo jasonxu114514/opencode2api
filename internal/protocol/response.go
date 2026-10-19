@@ -11,6 +11,11 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// ConvertResponse converts a serialized response body from one protocol to
+// another. A same-protocol body is returned as a copy, unchanged; otherwise
+// the body is decoded into the bridge model and re-encoded for the target. An
+// upstream error envelope becomes an error, and so does a body the target
+// protocol cannot represent.
 func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
 	if from == to {
 		return append([]byte(nil), body...), nil
@@ -29,6 +34,11 @@ func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
 	return json.Marshal(encodeBridgeResponse(to, response))
 }
 
+// decodeBridgeResponse decodes a complete response body of the given protocol
+// into the bridge model. An error envelope or error status is reported in
+// response.Error (and the caller turns it into an error), an unknown output
+// item, content block or protocol is an error, and a missing creation time
+// defaults to now.
 func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeResponse, error) {
 	response := bridgeResponse{
 		ID:      jsonutil.StringAt(input, "id"),
@@ -141,6 +151,10 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 	return response, nil
 }
 
+// encodeBridgeResponse encodes a bridge response as the target protocol's
+// body. A tool stop with no usable tool block is demoted to a plain stop first
+// (the reason is spelled out at the guard below), and an ID is synthesized when
+// the response has none.
 func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string]any {
 	if response.ID == "" {
 		response.ID = identity.RandomID("resp", 12)
@@ -277,6 +291,10 @@ func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string
 	}
 }
 
+// decodeOpenAIUsage reads a Chat or Responses usage object. Either spelling of
+// each field is accepted, prompt/input and completion/output alike, and the
+// cache-read, cache-write and reasoning details are read from both the Chat
+// and the Responses nesting.
 func decodeOpenAIUsage(usage map[string]any) Usage {
 	input := jsonutil.FirstNonZero(jsonutil.IntAt(usage, "prompt_tokens"), jsonutil.IntAt(usage, "input_tokens"))
 	output := jsonutil.FirstNonZero(jsonutil.IntAt(usage, "completion_tokens"), jsonutil.IntAt(usage, "output_tokens"))
@@ -295,6 +313,9 @@ func decodeOpenAIUsage(usage map[string]any) Usage {
 	return Usage{Input: input, Output: output, Total: total, Cached: cached, CacheCreation: cacheCreation, Reasoning: reasoning}
 }
 
+// decodeAnthropicUsage reads an Anthropic usage object. Anthropic reports the
+// cache parts separately from input_tokens, so Input is the sum of the three,
+// matching the prompt-token semantics the bridge uses.
 func decodeAnthropicUsage(usage map[string]any) Usage {
 	input := jsonutil.IntAt(usage, "input_tokens")
 	cached := jsonutil.IntAt(usage, "cache_read_input_tokens")
@@ -310,6 +331,7 @@ func decodeAnthropicUsage(usage map[string]any) Usage {
 	}
 }
 
+// openAIUsage renders bridge usage in the Chat usage shape.
 func openAIUsage(usage Usage) map[string]any {
 	return map[string]any{
 		"prompt_tokens":     usage.Input,
@@ -324,6 +346,9 @@ func openAIUsage(usage Usage) map[string]any {
 	}
 }
 
+// anthropicUsage renders bridge usage in the Anthropic shape, where
+// input_tokens excludes the cache parts, so it is Input minus Cached and
+// CacheCreation, floored at zero.
 func anthropicUsage(usage Usage) map[string]any {
 	return map[string]any{
 		"input_tokens":                max(usage.Input-usage.Cached-usage.CacheCreation, 0),
@@ -333,6 +358,7 @@ func anthropicUsage(usage Usage) map[string]any {
 	}
 }
 
+// chatStop maps a canonical bridge stop reason onto Chat's finish_reason.
 func chatStop(stop string) string {
 	switch stop {
 	case "tool_use", "tool_calls":
@@ -346,6 +372,8 @@ func chatStop(stop string) string {
 	}
 }
 
+// anthropicStop maps a canonical bridge stop reason onto Anthropic's
+// stop_reason.
 func anthropicStop(stop string) string {
 	switch stop {
 	case "tool_use", "tool_calls":
@@ -359,6 +387,8 @@ func anthropicStop(stop string) string {
 	}
 }
 
+// canonicalChatStop maps Chat's finish_reason onto a canonical bridge stop
+// reason.
 func canonicalChatStop(stop string) string {
 	switch stop {
 	case "tool_calls", "function_call":
@@ -374,6 +404,8 @@ func canonicalChatStop(stop string) string {
 	}
 }
 
+// canonicalAnthropicStop maps Anthropic's stop_reason onto a canonical bridge
+// stop reason.
 func canonicalAnthropicStop(stop string) string {
 	switch stop {
 	case "tool_use":
@@ -389,8 +421,9 @@ func canonicalAnthropicStop(stop string) string {
 	}
 }
 
-// isToolStop reports whether a canonical bridge stop reason promises tool
-// calls downstream.
+// isToolStop reports whether a stop reason promises tool calls downstream. It
+// accepts the canonical "tool_calls" as well as the raw "tool_use" and
+// "function_call" spellings an upstream may report.
 func isToolStop(stop string) bool {
 	switch stop {
 	case "tool_calls", "tool_use", "function_call":
@@ -402,7 +435,9 @@ func isToolStop(stop string) bool {
 
 // usableToolBlocks drops phantom tool blocks that cannot be executed by a
 // downstream client. Empty arguments are valid, so the tool name is the
-// minimum required signal here; the streaming emitter uses the same rule.
+// minimum required signal here: a name that is empty or only whitespace is
+// dropped. The streaming emitter applies a looser version of the rule, opening
+// a tool as soon as its name is non-empty.
 func usableToolBlocks(tools []bridgeBlock) []bridgeBlock {
 	if len(tools) == 0 {
 		return nil
@@ -417,6 +452,9 @@ func usableToolBlocks(tools []bridgeBlock) []bridgeBlock {
 	return usable
 }
 
+// canonicalResponsesIncomplete maps a Responses incomplete_details.reason onto
+// a canonical bridge stop reason: "content_filter" stays itself and any other
+// reason, max_output_tokens included, becomes "length".
 func canonicalResponsesIncomplete(reason string) string {
 	switch reason {
 	case "content_filter":
@@ -426,6 +464,8 @@ func canonicalResponsesIncomplete(reason string) string {
 	}
 }
 
+// responsesIncompleteReason is the inverse of canonicalResponsesIncomplete:
+// the incomplete_details.reason to report for a canonical stop.
 func responsesIncompleteReason(stop string) string {
 	if stop == "content_filter" {
 		return "content_filter"
@@ -433,6 +473,9 @@ func responsesIncompleteReason(stop string) string {
 	return "max_output_tokens"
 }
 
+// responseTextBlocks joins the text of blocks, erroring on any other kind:
+// neither a Chat message nor a Responses output message may carry more than
+// text.
 func responseTextBlocks(blocks []bridgeBlock, protocol string) (string, error) {
 	for _, block := range blocks {
 		if block.Kind != "text" {
@@ -442,6 +485,9 @@ func responseTextBlocks(blocks []bridgeBlock, protocol string) (string, error) {
 	return bridgeBlocksText(blocks), nil
 }
 
+// ResponseUsage extracts the usage of a serialized response body and reports
+// whether it carried any. The body is decoded per protocol, so an Anthropic
+// usage is read with its separate cache fields.
 func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 	var payload map[string]any
 	if json.Unmarshal(body, &payload) != nil {
@@ -460,13 +506,14 @@ func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 // RenameResponseTool rewrites tool call names matching fromName to toName inside
 // a serialized JSON response or SSE event data object for the given protocol.
 // It is used to restore a client's original read-related tool name (e.g.
-// "reAd" or "read_file") after the legacy /zen/v1 shaper aliased it to "read"
-// on the outbound wire.
+// "reAd" or "read_file") after the v1 lane's shaper aliased it to "read" on the
+// outbound wire.
 //
-// fromName is guaranteed not to occur as a substring of any other text in a
-// response (tool names are never echoed back inside content), so a byte-level
-// occurrence check is enough to skip the re-marshal for the vast majority of
-// frames.
+// The bytes.Contains check is only a fast path that skips the unmarshal for
+// frames that cannot contain the name; correctness does not depend on it,
+// because every name that is rewritten is compared exactly after decoding.
+// Names that do not match fromName, including ones already equal to toName,
+// are left alone.
 func RenameResponseTool(body []byte, protocol Protocol, fromName, toName string) []byte {
 	if fromName == "" || toName == "" || fromName == toName || len(body) == 0 {
 		return body
@@ -488,6 +535,11 @@ func RenameResponseTool(body []byte, protocol Protocol, fromName, toName string)
 	return encoded
 }
 
+// renameToolInMap rewrites matching tool names in a decoded response or stream
+// event and reports whether anything changed. Every place a protocol reports a
+// tool call is visited: Chat message and delta tool_calls, Responses
+// function_call items under "item", "output" and a "response" envelope, and
+// Anthropic tool_use blocks under "content_block" or "content".
 func renameToolInMap(payload map[string]any, protocol Protocol, fromName, toName string) bool {
 	changed := false
 	switch protocol {

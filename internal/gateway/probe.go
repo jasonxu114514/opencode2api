@@ -16,18 +16,26 @@ import (
 	wire "opencode2api/internal/protocol"
 )
 
+// probeResult is the outcome of a free-model probe: whether it succeeded and
+// whether any request was sent at all, whether the upstream rejected the
+// requested reasoning effort, a reason code, the channel ("anonymous" or
+// "zen") that produced it, and the effort observation to store.
 type probeResult struct {
 	success, attempted, effortRejected bool
 	reason, channel                    string
 	effort                             models.EffortProbe
 }
 
+// resolvedEffort returns the reasoning effort to force on a request for model:
+// the configured effort unless it is "auto", otherwise the level a recent
+// availability probe confirmed for this protocol on the free Zen tier, or ""
+// to inject none.
 func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.Protocol) string {
 	effort := g.cfg.ForcedEffort(model)
 	if effort != "auto" {
 		return effort
 	}
-	// Only the free Zen lane is actively probed. Never transfer observations
+	// Only the free Zen tier is actively probed. Never transfer observations
 	// to a different protocol/tier, or guess a level for an unprobed model.
 	if tier != config.TierZen || protocol == wire.SystemOne || g.availability == nil || !g.catalog.IsFreeModel(model) {
 		return ""
@@ -42,7 +50,13 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 	return item.AutoEffort.Effort
 }
 
-func probePayload(model string, protocol wire.Protocol, effort string, legacy bool) ([]byte, error) {
+// probePayload builds the probe body for model: a System One arithmetic
+// question, or a minimal streaming "Reply with OK." Chat prompt converted to
+// protocol, with effort forced when non-empty and the result shaped for the
+// free tier by prepareAnonymousBody. v1 reports whether the probe targets the
+// v1 lane (models.IsV1Upstream), which selects the single "read" tool shaping
+// instead of the v2 toolset.
+func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
 		return json.Marshal(map[string]any{"model": model, "state": "1 + 1 = 2", "questions": map[string]any{
@@ -61,10 +75,18 @@ func probePayload(model string, protocol wire.Protocol, effort string, legacy bo
 	if err != nil {
 		return nil, err
 	}
-	shaped, _ := prepareAnonymousBody(b, protocol, legacy)
+	shaped, _ := prepareAnonymousBody(b, protocol, v1)
 	return shaped, nil
 }
 
+// probeFreeModel checks whether a free model currently answers on the Zen
+// tier. It tries one anonymous proxy against each anonymous upstream (in
+// anonymousUpstreams order) and then one Zen key, and stops at the first lane
+// that succeeds. For a reasoning model whose effort is "auto", a successful
+// baseline is followed by trials from "max" downward to find the highest
+// effort it accepts on this protocol. The reason is model_unavailable only
+// when every lane reported it; any other failure keeps the result
+// inconclusive.
 func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult {
 	if !g.catalog.IsFreeModel(model) {
 		return probeResult{reason: "not_free"}
@@ -83,16 +105,17 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	if g.cfg.Anonymous {
 		cursor := g.anonymous.CursorFor(ids.Session)
 		if node := cursor.Next(); node != nil {
-			// Prefer the legacy /zen/v1 lane before falling back to /inference.
+			// Prefer the v1 lane (/zen) before falling back to the v2
+			// /inference origin.
 			for _, baseURL := range g.anonymousUpstreams() {
-				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, node.proxy.client})
+				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, g.inferenceClient(node.proxy, baseURL, model)})
 			}
 		}
 	}
 	cursor := g.zenNodes.CursorFor(ids.Session)
 	if node := cursor.Next(); node != nil {
 		if proxy := g.zenNodes.Proxy(node); proxy != nil {
-			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, proxy.client})
+			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, g.inferenceClient(proxy, g.cfg.Upstream.Zen, model)})
 		}
 	}
 	result := probeResult{reason: "no_probe_channel"}
@@ -146,15 +169,22 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	return result
 }
 
+// probeAttempt sends one probe request through client with a 60-second budget
+// and classifies the result. Unlike live traffic it bypasses
+// doInferenceAttempt and records nothing against keys or proxies. Success
+// requires a 2xx whose SSE stream collapses cleanly or whose JSON document has
+// the protocol's result field; a failure carries a reason code (http_<status>,
+// model_unavailable, probe_timeout, ...) and whether the upstream rejected the
+// reasoning effort.
 func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string) probeResult {
-	b, err := probePayload(model, protocol, effort, isLegacyZenUpstream(baseURL))
+	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL))
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	ids.Request = identity.RandomID("req", 16)
-	req, err := newUpstreamRequest(ctx, baseURL, protocol, b, ids, key)
+	req, err := upstreamRequest(ctx, baseURL, protocol, b, ids, key)
 	if err != nil {
 		return probeResult{reason: "request_creation_error"}
 	}
@@ -226,6 +256,9 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	return result
 }
 
+// isModelUnavailable reports whether a 400, 404, 410 or 422 error body says
+// the model itself is unknown, retired or no longer available, as opposed to
+// a transient or credential failure.
 func isModelUnavailable(status int, body string) bool {
 	if status != 400 && status != 404 && status != 410 && status != 422 {
 		return false
@@ -239,6 +272,9 @@ func isModelUnavailable(status int, body string) bool {
 	return false
 }
 
+// isEffortRejection reports whether a 400 or 422 error body rejects the
+// requested reasoning level: it must mention effort, thinking or reasoning
+// together with a validation marker such as "invalid" or "unsupported".
 func isEffortRejection(status int, body string) bool {
 	if status != 400 && status != 422 {
 		return false

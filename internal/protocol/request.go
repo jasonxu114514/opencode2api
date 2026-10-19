@@ -13,7 +13,8 @@ import (
 // pass-through and transcoded requests. Same-protocol requests are cloned so
 // provider-specific fields survive, while cross-protocol requests go through
 // the bridge. Target-protocol normalization then repairs reasoning history in
-// either case.
+// either case, using the model and upstreamURL to recognize reasoning
+// vendors, and a Responses body has its max_output_tokens floored.
 func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string) (map[string]any, error) {
 	output, err := ConvertRequest(from, to, input)
 	if err != nil {
@@ -30,14 +31,19 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 
 // ForcedEffort applies an operator-configured thinking level to a prepared
 // upstream body, so a client can be served at a fixed level without the client
-// cooperating.
+// cooperating. A level validForcedEffort rejects is ignored, and "none"
+// removes the reasoning configuration instead of setting a level.
 //
-// A level the client stated explicitly always wins. That is what the "forced"
-// level is for: replacing a level nobody actually asked for, either because the
-// request said nothing about reasoning or because the conversion had to derive
-// one from thinking.budget_tokens. It is applied to the finished upstream body
-// rather than to the bridge value because the same-protocol path never goes
-// through the bridge, and only there can the client's own body be seen.
+// A level already present in the body always wins (see clientEffortExplicit).
+// The forced level fills in only where the body carries no level in the slot
+// that protocol's encoder writes, such as a request that said nothing about
+// reasoning, or a same-protocol Anthropic request whose thinking block names
+// only a budget; that budget is then rewritten to the forced level's. A body
+// the bridge converted has that slot filled whenever it derived a level from
+// thinking.budget_tokens, so the derived level counts as present and is kept.
+// The level is applied to the finished upstream body rather than to the bridge
+// value because a same-protocol request is cloned and never passes through the
+// bridge; the body is the one place both paths share.
 func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 	if body == nil {
 		return
@@ -79,19 +85,21 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 	}
 }
 
-// clientEffortExplicit reports whether an upstream body already carries a level
-// the client stated, as opposed to one the gateway derived from a budget.
+// clientEffortExplicit reports whether an upstream body already carries a
+// level in its protocol's native slot, which a forced level must not replace.
 //
 // The shapes differ per protocol, and each one mirrors how that protocol
-// expressed the level natively: Anthropic states it in output_config.effort (or
-// a top-level effort), Chat in a bare reasoning_effort string, and Responses in
-// reasoning.effort. Anything else in those slots is a structural value the
-// conversion produced, which a forced level is allowed to replace.
+// expresses the level natively: Anthropic in a non-blank output_config.effort
+// (or top-level effort) string, Chat in a non-blank reasoning_effort string,
+// string value counts for Responses, so it cannot tell a non-blank level
+// the client stated from one derived from a budget. Blank values count as
+// unset on every protocol; a missing or non-string value also counts as no
+// level.
 func clientEffortExplicit(protocol Protocol, body map[string]any) bool {
 	switch protocol {
 	case Chat:
-		_, ok := body["reasoning_effort"].(string)
-		return ok
+		effort, ok := body["reasoning_effort"].(string)
+		return ok && strings.TrimSpace(effort) != ""
 	case Anthropic:
 		if effort, ok := jsonutil.AnyAt(body, "output_config", "effort").(string); ok && strings.TrimSpace(effort) != "" {
 			return true
@@ -99,8 +107,8 @@ func clientEffortExplicit(protocol Protocol, body map[string]any) bool {
 		effort, ok := body["effort"].(string)
 		return ok && strings.TrimSpace(effort) != ""
 	case Responses:
-		_, ok := jsonutil.AnyAt(body, "reasoning", "effort").(string)
-		return ok
+		effort, ok := jsonutil.AnyAt(body, "reasoning", "effort").(string)
+		return ok && strings.TrimSpace(effort) != ""
 	default:
 		return false
 	}
@@ -112,7 +120,8 @@ func clientEffortExplicit(protocol Protocol, body map[string]any) bool {
 // Anthropic represents a level as output_config.effort, but also requires a
 // thinking block to carry a budget and requires max_tokens to exceed that
 // budget. Forcing a level therefore has to move all three together, or the
-// upstream rejects the request it was just told to run at a higher level.
+// upstream rejects the request it was just told to run at a higher level. With
+// disable set, the thinking block and output_config are removed instead.
 func applyAnthropicForcedEffort(body map[string]any, effort string, disable bool) {
 	if disable {
 		delete(body, "thinking")
@@ -149,10 +158,13 @@ func validForcedEffort(effort string) bool {
 	}
 }
 
-// normalizeToolReasoningHistory applies only to endpoints that are known to
-// require reasoning replay, or to requests that explicitly enable reasoning.
-// Normalizing the target shape makes the behavior independent of the client
-// protocol used to reach the gateway.
+// normalizeToolReasoningHistory repairs the reasoning history of assistant
+// tool-call turns in a prepared upstream body and reports whether it changed
+// anything. It applies only to endpoints that are known to require reasoning
+// replay, identified by the model or upstream URL naming a reasoning vendor;
+// a Chat body is also repaired when the request explicitly enables reasoning.
+// Responses bodies are never touched. Normalizing the target shape makes the
+// behavior independent of the client protocol used to reach the gateway.
 func normalizeToolReasoningHistory(protocol Protocol, model, upstreamURL string, input map[string]any) bool {
 	vendor := isReasoningVendorIdentifier(model) || isReasoningVendorIdentifier(upstreamURL)
 	widened := vendor || requestEnablesReasoning(input)
@@ -181,6 +193,8 @@ func normalizeToolReasoningHistory(protocol Protocol, model, upstreamURL string,
 	}
 }
 
+// isReasoningVendorIdentifier reports whether a model ID or upstream URL
+// contains one of the reasoningVendorHints, ignoring case.
 func isReasoningVendorIdentifier(value string) bool {
 	value = strings.ToLower(value)
 	for _, hint := range reasoningVendorHints {
@@ -191,6 +205,11 @@ func isReasoningVendorIdentifier(value string) bool {
 	return false
 }
 
+// requestEnablesReasoning reports whether a body's reasoning_effort,
+// reasoning, thinking or effort field asks for reasoning. A string counts
+// unless it is blank, "none" or "disabled"; a bool counts when true; an object
+// counts unless its type (or, without one, its effort) is "none" or
+// "disabled"; any other non-null value counts.
 func requestEnablesReasoning(input map[string]any) bool {
 	for _, key := range []string{"reasoning_effort", "reasoning", "thinking", "effort"} {
 		value, exists := input[key]
@@ -223,7 +242,8 @@ func requestEnablesReasoning(input map[string]any) bool {
 // normalizeChatToolReasoningHistory ensures every assistant tool-call turn
 // carries reasoning_content. Some clients discard this non-standard field
 // while retaining tool_calls, which otherwise makes the next thinking-mode
-// request invalid. A legacy reasoning string is promoted when available.
+// request invalid. A legacy reasoning string is promoted when available, and a
+// placeholder is used otherwise. It reports whether any message changed.
 func normalizeChatToolReasoningHistory(input map[string]any) bool {
 	messages, ok := input["messages"].([]any)
 	if !ok {
@@ -252,7 +272,10 @@ func normalizeChatToolReasoningHistory(input map[string]any) bool {
 // normalizeAnthropicToolThinkingHistory repairs only assistant turns that
 // contain tool_use. DeepSeek, Kimi/Moonshot and MiMo reject signed, redacted,
 // empty or missing thinking history on those turns even though Anthropic
-// clients can legitimately send each of those shapes.
+// clients can legitimately send each of those shapes. It strips thinking
+// signatures, replaces redacted_thinking blocks and empty thinking text with
+// placeholders, and prepends a placeholder thinking block to a turn that has
+// none. It reports whether any message changed.
 func normalizeAnthropicToolThinkingHistory(input map[string]any) bool {
 	messages, ok := input["messages"].([]any)
 	if !ok {
@@ -309,6 +332,8 @@ func normalizeAnthropicToolThinkingHistory(input map[string]any) bool {
 	return changed
 }
 
+// anthropicContentHasType reports whether any block of an Anthropic content
+// array has the given type.
 func anthropicContentHasType(content []any, kind string) bool {
 	for _, rawBlock := range content {
 		block, _ := rawBlock.(map[string]any)
@@ -326,7 +351,9 @@ func anthropicContentHasType(content []any, kind string) bool {
 // Choosing input["thinking"] first (as this used to) shadowed
 // output_config.effort and a top-level effort entirely, so `thinking:
 // {adaptive}` plus `output_config: {effort: "max"}` decoded as the thinking
-// block and was reported downstream as the budget bucket "high".
+// block and was reported downstream as the budget bucket "high". A stated
+// "none"/"disabled" decodes as no reasoning at all, even next to a thinking
+// block.
 func anthropicReasoning(input map[string]any) any {
 	stated := jsonutil.FirstAny(jsonutil.AnyAt(input, "output_config", "effort"), input["effort"])
 	if effort, ok := normalizeEffortValue(stated); ok {
@@ -348,6 +375,14 @@ func anthropicReasoning(input map[string]any) any {
 	return input["thinking"]
 }
 
+// decodeBridgeRequest decodes a client request body of the given protocol into
+// the bridge model. It rejects what the bridge cannot carry faithfully: a
+// malformed message or tool, an unsupported role, content block or Responses
+// item type, and a Chat tool that is not a function. Built-in Responses tools
+// are skipped, as is a Responses message item with a role other than system,
+// developer, user or assistant. Tool results of Responses and Anthropic
+// requests then go through decodeToolImages, and a result carrying images
+// must name its tool call.
 func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest, error) {
 	request := bridgeRequest{
 		Model:       jsonutil.StringAt(input, "model"),
@@ -375,7 +410,7 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 				blocks = append(decodeChatReasoning(message), blocks...)
 				// A budget the gateway carried out on the assistant message is
 				// read back next to the effort, so both directions agree on the
-				// level the client originally named.
+				// budget the client originally named.
 				if budget := jsonutil.IntAt(message, "reasoning_budget_tokens"); budget > 0 {
 					request.Reasoning = withReasoningBudget(request.Reasoning, budget)
 				}
@@ -534,7 +569,8 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 			role := jsonutil.StringAt(message, "role")
 			// Some clients (e.g. Claude Code) inline system/developer messages
 			// into the messages array instead of using the top-level system
-			// field. Fold them into the system prompt rather than rejecting.
+			// field. Fold system messages into request.System and developer
+			// messages into request.Developer rather than rejecting them.
 			if role == "system" {
 				blocks, err := decodeAnthropicBlocksChecked(message["content"])
 				if err != nil {
@@ -595,6 +631,10 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	return request, nil
 }
 
+// appendBridgeBlock adds a block decoded from a standalone Responses item. It
+// joins the previous message when that has the same role and holds only tool
+// calls or results, so consecutive function_call (or function_call_output)
+// items form one turn; otherwise the block starts a new message.
 func appendBridgeBlock(messages *[]bridgeMessage, role string, block bridgeBlock) {
 	if len(*messages) > 0 {
 		last := &(*messages)[len(*messages)-1]
@@ -606,6 +646,8 @@ func appendBridgeBlock(messages *[]bridgeMessage, role string, block bridgeBlock
 	*messages = append(*messages, bridgeMessage{Role: role, Blocks: []bridgeBlock{block}})
 }
 
+// bridgeBlocksOnlyTools reports whether blocks is non-empty and holds only
+// tool calls and tool results.
 func bridgeBlocksOnlyTools(blocks []bridgeBlock) bool {
 	if len(blocks) == 0 {
 		return false
@@ -618,6 +660,10 @@ func bridgeBlocksOnlyTools(blocks []bridgeBlock) bool {
 	return true
 }
 
+// encodeBridgeRequest validates a bridge request against the target protocol
+// and encodes it as that protocol's request body. The target must be one of
+// the three message protocols, and the Chat encoder can also fail on a history
+// whose tool calls and results do not pair up.
 func encodeBridgeRequest(protocol Protocol, request bridgeRequest) (map[string]any, error) {
 	if err := validateBridgeRequest(protocol, request); err != nil {
 		return nil, err
@@ -634,6 +680,9 @@ func encodeBridgeRequest(protocol Protocol, request bridgeRequest) (map[string]a
 	}
 }
 
+// validateBridgeRequest rejects content the target protocol cannot represent
+// at all: a file in Responses instructions, and for Anthropic a file known
+// only by its file_id.
 func validateBridgeRequest(protocol Protocol, request bridgeRequest) error {
 	if protocol == Responses {
 		for _, block := range request.System {
@@ -656,6 +705,16 @@ func validateBridgeRequest(protocol Protocol, request bridgeRequest) error {
 	return nil
 }
 
+// encodeChatRequest encodes a bridge request as a Chat Completions body.
+//
+// System and developer blocks become leading system and developer messages.
+// Chat answers each tool call with a separate "tool" message that must follow
+// the assistant message carrying the calls, so the encoder tracks pending
+// calls: once every pending call has a result, the tool messages are emitted
+// in call order, followed by user messages for any images the results carried
+// (a tool message holds only text), and then by user content that arrived
+// while the calls were pending. A history that breaks the call/result pairing
+// is an error.
 func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	output := map[string]any{"model": request.Model, "stream": request.Stream}
 	jsonutil.Put(output, "temperature", request.Temperature)
@@ -689,11 +748,11 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	pendingResults := make(map[string]bridgeBlock)
 	var pendingOrder []string
 	var deferred [][]bridgeBlock
-	// Anthropic's reasoning controls belong to a whole conversation, but Chat
-	// carries a single reasoning_effort for the request. The budget the client
-	// named is emitted once, on the first assistant message, so that decoding
-	// this Chat body back into Anthropic can restore the level exactly instead
-	// of re-deriving it from a bucket (32000 used to come back as 8192).
+	// Chat has a reasoning_effort level but no field for an Anthropic thinking
+	// budget. The budget the client named is emitted once, as
+	// reasoning_budget_tokens on the first assistant message, so that decoding
+	// this Chat body back into Anthropic can restore the budget exactly instead
+	// of re-deriving it from the level (32000 used to come back as 8192).
 	budgetCarried := false
 	carryBudget := func(encoded map[string]any) {
 		if budgetCarried {
@@ -714,8 +773,8 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	}
 	// A conversation can end before any assistant turn exists to carry the
 	// budget. Attaching it to an empty assistant message keeps it on the wire
-	// without inventing visible output; Chat clients treat the empty turn as an
-	// assistant prefill.
+	// without inventing visible output; the upstream Chat endpoint treats the
+	// empty turn as an assistant prefill.
 	carryBudgetOnly := func() {
 		if budgetCarried {
 			return
@@ -859,6 +918,9 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	return output, nil
 }
 
+// missingToolIDs lists the tool calls still waiting for a result, for an error
+// message: in call order when that accounts for every pending call, and sorted
+// otherwise.
 func missingToolIDs(order []string, pending map[string]bool) []string {
 	missing := make([]string, 0, len(pending))
 	for _, id := range order {
@@ -885,21 +947,28 @@ func missingToolIDs(order []string, pending map[string]bool) []string {
 	return missing
 }
 
-// responsesReasoning builds the Responses "reasoning" object.
+// responsesReasoning builds the Responses "reasoning" object. A nil result
+// omits the field.
 //
-// A bare effort string, or a thinking-style block that carries budget_tokens
-// but no effort, is projected onto "reasoning.effort". Copying such a block
-// through verbatim (the old behavior) forwarded {"type":"adaptive"} and dropped
-// the effort completely, so a client asking for "max" reached the upstream with
-// no reasoning configuration at all.
+// A bare effort string, or a reasoning object from which reasoningEffort reads
+// a level (a thinking block of type "enabled"/"adaptive" included), is
+// projected onto "reasoning.effort". Copying such a block through verbatim
+// (the old behavior) forwarded {"type":"adaptive"} and dropped the effort
+// completely, so a client asking for "max" reached the upstream with no
+// reasoning configuration at all.
+//
+// An object of type "disabled" yields nil and is omitted; one that yields no
+// level is forwarded unchanged, and a bare "none"/"disabled" string yields nil.
 func responsesReasoning(value any) any {
 	if object, ok := value.(map[string]any); ok {
 		if jsonutil.StringAt(object, "type") == "disabled" {
-			return object
+			return nil
 		}
-		// "effort" is authoritative here for the same reason as in
-		// encodeChatRequest: it either came from the client verbatim or was
-		// derived from the budget by reasoningEffort.
+		// The object is reduced to the level reasoningEffort reads from it:
+		// an "effort" or "reasoning_effort" the client stated, else the rung
+		// of a thinking block's budget, else a level carried in "type".
+		// Responses takes only the level here, so the object's other keys
+		// (budget_tokens among them) are not forwarded.
 		if effort := reasoningEffort(object); effort != nil {
 			switch typed := effort.(type) {
 			case string:
@@ -943,6 +1012,13 @@ func floorResponsesMaxTokens(value any) any {
 	return value
 }
 
+// encodeResponsesRequest encodes a bridge request as a Responses body.
+// Instructions come from the system blocks and a leading developer message
+// from the developer blocks. Each message becomes one or more input items:
+// reasoning blocks become reasoning items (only when they carry a
+// server-issued ID or encrypted content), text and images become content
+// parts, files input_file parts, and tool calls and results standalone
+// function_call and function_call_output items.
 func encodeResponsesRequest(request bridgeRequest) map[string]any {
 	output := map[string]any{"model": request.Model, "stream": request.Stream}
 	jsonutil.Put(output, "temperature", request.Temperature)
@@ -962,8 +1038,9 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 		output["text"] = map[string]any{"format": format}
 	}
 	jsonutil.Put(output, "parallel_tool_calls", request.ParallelToolCalls)
-	// ponytail: native-fidelity knobs. Omit-when-absent: clients that never
-	// send them see zero behavior change; opencode turns ride cache affinity.
+	// Native-fidelity knobs. Each is emitted only when the client sent it, so
+	// a client that never sends them sees no behavior change, while OpenCode
+	// turns ride prompt-cache affinity.
 	jsonutil.Put(output, "prompt_cache_key", request.PromptCacheKey)
 	jsonutil.Put(output, "safety_identifier", request.SafetyIdentifier)
 	jsonutil.Put(output, "service_tier", request.ServiceTier)
@@ -1058,6 +1135,11 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 	return output
 }
 
+// encodeAnthropicRequest encodes a bridge request as an Anthropic Messages
+// body. System and developer blocks are merged into one system prompt, a
+// missing max_tokens defaults to 4096, and adjacent same-role messages are
+// joined into one, because Anthropic expects the turns to alternate. A "none"
+// tool choice omits the tools entirely.
 func encodeAnthropicRequest(request bridgeRequest) map[string]any {
 	output := map[string]any{"model": request.Model, "stream": request.Stream}
 	jsonutil.Put(output, "temperature", request.Temperature)

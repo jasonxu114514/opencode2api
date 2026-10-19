@@ -7,8 +7,15 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
-// Only image-bearing tool results enter this path. Keep all legacy text and
-// opaque results unchanged, and reuse bridgeBlock rather than a second model.
+// decodeToolImages parses a Responses or Anthropic tool result that carries
+// images into bridge blocks, so the images can be re-encoded for a target
+// protocol whose tool result holds them differently. A result without images
+// is returned unchanged. When images are present, every part must be a valid text or image
+// part of the source protocol (an Anthropic image needs a URL or base64 source
+// of its own; a Responses image needs an image_url and no file reference) and
+// anything else is an error. For a Responses result, a data URI whose header is
+// not a well-formed image is an error too. The text and opaque results of a
+// tool without images are never reinterpreted here.
 func decodeToolImages(from Protocol, value any) (any, error) {
 	parts, ok := value.([]any)
 	if !ok {
@@ -78,6 +85,13 @@ func decodeToolImages(from Protocol, value any) (any, error) {
 	return blocks, nil
 }
 
+// chatToolImages splits a tool result that decodeToolImages parsed into the
+// text a Chat tool message can hold and the image parts that must be sent in a
+// separate user message. Each image is announced in the text by a
+// "[tool_image call_id=... index=N]" marker, with the call ID JSON-quoted, and
+// the image list starts with that marker as a text block so the two stay
+// associated. A result that was not parsed is flattened by
+// bridgeToolResultContent and yields no images.
 func chatToolImages(result bridgeBlock) (string, []bridgeBlock) {
 	parts, ok := result.Result.([]bridgeBlock)
 	if !ok {
@@ -99,6 +113,10 @@ func chatToolImages(result bridgeBlock) (string, []bridgeBlock) {
 	return text.String(), images
 }
 
+// responsesToolContent renders a parsed tool result as Responses
+// function_call_output content: text parts as input_text and image parts as
+// input_image, with inline data turned back into a data URI. An unparsed
+// result is flattened by bridgeToolResultContent.
 func responsesToolContent(value any) any {
 	parts, ok := value.([]bridgeBlock)
 	if !ok {

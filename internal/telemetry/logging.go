@@ -13,6 +13,8 @@ import (
 	"opencode2api/internal/config"
 )
 
+// LogEvent is one structured log record as the LogBroker keeps and streams it.
+// Sequence grows by one per published event, so a subscriber can detect gaps.
 type LogEvent struct {
 	Sequence  uint64         `json:"sequence"`
 	Time      time.Time      `json:"time"`
@@ -26,7 +28,9 @@ type logSubscriber struct {
 	ch chan LogEvent
 }
 
-type LogHub struct {
+// LogBroker keeps the most recent log events in a ring buffer for the WebUI and
+// fans every new event out to live subscribers.
+type LogBroker struct {
 	mu          sync.RWMutex
 	buffer      []LogEvent
 	start       int
@@ -36,14 +40,17 @@ type LogHub struct {
 	nextSub     uint64
 }
 
-func NewLogHub(capacity int) *LogHub {
+// LogHub creates a LogBroker that keeps the last capacity events, at least 100.
+func LogHub(capacity int) *LogBroker {
 	if capacity < 100 {
 		capacity = 100
 	}
-	return &LogHub{buffer: make([]LogEvent, capacity), subscribers: make(map[uint64]*logSubscriber)}
+	return &LogBroker{buffer: make([]LogEvent, capacity), subscribers: make(map[uint64]*logSubscriber)}
 }
 
-func (h *LogHub) Resize(capacity int) {
+// Resize changes the buffer capacity (at least 100), keeping the newest events
+// that still fit.
+func (h *LogBroker) Resize(capacity int) {
 	if capacity < 100 {
 		capacity = 100
 	}
@@ -62,7 +69,9 @@ func (h *LogHub) Resize(capacity int) {
 	h.mu.Unlock()
 }
 
-func (h *LogHub) Publish(event LogEvent) {
+// Publish assigns event the next sequence number, stores it, overwriting the
+// oldest event when the buffer is full, and offers it to every subscriber.
+func (h *LogBroker) Publish(event LogEvent) {
 	h.mu.Lock()
 	h.next++
 	event.Sequence = h.next
@@ -78,14 +87,19 @@ func (h *LogHub) Publish(event LogEvent) {
 		select {
 		case sub.ch <- event:
 		default:
-			// A slow browser must never block request processing. Its reconnect
-			// cursor will make the gap visible on the next subscription.
+			// A slow browser must never block request processing. The dropped
+			// event leaves a hole in the sequence numbers, which the subscriber
+			// can report as a gap.
 		}
 	}
 	h.mu.Unlock()
 }
 
-func (h *LogHub) Recent(after uint64, limit int) ([]LogEvent, bool) {
+// Recent returns the buffered events with a sequence number above after, at
+// most limit of the newest (the whole buffer when limit is out of range). The
+// second result reports a gap: events following after have already been
+// overwritten.
+func (h *LogBroker) Recent(after uint64, limit int) ([]LogEvent, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if limit < 1 || limit > len(h.buffer) {
@@ -109,7 +123,10 @@ func (h *LogHub) Recent(after uint64, limit int) ([]LogEvent, bool) {
 	return out, gap
 }
 
-func (h *LogHub) Subscribe() (<-chan LogEvent, func()) {
+// Subscribe returns a channel of newly published events and a function that
+// ends the subscription. The channel buffers 128 events; Publish drops events
+// that do not fit instead of blocking. The channel is never closed.
+func (h *LogBroker) Subscribe() (<-chan LogEvent, func()) {
 	h.mu.Lock()
 	h.nextSub++
 	id := h.nextSub
@@ -123,26 +140,34 @@ func (h *LogHub) Subscribe() (<-chan LogEvent, func()) {
 	}
 }
 
+// hubHandler is the slog.Handler behind StructuredLogger. It passes each
+// record to base and publishes a redacted copy to hub.
 type hubHandler struct {
 	base     slog.Handler
-	hub      *LogHub
-	redactor *config.SecretRedactor
+	hub      *LogBroker
+	redactor *config.Redactor
 	attrs    []slog.Attr
 	groups   []string
 }
 
-func NewStructuredLogger(level *slog.LevelVar, hub *LogHub, redactor *config.SecretRedactor) *slog.Logger {
-	return newStructuredLogger(os.Stdout, level, hub, redactor)
+// StructuredLogger returns a logger that writes JSON to stdout and mirrors
+// every record into hub. Both outputs pass through redactor, and attributes
+// whose keys mention a password, authorization, cookie or secret are masked.
+func StructuredLogger(level *slog.LevelVar, hub *LogBroker, redactor *config.Redactor) *slog.Logger {
+	return structuredLogger(os.Stdout, level, hub, redactor)
 }
 
-func newStructuredLogger(output io.Writer, level *slog.LevelVar, hub *LogHub, redactor *config.SecretRedactor) *slog.Logger {
+// structuredLogger is StructuredLogger with an explicit JSON output.
+func structuredLogger(output io.Writer, level *slog.LevelVar, hub *LogBroker, redactor *config.Redactor) *slog.Logger {
 	base := slog.NewJSONHandler(output, &slog.HandlerOptions{Level: level, ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
 		return sanitizeLogAttr(redactor, attr)
 	}})
 	return slog.New(&hubHandler{base: base, hub: hub, redactor: redactor})
 }
 
-func sanitizeLogAttr(redactor *config.SecretRedactor, attr slog.Attr) slog.Attr {
+// sanitizeLogAttr prepares an attribute for the JSON output: a sensitive key
+// masks the value, and string and error values pass through redactor.
+func sanitizeLogAttr(redactor *config.Redactor, attr slog.Attr) slog.Attr {
 	attr.Value = attr.Value.Resolve()
 	lower := strings.ToLower(attr.Key)
 	if strings.Contains(lower, "password") || strings.Contains(lower, "authorization") || strings.Contains(lower, "cookie") || strings.Contains(lower, "secret") {
@@ -201,6 +226,8 @@ func (h *hubHandler) WithGroup(name string) slog.Handler {
 	return &clone
 }
 
+// addAttr stores attr in fields under its dotted group path. A sensitive key
+// masks the value; strings and values of non-scalar kinds are redacted as text.
 func (h *hubHandler) addAttr(fields map[string]any, attr slog.Attr) {
 	attr.Value = attr.Value.Resolve()
 	key := attr.Key
@@ -234,6 +261,8 @@ func (h *hubHandler) addAttr(fields map[string]any, attr slog.Attr) {
 	fields[key] = value
 }
 
+// SetLogLevel applies a configured level name to level. Anything other than
+// "debug", "warn" or "error" selects info.
 func SetLogLevel(level *slog.LevelVar, value string) {
 	switch value {
 	case "debug":

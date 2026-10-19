@@ -17,10 +17,15 @@ import (
 	wire "opencode2api/internal/protocol"
 )
 
+// modelCatalogCacheSchemaVersion is the layout version of the catalog cache. A
+// file with any other version is rejected, so bump it with every layout change.
 const modelCatalogCacheSchemaVersion = 3
 
+// modelCatalogCacheWriteMu serializes cache writes across catalogs: every
+// runtime built from one config writes the same cache file.
 var modelCatalogCacheWriteMu sync.Mutex
 
+// modelCatalogCache is the on-disk snapshot written by SaveCache.
 type modelCatalogCache struct {
 	SchemaVersion   int                                      `json:"schema_version"`
 	UpdatedAt       time.Time                                `json:"updated_at"`
@@ -33,8 +38,10 @@ type modelCatalogCache struct {
 
 // LoadCache installs a validated disk snapshot into a catalog. It deliberately
 // changes only discovered state; configured protocol overrides and routing
-// preferences stay owned by the current Config.
-func (c *Catalog) LoadCache(path string) error {
+// preferences stay owned by the current Config. The snapshot is reported as
+// stale until the next live refresh, and path becomes the cache path unless
+// one is already set.
+func (c *ModelCatalog) LoadCache(path string) error {
 	cache, err := loadModelCatalogCache(path)
 	if err != nil {
 		return err
@@ -56,9 +63,9 @@ func (c *Catalog) LoadCache(path string) error {
 }
 
 // SaveCache snapshots only public model capability data. Credentials and
-// proxy configuration are not part of modelCatalog and can never enter this
-// file.
-func (c *Catalog) SaveCache() error {
+// proxy configuration are not part of ModelCatalog and can never enter this
+// file. It is a no-op while the catalog has no cache path.
+func (c *ModelCatalog) SaveCache() error {
 	c.mu.RLock()
 	path := c.cachePath
 	cache := modelCatalogCache{
@@ -77,6 +84,8 @@ func (c *Catalog) SaveCache() error {
 	return saveModelCatalogCache(path, cache)
 }
 
+// CatalogCachePath returns the catalog cache file kept beside the config file,
+// or "" when there is no config path.
 func CatalogCachePath(configPath string) string {
 	if configPath == "" {
 		return ""
@@ -84,6 +93,9 @@ func CatalogCachePath(configPath string) string {
 	return configPath + ".models.catalog.json"
 }
 
+// loadModelCatalogCache reads and validates a cache file: exactly one JSON
+// value of the current schema, with a timestamp, at least one model and only
+// known tiers and protocols. Model IDs are trimmed, deduplicated and sorted.
 func loadModelCatalogCache(path string) (modelCatalogCache, error) {
 	if path == "" {
 		return modelCatalogCache{}, os.ErrNotExist
@@ -167,6 +179,9 @@ func validateCatalogCapabilities(native map[config.Tier]map[string]wire.Protocol
 	return nil
 }
 
+// saveModelCatalogCache writes cache through a 0600 temporary file and a
+// rename. On Windows the existing file is first moved to path+".replace" and
+// put back if the final rename fails.
 func saveModelCatalogCache(path string, cache modelCatalogCache) error {
 	if path == "" {
 		return nil

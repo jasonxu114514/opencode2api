@@ -18,13 +18,16 @@ import (
 	"opencode2api/internal/config"
 )
 
+// errFirstEventTimeout and errAttemptTimeout are the cancel causes of the two
+// deadlines doInferenceAttempt arms. Both wrap context.DeadlineExceeded, so
+// generic timeout checks still match them.
 var (
 	errFirstEventTimeout = fmt.Errorf("upstream first SSE event timed out: %w", context.DeadlineExceeded)
 	errAttemptTimeout    = fmt.Errorf("upstream attempt timed out: %w", context.DeadlineExceeded)
 )
 
 // attemptTrace records how far a single attempt got before it failed. The
-// shared ResponseHeaderTimeout only covers the header wait; this probe tells
+// shared ResponseHeaderTimeout only covers the header wait; this trace tells
 // apart the phases it cannot see (dial, request write) from the ones it can.
 // The callbacks run on transport goroutines, so the flags are atomic.
 type attemptTrace struct {
@@ -33,6 +36,9 @@ type attemptTrace struct {
 	gotFirstByte atomic.Bool
 }
 
+// phase names the phase the attempt is in: "dial" until a connection is
+// obtained, "write" until the request is written, "headers" until the first
+// response byte arrives, and "first_event" afterwards.
 func (t *attemptTrace) phase() string {
 	switch {
 	case !t.gotConn.Load():
@@ -77,6 +83,9 @@ func (e *phasedError) Unwrap() error { return e.err }
 // client gets a proxy error instead of a generic bad gateway.
 var errProxyUnavailable = errors.New("proxy unavailable")
 
+// proxyUnavailableError is an attempt error that asProxyUnavailable attributed
+// to the proxy route. It matches both errProxyUnavailable and the original
+// error under errors.Is and errors.As.
 type proxyUnavailableError struct {
 	proxy string
 	err   error
@@ -87,11 +96,14 @@ func (e *proxyUnavailableError) Error() string {
 }
 func (e *proxyUnavailableError) Unwrap() []error { return []error{errProxyUnavailable, e.err} }
 
-// asProxyUnavailable tags an attempt error that died before a connection to the
-// upstream existed. Through a real proxy that phase covers the proxy dial, the
-// CONNECT/SOCKS handshake and the TLS handshake tunnelled through it, so the
-// failure belongs to the proxy rather than the upstream. Direct transports are
-// left untouched: there a dial failure is an upstream reachability problem.
+// asProxyUnavailable tags an attempt error that belongs to the proxy route
+// rather than the upstream: one that died before a connection to the upstream
+// existed (the "dial" phase), or a *net.OpError raised by the proxy dialer
+// itself (Op "proxyconnect", or one starting with "socks"). Through a real
+// proxy the dial phase covers the proxy dial, the CONNECT/SOCKS handshake and
+// the TLS handshake tunnelled through it, so the failure belongs to the proxy
+// rather than the upstream. Direct transports are left untouched: there a dial
+// failure is an upstream reachability problem.
 func asProxyUnavailable(proxy *proxyTransport, err error) error {
 	if err == nil || proxy == nil || proxy.name == "direct" {
 		return err
@@ -105,8 +117,9 @@ func asProxyUnavailable(proxy *proxyTransport, err error) error {
 }
 
 // classifyAttemptError renders a leg token for the request log. The phase is
-// appended for the attempt-deadline and transport cases so a hung exit can be
-// attributed without grepping logs.
+// appended for the attempt-deadline, generic timeout and transport cases so a
+// hung exit can be attributed without grepping logs; a first-event timeout is
+// its own phase and is reported as plain "first_event".
 func classifyAttemptError(err error) string {
 	var pe *phasedError
 	phase := ""
@@ -125,6 +138,9 @@ func classifyAttemptError(err error) string {
 	}
 }
 
+// attemptBody is the response body doInferenceAttempt hands back. Reading
+// replays any buffered SSE prelude before the rest of the stream, and Close
+// also releases the attempt's context.
 type attemptBody struct {
 	io.Reader
 	body   io.ReadCloser
@@ -136,14 +152,27 @@ func (b *attemptBody) Close() error {
 	return b.body.Close()
 }
 
-// Wait before returning a successful SSE response to the retry loop, while
-// nothing has been committed downstream. Keep every byte for native forwarding.
-// Comments and incomplete frames do not count as the first event.
+// doInferenceAttempt sends one upstream attempt through client under two
+// optional deadlines. It passes straight through to client.Do when both
+// timeouts are zero or negative, and for the /systemone path.
+//
+// firstEventTimeout applies only to a 2xx text/event-stream response: before
+// returning it to the retry loop, while nothing has been committed downstream,
+// it waits for the first complete SSE event (see readFirstEvent). Every byte
+// read meanwhile is kept and replayed for native forwarding. Comments and
+// incomplete frames do not count as the first event. Any other response is
+// returned as soon as its headers arrive.
 //
 // attemptTimeout bounds the whole attempt (dial + request write + response
 // headers + first event). ResponseHeaderTimeout only covers the header wait,
 // so a wedged exit can otherwise hang in the write or dial phase until the
-// request-level budget is gone.
+// request-level budget is gone. Once the response is committed the timer can
+// no longer cut the established stream.
+//
+// Outside the pass-through cases, failures are returned as a *phasedError
+// naming the phase the attempt reached, with errAttemptTimeout or
+// errFirstEventTimeout as the error when that deadline caused the failure, and
+// closing the returned body also releases the attempt's context.
 func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeout, attemptTimeout time.Duration) (*http.Response, error) {
 	if (firstEventTimeout <= 0 && attemptTimeout <= 0) || strings.HasSuffix(req.URL.Path, "/systemone") {
 		return client.Do(req)
@@ -234,6 +263,11 @@ func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeou
 	return resp, nil
 }
 
+// readFirstEvent reads up to and including the blank line that ends the first
+// SSE event carrying a data field, and returns every byte read for replay.
+// Comment lines and data-less events before it stay in the returned prefix but
+// do not end the wait. It fails if the stream ends first (io.ErrUnexpectedEOF),
+// on a read error, or once the prelude would exceed 1 MiB.
 func readFirstEvent(reader *bufio.Reader) ([]byte, error) {
 	const maxPrelude = 1 << 20
 	var prefix, line []byte

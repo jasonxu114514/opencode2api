@@ -14,12 +14,20 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// errStreamUpstreamFailure marks a stream that failed in a way already
+// reported, or, in CollapseStream, already recorded, so the caller must not
+// report it a second time.
 var errStreamUpstreamFailure = errors.New("upstream stream failure delivered")
 
+// errStreamNormalTermination reports that the stream reached its own terminal
+// event, so the caller treats it as a success.
 var errStreamNormalTermination = errors.New("upstream stream terminated normally")
 
+// errSSEUnexpectedEOF reports a stream that ended without a terminal event.
 var errSSEUnexpectedEOF = errors.New("unexpected end of SSE stream")
 
+// streamTermination records how a transcoded stream ended, so the code after
+// readSSE can tell a normal terminal event from an upstream error.
 type streamTermination uint8
 
 const (
@@ -28,6 +36,12 @@ const (
 	streamErrorTermination
 )
 
+// bridgeStreamEvent is one protocol-neutral streaming event, parsed from an
+// upstream stream and encoded for the downstream protocol. Kind selects which
+// fields matter: "start" (ResponseID, Model), "text", "reasoning" (Text and/or
+// Encrypted), "reasoning_signature" (Signature), "tool_start" and "tool_delta"
+// (ToolKey, ToolID, ToolName, Text), "usage", "finish" (Stop), "error"
+// (Error, ErrorType) and "done".
 type bridgeStreamEvent struct {
 	Kind       string
 	ResponseID string
@@ -44,9 +58,20 @@ type bridgeStreamEvent struct {
 	Usage      *Usage
 }
 
-// TranscodeStream is the request-aware form used by the
-// gateway. A cancelled client must not receive a synthetic upstream error
-// after its connection has gone away.
+// TranscodeStream parses an upstream stream of one protocol and re-encodes it
+// for another, writing each downstream event as it arrives. It returns the
+// usage the emitter collected and whether the upstream reported any.
+//
+// A nil error means the stream reached its terminal event. Otherwise the error
+// is errStreamUpstreamFailure when the failure was already reported in-band,
+// the error that ended the read, or ctx.Err() when the client was canceled
+// after the stream itself ended cleanly. A stream that ends without a terminal
+// event is reported in-band with an error event first, using
+// errSSEUnexpectedEOF when nothing more specific is known.
+//
+// A canceled client gets no synthetic upstream error event: the gateway
+// cancels the request context when the client goes away, and writing after
+// that only wastes the remaining attempt.
 func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -60,7 +85,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		responseArgs:      map[string]bool{},
 		responseReasoning: map[string]bool{},
 	}
-	emitter := newBridgeStreamEmitter(w, flusher, to, model)
+	emitter := bridgeStreamEmitter(w, flusher, to, model)
 	termination := streamOpen
 	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
@@ -116,7 +141,10 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 	return emitter.usage, emitter.usageReported, errSSEUnexpectedEOF
 }
 
-func emitUnexpectedStreamError(emitter *bridgeStreamEmitter, cause error) error {
+// emitUnexpectedStreamError reports a stream that ended without a terminal
+// event, as an in-band error event in the downstream protocol. It returns nil
+// once that event is written, and the write error otherwise.
+func emitUnexpectedStreamError(emitter *bridgeStreamEncoder, cause error) error {
 	message := "upstream SSE stream ended before a terminal event"
 	if cause != nil && !errors.Is(cause, errSSEUnexpectedEOF) {
 		message = fmt.Sprintf("upstream SSE stream failed: %v", cause)
@@ -128,6 +156,8 @@ func emitUnexpectedStreamError(emitter *bridgeStreamEmitter, cause error) error 
 	return err
 }
 
+// ClientCanceled reports whether a stream error is the client going away,
+// either through the stream error itself or through the request context.
 func ClientCanceled(ctx context.Context, streamErr error) bool {
 	if errors.Is(streamErr, context.Canceled) {
 		return true
@@ -152,12 +182,20 @@ func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// ForwardStream relays a same-protocol upstream stream to the client byte for
+// byte, flushing each write, while a usage tracker reads the same bytes
+// through a TeeReader. It returns the tracked usage and whether the upstream
+// reported any, plus an error: the copy error, if any, for a normal
+// termination that parsed cleanly; otherwise errStreamUpstreamFailure when an
+// upstream error event was relayed, the copy error, or the parse error (or
+// errSSEUnexpectedEOF) after an error event was emitted for a stream that
+// ended early. A canceled client gets no synthetic error event.
 func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
 	}
-	observer := newStreamUsageObserver(protocol)
+	observer := streamUsageObserver(protocol)
 	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
 	usage := observer.Finish()
 	if observer.ErrorTermination() {
@@ -182,7 +220,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	if cause == nil {
 		cause = errSSEUnexpectedEOF
 	}
-	emitter := newBridgeStreamEmitter(w, flusher, protocol, model)
+	emitter := bridgeStreamEmitter(w, flusher, protocol, model)
 	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
 		return usage, observer.Reported(), err
 	}
@@ -195,7 +233,9 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 // returned unchanged.
 //
 // It is a pull-based transform instead of a goroutine plus io.Pipe so a client
-// that disconnects mid-stream cannot strand a blocked writer.
+// that disconnects mid-stream cannot strand a blocked writer. Chat frames go
+// through the fragment-aware rewriter, while the other protocols use the
+// stateless RenameResponseTool rewrite on each frame.
 func RenameStreamReader(reader io.Reader, protocol Protocol, fromName, toName string) io.Reader {
 	if fromName == "" || toName == "" || fromName == toName {
 		return reader
@@ -206,6 +246,9 @@ func RenameStreamReader(reader io.Reader, protocol Protocol, fromName, toName st
 	}
 }
 
+// renameStreamReader is the io.Reader RenameStreamReader returns: it reads the
+// upstream stream line by line, rewrites the data lines that need it, and
+// serves the rewritten bytes, carrying an error over to the next Read.
 type renameStreamReader struct {
 	buffer  *bufio.Reader
 	renamer *streamToolRenamer
@@ -213,14 +256,16 @@ type renameStreamReader struct {
 	err     error
 }
 
+// Read returns the rewritten stream bytes, buffering one line at a time.
 func (reader *renameStreamReader) Read(data []byte) (int, error) {
 	for len(reader.pending) == 0 {
 		if reader.err != nil {
 			return 0, reader.err
 		}
 		// ReadString either returns a non-empty chunk with a nil error or
-		// returns the trailing chunk together with EOF, so this loop can only
-		// repeat while a rewritten chunk is still being drained.
+		// returns the trailing chunk together with EOF, so one iteration
+		// always either fills pending or reports the error below; the loop
+		// condition only guards the entry.
 		line, err := reader.buffer.ReadString('\n')
 		if len(line) > 0 {
 			reader.pending = reader.rewriteLine(line)
@@ -275,6 +320,9 @@ type streamToolRenameState struct {
 	pending string
 }
 
+// streamToolRenamer rewrites the tool names of one protocol's SSE frames,
+// keeping per-tool state across frames so a name split over several Chat
+// chunks is reassembled before it is matched.
 type streamToolRenamer struct {
 	protocol Protocol
 	fromName string
@@ -282,7 +330,10 @@ type streamToolRenamer struct {
 	tools    map[string]*streamToolRenameState
 }
 
-// rewriteFrame rewrites one decoded SSE data object.
+// rewriteFrame rewrites one SSE data payload, which is raw JSON text. Frames
+// that cannot carry a tool name are returned untouched, so only a payload that
+// mentions the source name (Anthropic and Responses) or "tool_calls" (Chat) is
+// decoded.
 func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 	if renamer.protocol != Chat {
 		// Anthropic and Responses streams always carry a complete tool name in
@@ -298,6 +349,10 @@ func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 	return renamer.rewriteChatFrame(raw)
 }
 
+// rewriteChatFrame rewrites the tool names of one Chat chunk. Tool calls are
+// keyed by index, then id, then array position, and each name fragment is fed
+// through applyNameFragment so a name split across chunks is restored as a
+// whole. It returns the frame unchanged when nothing was rewritten.
 func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
@@ -346,7 +401,11 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 }
 
 // applyNameFragment folds one name fragment into a tool's rename state and
-// reports whether the frame changed.
+// reports whether the frame changed. Once the accumulated name completes
+// fromName, it is replaced by toName; while it is still a prefix of fromName
+// the name is held back; on divergence the accumulated name is written out as
+// is. After a resolved rename, any further fragment is dropped, because it
+// belongs to a longer name the client never declared.
 func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState, function map[string]any, fragment string) bool {
 	if state.decided {
 		if !state.renamed {
@@ -378,6 +437,8 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	}
 }
 
+// toolState returns the rename state for a tool key, creating it on first
+// sight.
 func (renamer *streamToolRenamer) toolState(key string) *streamToolRenameState {
 	if state := renamer.tools[key]; state != nil {
 		return state
@@ -387,7 +448,11 @@ func (renamer *streamToolRenamer) toolState(key string) *streamToolRenameState {
 	return state
 }
 
-type streamUsageObserver struct {
+// streamUsageTracker is an io.Writer that splits a relayed stream into SSE
+// frames and parses them for usage, while recording whether the stream reached
+// a terminal or error event and whether any frame failed to parse. It never
+// modifies the bytes it is given.
+type streamUsageTracker struct {
 	parser   *bridgeStreamParser
 	buffer   []byte
 	usage    Usage
@@ -397,14 +462,18 @@ type streamUsageObserver struct {
 	parseErr error
 }
 
-func newStreamUsageObserver(protocol Protocol) *streamUsageObserver {
-	return &streamUsageObserver{parser: &bridgeStreamParser{
+// streamUsageObserver builds a usage tracker whose parser reads the given
+// protocol.
+func streamUsageObserver(protocol Protocol) *streamUsageTracker {
+	return &streamUsageTracker{parser: &bridgeStreamParser{
 		protocol: protocol, tools: map[string]bool{}, toolIDs: map[string]string{}, toolNames: map[string]string{},
 		responseArgs: map[string]bool{}, responseReasoning: map[string]bool{},
 	}}
 }
 
-func (observer *streamUsageObserver) Write(data []byte) (int, error) {
+// Write buffers the relayed bytes and consumes every complete SSE frame they
+// contain, keeping the incomplete tail for the next call. It never fails.
+func (observer *streamUsageTracker) Write(data []byte) (int, error) {
 	observer.buffer = append(observer.buffer, data...)
 	for {
 		index, width := nextSSEBoundary(observer.buffer)
@@ -418,22 +487,26 @@ func (observer *streamUsageObserver) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (observer *streamUsageObserver) Finish() Usage {
+// Finish returns the merged usage and discards the buffered tail.
+func (observer *streamUsageTracker) Finish() Usage {
 	// An unterminated final line is not an SSE frame. In particular, do not
 	// count a usage object from a response that was cut off at EOF.
 	observer.buffer = nil
 	return observer.usage
 }
 
-func (observer *streamUsageObserver) Reported() bool { return observer.reported }
+func (observer *streamUsageTracker) Reported() bool { return observer.reported }
 
-func (observer *streamUsageObserver) NormalTermination() bool { return observer.normal }
+func (observer *streamUsageTracker) NormalTermination() bool { return observer.normal }
 
-func (observer *streamUsageObserver) ErrorTermination() bool { return observer.error }
+func (observer *streamUsageTracker) ErrorTermination() bool { return observer.error }
 
-func (observer *streamUsageObserver) ParseError() error { return observer.parseErr }
+func (observer *streamUsageTracker) ParseError() error { return observer.parseErr }
 
-func (observer *streamUsageObserver) consume(frame []byte) {
+// consume parses one complete SSE frame and records its terminal events and
+// usage. A parse error is remembered but not propagated, because the relay
+// must keep copying bytes.
+func (observer *streamUsageTracker) consume(frame []byte) {
 	_ = readSSE(strings.NewReader(string(frame)), func(eventName, data string) error {
 		events, err := observer.parser.Parse(eventName, data)
 		if err != nil {
@@ -458,6 +531,10 @@ func (observer *streamUsageObserver) consume(frame []byte) {
 	})
 }
 
+// nextSSEBoundary finds the end of the first complete SSE frame in data: it
+// returns the index where the frame's terminator starts and the terminator's
+// width, preferring whichever of a blank line ("\n\n") or a CRLF blank line
+// ("\r\n\r\n") comes first. No complete frame yields -1.
 func nextSSEBoundary(data []byte) (int, int) {
 	lf := bytes.Index(data, []byte("\n\n"))
 	crlf := bytes.Index(data, []byte("\r\n\r\n"))
@@ -473,6 +550,12 @@ func nextSSEBoundary(data []byte) (int, int) {
 	return lf, 2
 }
 
+// readSSE reads a stream and calls handler once per complete SSE record, with
+// the record's event name and its data lines joined by newlines. A record ends
+// at a blank line; comment lines are skipped, and a record without any data
+// line is not delivered. A final record whose data is not terminated by a
+// blank line is an unexpected EOF rather than a complete event. Scanner
+// errors, and errors returned by handler, end the read.
 func readSSE(reader io.Reader, handler func(eventName, data string) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)

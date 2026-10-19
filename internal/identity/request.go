@@ -1,11 +1,11 @@
 // Package identity derives stable session identities.
 //
 // The 2026-10-14 Zen free-tier gate validates a descending-timestamp session
-// id plus a client User-Agent, and it 403s requests that still carry the
-// legacy x-opencode-request header. The identity that matters upstream is
-// therefore the pair (x-opencode-session, x-opencode-session-id): Session is
-// the conversation-affinity key and must keep the descending layout minted by
-// CanonicalSessionID.
+// id plus a client User-Agent, and the /inference gate 403s requests that
+// carry the v1 lane's x-opencode-request header. The identity that matters
+// upstream is therefore the pair (x-opencode-session, x-opencode-session-id):
+// Session is the conversation-affinity key and must keep the descending layout
+// minted by CanonicalSessionID.
 package identity
 
 import (
@@ -22,30 +22,43 @@ import (
 )
 
 // RequestIDs carries the identity headers the upstream free tier inspects.
-// Session is sent as both x-opencode-session and x-opencode-session-id; both
-// headers are required since the 2026-10-14 gate. Request is retained for
-// request-level tracing of this gateway only — it must NOT reach upstream.
+// Session is sent as both x-opencode-session and x-opencode-session-id.
+// Message is the user message id the v1 lane receives as x-opencode-request;
+// the v2 lane rejects that header. Request only identifies the request inside
+// the gateway. Project is rendered per lane by the gateway (prj_* on the v1
+// lane, bare 40-hex on the v2 lane).
 type RequestIDs struct {
 	Session       string
 	Request       string
+	Message       string
 	Project       string
 	ParentSession string
 }
 
-func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
+// DeriveRequestIDs derives the upstream identity of one request. scope names
+// the authenticated caller (the server key fingerprint). Every session and
+// project the gateway derives itself is mixed with it, so two callers whose
+// conversations begin identically never share an upstream session, sticky
+// provider, preferred key, or anonymous proxy. An official OpenCode session is
+// kept verbatim because the client minted it uniquely.
+func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) RequestIDs {
 	signal := jsonutil.FirstString(
 		r.Header.Get("x-opencode-session"),
 		r.Header.Get("x-opencode-session-id"),
 		r.Header.Get("x-session-affinity"),
-		r.Header.Get("X-Session-Id"),
 		r.Header.Get("x-session-id"),
+		// Codex sends its conversation id in both underscore headers.
+		r.Header.Get("session_id"),
 		r.Header.Get("conversation-id"),
+		r.Header.Get("conversation_id"),
 		jsonutil.StringAt(body, "conversation_id"),
 		jsonutil.StringAt(body, "metadata", "session_id"),
+		claudeCodeSessionID(jsonutil.StringAt(body, "metadata", "user_id")),
 	)
 	if signal == "" {
-		// Using the first user turn keeps a multi-turn conversation stable as its
-		// history grows while separating conversations with different beginnings.
+		// The system prompt plus the first user turn keeps a multi-turn
+		// conversation stable as its history grows while separating
+		// conversations with different beginnings.
 		signal = conversationSeed(body)
 	}
 	if signal == "" {
@@ -54,14 +67,15 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	if signal == "" || signal == `{}` {
 		signal = RandomID("fallback", 16)
 	}
-	session := CanonicalSessionID(signal)
-	// The upstream free tier 403s canonical prj_* project ids (2026-10-14
-	// probing) while accepting the literal "global" every official client
-	// sends. Anything non-canonical also passes, so the project header is only
-	// used as a local correlation hint and is no longer forwarded upstream.
+	session := scopedSessionID(scope, signal)
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
+		// Without a client project every caller would otherwise share one
+		// constant upstream project.
 		projectSignal = "opencode2api:default-project"
+		if scope != "" {
+			projectSignal += ":" + scope
+		}
 	}
 	parentSession := jsonutil.FirstString(
 		r.Header.Get("x-parent-session-id"),
@@ -70,33 +84,92 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	return RequestIDs{
 		Session:       session,
 		Request:       RandomID("req", 16),
+		Message:       UserMessageID(r, body, session),
 		Project:       projectSignal,
 		ParentSession: parentSession,
 	}
 }
 
-func conversationSeed(body map[string]any) string {
-	if input, ok := body["input"].(string); ok && input != "" {
-		return input
+// scopedSessionID keeps an official client-minted session verbatim and
+// re-encodes every other signal within the caller's scope.
+func scopedSessionID(scope, signal string) string {
+	if isOfficialSessionID(signal) {
+		return signal
 	}
-	for _, field := range []string{"messages", "input"} {
-		for _, raw := range jsonutil.SliceAt(body, field) {
-			item, ok := raw.(map[string]any)
-			if !ok || jsonutil.StringAt(item, "role") != "user" {
-				continue
-			}
-			encoded, _ := json.Marshal(item["content"])
-			if len(encoded) > 0 && string(encoded) != "null" {
-				return string(encoded)
-			}
-		}
+	if scope != "" {
+		signal = scope + "\x00" + signal
+	}
+	return CanonicalSessionID(signal)
+}
+
+// claudeCodeSessionPattern extracts the per-session UUID Claude Code embeds in
+// metadata.user_id ("user_<hash>_account_<uuid>_session_<uuid>").
+var claudeCodeSessionPattern = regexp.MustCompile(`_session_([0-9A-Fa-f-]{36})$`)
+
+// claudeCodeSessionID returns the session part of a Claude Code user id, which
+// is either the underscore form above or a JSON object carrying session_id.
+// The rest of the user id is per user, not per conversation, so it is never
+// used as a session on its own.
+func claudeCodeSessionID(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	if match := claudeCodeSessionPattern.FindStringSubmatch(userID); match != nil {
+		return match[1]
+	}
+	var value map[string]any
+	if json.Unmarshal([]byte(userID), &value) == nil {
+		return jsonutil.StringAt(value, "session_id")
 	}
 	return ""
 }
 
-func StableID(prefix, value string) string {
-	sum := sha256.Sum256([]byte(prefix + "\x00" + value))
-	return prefix + "_" + hex.EncodeToString(sum[:12])
+// conversationSeed fingerprints how a conversation begins: its system prompt
+// (Anthropic system, Responses instructions, or system/developer messages
+// ahead of the first user turn) together with that first user turn. Agent
+// clients often open with a boilerplate user turn such as an environment
+// block, so the first user turn alone collides across unrelated users.
+func conversationSeed(body map[string]any) string {
+	prelude := make([]any, 0, 2)
+	for _, field := range []string{"system", "instructions"} {
+		if value := body[field]; value != nil {
+			prelude = append(prelude, value)
+		}
+	}
+	first, ok := firstUserTurn(body, &prelude)
+	if !ok {
+		return ""
+	}
+	encoded, err := json.Marshal(append(prelude, first))
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// firstUserTurn returns the content of the first user turn and appends the
+// content of every system or developer message ahead of it to prelude.
+func firstUserTurn(body map[string]any, prelude *[]any) (any, bool) {
+	if input, ok := body["input"].(string); ok && input != "" {
+		return input, true
+	}
+	for _, field := range []string{"messages", "input"} {
+		for _, raw := range jsonutil.SliceAt(body, field) {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch jsonutil.StringAt(item, "role") {
+			case "system", "developer":
+				*prelude = append(*prelude, item["content"])
+			case "user":
+				if content := item["content"]; content != nil {
+					return content, true
+				}
+			}
+		}
+	}
+	return nil, false
 }
 
 // canonicalSessionPattern matches OpenCode's canonical session format:
@@ -126,17 +199,20 @@ const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 // session passes the free tier's encoding check where the raw hash shape was
 // rejected with 403 FreeTierError.
 func CanonicalSessionID(signal string) string {
-	if canonicalSessionPattern.MatchString(signal) {
-		if descendingTimePartPattern.MatchString(signal[4:16]) {
-			return signal
-		}
-		// Right shape but a foreign encoding (raw hash or ascending ID):
-		// fall through and re-encode deterministically.
+	if isOfficialSessionID(signal) {
+		return signal
 	}
 	sum := sha256.Sum256([]byte("ses\x00" + signal))
 	timePart := descendingTimePart(sum[:6])
 	randomPart := base62Fixed(new(big.Int).SetBytes(sum[6:16]), 14)
 	return "ses_" + timePart + randomPart
+}
+
+// isOfficialSessionID reports whether signal is a session minted by the
+// official client's Identifier.descending(). A value with the right ses_ shape
+// but a foreign encoding (raw hash or ascending ID) is not official.
+func isOfficialSessionID(signal string) bool {
+	return canonicalSessionPattern.MatchString(signal) && descendingTimePartPattern.MatchString(signal[4:16])
 }
 
 // descendingTimePart renders six hash bytes as the official client's
@@ -154,6 +230,8 @@ func descendingTimePart(hash []byte) string {
 	})
 }
 
+// base62Fixed renders n in the Base62 alphabet, zero-padded to width
+// characters. It consumes n.
 func base62Fixed(n *big.Int, width int) string {
 	base := big.NewInt(62)
 	out := make([]byte, width)
@@ -165,6 +243,8 @@ func base62Fixed(n *big.Int, width int) string {
 	return string(out)
 }
 
+// RandomID returns prefix + "_" + size random bytes in hex. It panics when the
+// system random source fails.
 func RandomID(prefix string, size int) string {
 	buf := make([]byte, size)
 	if _, err := rand.Read(buf); err != nil {

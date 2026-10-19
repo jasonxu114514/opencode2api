@@ -15,18 +15,41 @@ import (
 	wire "opencode2api/internal/protocol"
 )
 
+// CapabilitiesURL is OpenCode's machine-readable model catalog. It feeds
+// FetchCapabilities and is also the OpenCode metadata endpoint the
+// PricingRegistry reads. ZenDocsURL and GoDocsURL are the Zen and Go
+// documentation pages whose endpoint tables FetchCapabilities reads with
+// FetchProtocolDocs.
 const (
 	CapabilitiesURL = "https://models.opencode.ai/api.json"
 	ZenDocsURL      = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx"
 	GoDocsURL       = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx"
-	// LegacyZenBase is the legacy /zen console origin (serving /zen/v1/*) that
-	// still serves anonymous inference and the models listing alongside the newer
-	// /inference backend.
-	LegacyZenBase = "https://opencode.ai/zen"
+	// V1Base is the v1 lane's origin: the /zen console (serving /zen/v1/*) that
+	// expects the OpenCode 1.x request shape. It is the default keyed Zen
+	// upstream, and the anonymous lane tries it before the v2 /inference
+	// origin. It also serves the models listing.
+	V1Base = "https://opencode.ai/zen"
 )
 
+// IsV1Upstream reports whether baseURL targets the v1 /zen gate, which expects
+// the OpenCode 1.x request shape, rather than a v2 gate (/inference or
+// /zen/go), which expects the OpenCode 2.x CLI shape.
+func IsV1Upstream(baseURL string) bool {
+	trimmed := strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	if strings.EqualFold(trimmed, strings.TrimRight(V1Base, "/")) {
+		return true
+	}
+	return strings.HasSuffix(trimmed, "/zen")
+}
+
+// protocolDocEndpointPattern matches a row of a documentation endpoint table,
+// "| name | `model-id` | `.../v1/<endpoint>` |", capturing the model ID and the
+// endpoint.
 var protocolDocEndpointPattern = regexp.MustCompile("\\|[^|]+\\|\\s*`?([^|`\\s]+)`?\\s*\\|\\s*`[^`]+/v1/(chat/completions|responses|messages|systemone)`")
 
+// Capabilities is the per-tier result of FetchCapabilities: the native
+// protocol of every model, the models whose SDK maps to no supported protocol,
+// and the metadata of every listed model.
 type Capabilities struct {
 	Protocols   map[config.Tier]map[string]wire.Protocol
 	Unsupported map[config.Tier]map[string]bool
@@ -74,7 +97,8 @@ type Metadata struct {
 	StructuredOutput bool     `json:"structured_output,omitempty"`
 	InputModalities  []string `json:"input_modalities,omitempty"`
 	OutputModalities []string `json:"output_modalities,omitempty"`
-	// Cost is filled from models.dev at read time, in USD per million tokens.
+	// Cost is filled from the OpenCode pricing metadata at read time, in USD per
+	// million tokens.
 	Cost *Cost `json:"cost,omitempty"`
 }
 
@@ -109,10 +133,13 @@ type capabilityModelProvider struct {
 	NPM string `json:"npm"`
 }
 
-// fetchProtocolCapabilities reads OpenCode's machine-readable provider
-// catalog. Unlike /v1/models, this source includes the SDK selected for each
-// model, which is the upstream's protocol declaration. No model IDs are kept
-// in this project.
+// FetchCapabilities reads OpenCode's machine-readable provider catalog from
+// endpoint (normally CapabilitiesURL). Unlike /v1/models, this source includes
+// the SDK selected for each model, which is the upstream's protocol
+// declaration. The Zen and Go endpoint tables then refine it. Protocol
+// discovery is data-driven: no model IDs are embedded here (the fixed SOTA
+// rotation list in config.SOTAModels is unrelated). It fails when the catalog
+// cannot be read or yields no Zen or Go model.
 func FetchCapabilities(ctx context.Context, client *http.Client, endpoint string) (Capabilities, error) {
 	if client == nil {
 		client = http.DefaultClient
@@ -122,7 +149,7 @@ func FetchCapabilities(ctx context.Context, client *http.Client, endpoint string
 		return Capabilities{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", httpx.UserAgent())
+	req.Header.Set("User-Agent", httpx.V2UserAgent())
 	resp, err := client.Do(req)
 	if err != nil {
 		return Capabilities{}, err
@@ -165,7 +192,9 @@ func FetchCapabilities(ctx context.Context, client *http.Client, endpoint string
 	// The machine catalog is the primary source. The upstream endpoint tables
 	// are a supplemental source for models whose provider inherits a default SDK
 	// but whose published endpoint is more specific (for example a Messages
-	// route). This remains data-driven: no model IDs are embedded here.
+	// route), so a listed endpoint wins over the SDK and clears an unsupported
+	// mark. A table that cannot be fetched is skipped. This remains
+	// data-driven: no model IDs are embedded here.
 	for _, doc := range []struct {
 		tier config.Tier
 		url  string
@@ -188,13 +217,20 @@ func FetchCapabilities(ctx context.Context, client *http.Client, endpoint string
 	return result, nil
 }
 
+// FetchProtocolDocs parses the endpoint table of an OpenCode documentation
+// page into a model-to-protocol map, deriving the protocol from the endpoint
+// path of each row. It fails when no row matches. A nil client uses
+// http.DefaultClient.
 func FetchProtocolDocs(ctx context.Context, client *http.Client, endpoint string) (map[string]wire.Protocol, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/plain, text/markdown, */*")
-	req.Header.Set("User-Agent", httpx.UserAgent())
+	req.Header.Set("User-Agent", httpx.V2UserAgent())
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -238,6 +274,9 @@ func FetchProtocolDocs(ctx context.Context, client *http.Client, endpoint string
 	return result, nil
 }
 
+// capabilityTier maps a catalog provider to a tier by its ID and API URL: an
+// opencode-go provider or a /go/ URL is Go, any other OpenCode provider or a
+// /zen/ URL is Zen, and every other provider is skipped.
 func capabilityTier(providerID, api string) (config.Tier, bool) {
 	value := strings.ToLower(strings.TrimSpace(providerID + " " + api))
 	if strings.Contains(value, "opencode-go") || strings.Contains(value, "/go/") {
@@ -249,6 +288,8 @@ func capabilityTier(providerID, api string) (config.Tier, bool) {
 	return "", false
 }
 
+// protocolForSDK maps the AI SDK package a model is served through to its wire
+// protocol. It reports false for a package the gateway cannot speak.
 func protocolForSDK(npm string) (wire.Protocol, bool) {
 	value := strings.ToLower(strings.TrimSpace(npm))
 	switch {
@@ -269,6 +310,10 @@ type modelsResponse struct {
 	} `json:"data"`
 }
 
+// FetchModels lists the model IDs at baseURL's /v1/models with key, sending
+// the v1 or v2 User-Agent that matches the lane. It also returns the HTTP
+// status, 0 when no response arrived, so callers can judge the proxy. An empty
+// list is an error.
 func FetchModels(ctx context.Context, client *http.Client, baseURL, key string) ([]string, int, error) {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed+"/v1/models", nil)
@@ -276,10 +321,10 @@ func FetchModels(ctx context.Context, client *http.Client, baseURL, key string) 
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	if strings.EqualFold(trimmed, strings.TrimRight(LegacyZenBase, "/")) || strings.HasSuffix(strings.ToLower(trimmed), "/zen") {
-		req.Header.Set("User-Agent", httpx.LegacyUserAgent())
+	if IsV1Upstream(trimmed) {
+		req.Header.Set("User-Agent", httpx.V1UserAgent())
 	} else {
-		req.Header.Set("User-Agent", httpx.UserAgent())
+		req.Header.Set("User-Agent", httpx.V2UserAgent())
 	}
 	req.Header.Set("x-opencode-client", "cli")
 	resp, err := client.Do(req)

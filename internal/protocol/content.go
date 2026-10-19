@@ -10,11 +10,11 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
-func decodeOpenAIBlocks(value any) []bridgeBlock {
-	blocks, _ := decodeOpenAIBlocksChecked(value)
-	return blocks
-}
-
+// decodeOpenAIBlocksChecked decodes Chat or Responses content into bridge
+// blocks. It accepts a plain string, a single part object or an array of
+// parts; nil and "" decode to no blocks. Text, image and file parts of either
+// protocol are recognized, and any other part type is an error rather than
+// being dropped.
 func decodeOpenAIBlocksChecked(value any) ([]bridgeBlock, error) {
 	switch value := value.(type) {
 	case string:
@@ -60,11 +60,10 @@ func decodeOpenAIBlocksChecked(value any) ([]bridgeBlock, error) {
 	}
 }
 
-func decodeAnthropicBlocks(value any) []bridgeBlock {
-	blocks, _ := decodeAnthropicBlocksChecked(value)
-	return blocks
-}
-
+// decodeAnthropicBlocksChecked decodes Anthropic content (a string, a single
+// block or an array of blocks) into bridge blocks. thinking and
+// redacted_thinking become reasoning blocks, a text document becomes plain
+// text and any other document a file, and an unknown block type is an error.
 func decodeAnthropicBlocksChecked(value any) ([]bridgeBlock, error) {
 	if text, ok := value.(string); ok {
 		if text == "" {
@@ -130,6 +129,10 @@ func decodeAnthropicBlocksChecked(value any) ([]bridgeBlock, error) {
 	return blocks, nil
 }
 
+// decodeChatReasoning reads a Chat message's reasoning into one block: the
+// reasoning_content string, or the "reasoning" string when reasoning_content
+// is absent, together with any reasoning_signature. A present but empty string
+// still yields a block; a missing or non-string value yields none.
 func decodeChatReasoning(message map[string]any) []bridgeBlock {
 	value, exists := message["reasoning_content"]
 	if !exists {
@@ -146,6 +149,10 @@ func decodeChatReasoning(message map[string]any) []bridgeBlock {
 	}}
 }
 
+// decodeResponsesReasoning folds a Responses reasoning item into one block:
+// its summary and content texts are concatenated, and its ID and
+// encrypted_content are kept. An item with neither text nor encrypted content
+// yields no block.
 func decodeResponsesReasoning(item map[string]any) []bridgeBlock {
 	var text strings.Builder
 	for _, raw := range jsonutil.AsSlice(item["summary"]) {
@@ -182,6 +189,9 @@ func encodeResponsesReasoningInput(block bridgeBlock) (map[string]any, bool) {
 	return encodeResponsesReasoning(block, false), true
 }
 
+// encodeResponsesReasoning renders a reasoning block as a Responses reasoning
+// item with its text as the summary, synthesizing an ID when the block has
+// none. completed adds the "completed" status a response output item carries.
 func encodeResponsesReasoning(block bridgeBlock, completed bool) map[string]any {
 	id := block.ID
 	if id == "" {
@@ -201,6 +211,10 @@ func encodeResponsesReasoning(block bridgeBlock, completed bool) map[string]any 
 	return item
 }
 
+// bridgeReasoningText joins reasoning blocks into the single text Chat's
+// reasoning_content holds, using a placeholder for a block that carries only
+// encrypted content. ok is false only when there are no blocks, so reasoning
+// that is present but empty still produces the field.
 func bridgeReasoningText(blocks []bridgeBlock) (string, bool) {
 	if len(blocks) == 0 {
 		return "", false
@@ -216,6 +230,8 @@ func bridgeReasoningText(blocks []bridgeBlock) (string, bool) {
 	return text.String(), true
 }
 
+// bridgeReasoningSignature returns the signature of the last signed reasoning
+// block, or "" when no block is signed.
 func bridgeReasoningSignature(blocks []bridgeBlock) string {
 	for i := len(blocks) - 1; i >= 0; i-- {
 		if blocks[i].Signature != "" {
@@ -225,6 +241,10 @@ func bridgeReasoningSignature(blocks []bridgeBlock) string {
 	return ""
 }
 
+// encodeChatBlocks renders blocks as Chat message content: a lone text block
+// becomes a plain string and anything else an array of text, image_url and
+// file parts. Inline image data becomes a data URI, and kinds Chat content
+// cannot hold (reasoning, tool calls and results) are skipped.
 func encodeChatBlocks(blocks []bridgeBlock) any {
 	if len(blocks) == 1 && blocks[0].Kind == "text" {
 		return blocks[0].Text
@@ -251,6 +271,11 @@ func encodeChatBlocks(blocks []bridgeBlock) any {
 	return parts
 }
 
+// encodeAnthropicBlocks renders blocks as Anthropic content blocks. A file
+// with neither a URL nor inline data has no Anthropic source and is skipped
+// (validateBridgeRequest rejects one known only by file_id up front),
+// encrypted reasoning becomes redacted_thinking, and a tool result that
+// decodeToolImages parsed is re-encoded block by block.
 func encodeAnthropicBlocks(blocks []bridgeBlock) []any {
 	parts := make([]any, 0, len(blocks))
 	for _, block := range blocks {
@@ -299,6 +324,9 @@ func encodeAnthropicBlocks(blocks []bridgeBlock) []any {
 	return parts
 }
 
+// bridgeArgumentsJSON returns a tool call's arguments as JSON text: the raw
+// ArgumentsJSON when set, else Arguments marshaled, and "{}" when there are
+// none or they cannot be marshaled.
 func bridgeArgumentsJSON(block bridgeBlock) string {
 	if block.ArgumentsJSON != "" {
 		return block.ArgumentsJSON
@@ -313,6 +341,9 @@ func bridgeArgumentsJSON(block bridgeBlock) string {
 	return string(data)
 }
 
+// bridgeToolResultContent flattens a tool result into a string: a string as
+// is, an array made only of text parts as their joined text, and anything else
+// as its JSON encoding ("" when it cannot be marshaled).
 func bridgeToolResultContent(value any) string {
 	if text, ok := value.(string); ok {
 		return text
@@ -339,6 +370,8 @@ func bridgeToolResultContent(value any) string {
 	return string(data)
 }
 
+// decodeChatToolChoice maps a Chat tool_choice onto the bridge. A string is
+// the mode as is; a function object is a named choice.
 func decodeChatToolChoice(value any) bridgeToolChoice {
 	if mode, ok := value.(string); ok {
 		return bridgeToolChoice{Mode: mode}
@@ -350,6 +383,9 @@ func decodeChatToolChoice(value any) bridgeToolChoice {
 	return bridgeToolChoice{}
 }
 
+// decodeResponsesToolChoice maps a Responses tool_choice onto the bridge. A
+// string is the mode as is; a function object is a named choice, whose name
+// sits at the top level rather than nested as in Chat.
 func decodeResponsesToolChoice(value any) bridgeToolChoice {
 	if mode, ok := value.(string); ok {
 		return bridgeToolChoice{Mode: mode}
@@ -361,6 +397,9 @@ func decodeResponsesToolChoice(value any) bridgeToolChoice {
 	return bridgeToolChoice{}
 }
 
+// decodeAnthropicToolChoice maps an Anthropic tool_choice onto the bridge,
+// where Anthropic's "any" is "required" and "tool" is a named choice. A bare
+// string is read as the type, with OpenAI's "required" accepted for "any".
 func decodeAnthropicToolChoice(value any) bridgeToolChoice {
 	if mode, ok := value.(string); ok {
 		if mode == "required" {
@@ -383,6 +422,8 @@ func decodeAnthropicToolChoice(value any) bridgeToolChoice {
 	}
 }
 
+// encodeChatToolChoice renders a bridge tool choice for Chat, nesting the name
+// under a function object. It returns nil for an empty or unknown mode.
 func encodeChatToolChoice(choice bridgeToolChoice) any {
 	switch choice.Mode {
 	case "named":
@@ -394,6 +435,8 @@ func encodeChatToolChoice(choice bridgeToolChoice) any {
 	}
 }
 
+// encodeResponsesToolChoice renders a bridge tool choice for Responses, with
+// the name at the top level. It returns nil for an empty or unknown mode.
 func encodeResponsesToolChoice(choice bridgeToolChoice) any {
 	switch choice.Mode {
 	case "named":
@@ -405,6 +448,10 @@ func encodeResponsesToolChoice(choice bridgeToolChoice) any {
 	}
 }
 
+// encodeAnthropicToolChoice renders a bridge tool choice for Anthropic. It
+// returns nil for "none", which Anthropic cannot express;
+// encodeAnthropicRequest omits the tools instead. It also returns nil for an
+// empty or unknown mode.
 func encodeAnthropicToolChoice(choice bridgeToolChoice) any {
 	switch choice.Mode {
 	case "named":

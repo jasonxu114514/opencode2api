@@ -17,50 +17,69 @@ import (
 	"opencode2api/internal/telemetry"
 )
 
+// gatewayRuntime is one applied configuration: the Gateway built from it, that
+// gateway's HTTP handler, the availability registry it uses, and cancel,
+// which stops the gateway's background proxy checks and model refresh.
 type gatewayRuntime struct {
-	availability *modelcatalog.AvailabilityStore
+	availability *modelcatalog.AvailabilityRegistry
 	config       config.Config
 	gateway      *Gateway
 	handler      http.Handler
 	cancel       context.CancelFunc
 }
 
+// ApplyResult reports whether a configuration was applied and which listener
+// fields only take effect after a restart.
 type ApplyResult struct {
 	Applied         bool     `json:"applied"`
 	RestartRequired bool     `json:"restart_required"`
 	RestartFields   []string `json:"restart_fields,omitempty"`
 }
 
-type RuntimeManager struct {
+// RuntimeController owns the running gateway and swaps in a freshly built one
+// whenever a configuration is applied; each request is served by the runtime
+// that was current when it arrived. It also owns the state that outlives a
+// runtime: the persisted rotation manager, the pricing metadata, the
+// free-model availability checks and the listeners bound at startup.
+type RuntimeController struct {
 	rotation           *rotation.Manager
 	configPath         string
 	root               context.Context
 	logger             *slog.Logger
-	monitor            *telemetry.Monitor
-	hub                *telemetry.LogHub
-	redactor           *config.SecretRedactor
+	monitor            *telemetry.Metrics
+	hub                *telemetry.LogBroker
+	redactor           *config.Redactor
 	level              *slog.LevelVar
 	current            atomic.Pointer[gatewayRuntime]
 	updateMu           sync.Mutex
-	effective          effectiveListeners
-	metadata           *modelcatalog.PricingStore
+	effective          EffectiveListeners
+	metadata           *modelcatalog.PricingRegistry
 	availabilityCancel context.CancelFunc
 }
 
-type effectiveListeners struct {
+// EffectiveListeners are the listener settings the running process actually
+// bound at startup. They only change after a restart.
+type EffectiveListeners struct {
 	API          string
 	WebUI        string
 	WebUIEnabled bool
 }
 
-func NewRuntimeManager(root context.Context, configPath string, cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor, hub *telemetry.LogHub, redactor *config.SecretRedactor, level *slog.LevelVar) (*RuntimeManager, error) {
-	manager := &RuntimeManager{
+// RuntimeManager builds the RuntimeController for cfg and starts its first
+// runtime. Along the way it migrates a plaintext webui.password to a hash,
+// rewriting the config file and deleting the backup that held the plaintext;
+// loads the persisted rotation state and the model catalog cache; and starts
+// the pricing metadata refresh and the free-model availability checks. It
+// fails when the rotation config does not validate against the catalog.
+func RuntimeManager(root context.Context, configPath string, cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, hub *telemetry.LogBroker, redactor *config.Redactor, level *slog.LevelVar) (*RuntimeController, error) {
+	manager := &RuntimeController{
 		configPath: configPath, root: root, logger: logger, monitor: monitor, hub: hub, redactor: redactor, level: level,
-		effective: effectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
+		effective: EffectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
-	manager.metadata = modelcatalog.NewPricingStore(configPath, logger)
-	// models.dev refreshes ride the active runtime's healthy proxy transports
-	// and fall back to the store's direct client when none are available.
+	manager.metadata = modelcatalog.PricingStore(configPath, logger)
+	// OpenCode metadata refreshes ride the active runtime's healthy proxy
+	// transports and fall back to the registry's direct client when none are
+	// available.
 	manager.metadata.SetClientProvider(func() []*http.Client {
 		runtime := manager.current.Load()
 		if runtime == nil || runtime.gateway == nil || runtime.gateway.transports == nil {
@@ -116,7 +135,32 @@ func NewRuntimeManager(root context.Context, configPath string, cfg config.Confi
 	return manager, nil
 }
 
-func (m *RuntimeManager) build(cfg config.Config) (*gatewayRuntime, error) {
+// migrateAvailabilityPath moves the legacy 40-bit state file to its 64-bit
+// fingerprint path when no file at the new path already exists. A new-format
+// file takes precedence.
+
+func migrateAvailabilityPath(legacyPath, currentPath string) error {
+	if legacyPath == "" || currentPath == "" || legacyPath == currentPath {
+		return nil
+	}
+	if _, err := os.Stat(currentPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return os.Rename(legacyPath, currentPath)
+}
+
+// build constructs a runtime for cfg without starting it. The runtime shares
+// the controller's rotation manager and pricing metadata, and keeps the
+// current runtime's availability registry while the Zen upstream is
+// unchanged; otherwise it uses the registry persisted for the new upstream.
+func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 	gateway, err := New(cfg, m.logger, m.monitor)
 	if err != nil {
 		return nil, err
@@ -125,8 +169,11 @@ func (m *RuntimeManager) build(cfg config.Config) (*gatewayRuntime, error) {
 	availabilityPath := ""
 	if m.configPath != "" {
 		availabilityPath = m.configPath + "." + config.Fingerprint(cfg.Upstream.Zen) + ".availability.json"
+		if err := migrateAvailabilityPath(m.configPath+"."+config.Fingerprint(cfg.Upstream.Zen)[:10]+".availability.json", availabilityPath); err != nil {
+			return nil, fmt.Errorf("migrate model availability: %w", err)
+		}
 	}
-	availability, err := modelcatalog.NewAvailabilityStore(availabilityPath)
+	availability, err := modelcatalog.AvailabilityStore(availabilityPath)
 	if err != nil {
 		return nil, fmt.Errorf("load model availability: %w", err)
 	}
@@ -140,16 +187,23 @@ func (m *RuntimeManager) build(cfg config.Config) (*gatewayRuntime, error) {
 	return &gatewayRuntime{config: cfg, gateway: gateway, availability: availability, handler: gateway.Handler(), cancel: func() {}}, nil
 }
 
-func (m *RuntimeManager) start(runtime *gatewayRuntime) {
-	// Store the context through a lightweight wrapper so cancel stops catalog
-	// and proxy checks while in-flight HTTP requests continue on the old pools.
+// start launches runtime's proxy health checks and model refresh, and stores
+// the func that stops them in runtime.cancel.
+func (m *RuntimeController) start(runtime *gatewayRuntime) {
+	// The loops run under their own context derived from the controller's
+	// root, not under any request's: cancel stops catalog refresh and proxy
+	// checks while in-flight HTTP requests continue on the old pools.
 	runtimeCtx, cancel := context.WithCancel(m.root)
 	runtime.cancel = cancel
 	runtime.gateway.StartProxyHealthChecks(runtimeCtx)
 	runtime.gateway.StartModelRefresh(runtimeCtx)
 }
 
-func (m *RuntimeManager) Handler() http.Handler {
+// Handler returns the API handler, wrapped in the telemetry middleware. Each
+// request is served by the runtime current when it arrives, so an applied
+// configuration reaches new requests without a restart; before the first
+// runtime exists the handler answers 503.
+func (m *RuntimeController) Handler() http.Handler {
 	dynamic := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		runtime := m.current.Load()
 		if runtime == nil {
@@ -162,11 +216,13 @@ func (m *RuntimeManager) Handler() http.Handler {
 }
 
 // Redact removes configured credentials from diagnostic output.
-func (m *RuntimeManager) Redact(value string) string {
+func (m *RuntimeController) Redact(value string) string {
 	return m.redactor.String(value)
 }
 
-func (m *RuntimeManager) Config() config.Config {
+// Config returns a copy of the configuration the current runtime was built
+// from, or the zero Config when no runtime exists.
+func (m *RuntimeController) Config() config.Config {
 	runtime := m.current.Load()
 	if runtime == nil {
 		return config.Config{}
@@ -174,7 +230,10 @@ func (m *RuntimeManager) Config() config.Config {
 	return config.Clone(runtime.config)
 }
 
-func (m *RuntimeManager) RestartStatus() (effectiveListeners, []string) {
+// RestartStatus returns the listeners the process bound at startup and the
+// config fields (listen, webui.listen, webui.enabled) whose current value
+// differs from them, i.e. the changes waiting for a restart.
+func (m *RuntimeController) RestartStatus() (EffectiveListeners, []string) {
 	cfg := m.Config()
 	fields := make([]string, 0, 3)
 	if cfg.Listen != m.effective.API {
@@ -189,14 +248,19 @@ func (m *RuntimeManager) RestartStatus() (effectiveListeners, []string) {
 	return m.effective, fields
 }
 
-func (m *RuntimeManager) Apply(candidate config.Config, persist bool) (ApplyResult, error) {
+// Apply normalizes and validates candidate, builds a runtime from it and
+// swaps it in, stopping the previous runtime's background loops. It saves the
+// config file when persist is set or candidate carried a plaintext WebUI
+// password, which is hashed first.
+func (m *RuntimeController) Apply(candidate config.Config, persist bool) (ApplyResult, error) {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
 	return m.applyLocked(candidate, persist)
 }
 
 // Update serializes read-modify-write operations against the latest config.
-func (m *RuntimeManager) Update(change func(*config.Config) error) (ApplyResult, error) {
+// The changed config is applied and always saved.
+func (m *RuntimeController) Update(change func(*config.Config) error) (ApplyResult, error) {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
 	candidate := m.Config()
@@ -206,7 +270,11 @@ func (m *RuntimeManager) Update(change func(*config.Config) error) (ApplyResult,
 	return m.applyLocked(candidate, true)
 }
 
-func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (ApplyResult, error) {
+// applyLocked does the work of Apply and Update; the caller must hold
+// updateMu. Nothing changes until candidate has been normalized, built,
+// validated and, when required, saved. The new runtime inherits the current
+// catalog state and is started before it is swapped in.
+func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (ApplyResult, error) {
 
 	current := m.current.Load()
 	hadPlaintextPassword := candidate.WebUI.Password != ""
@@ -266,7 +334,10 @@ func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (App
 	return result, nil
 }
 
-func (m *RuntimeManager) Reload() (ApplyResult, error) {
+// Reload re-reads the config file and applies it without rewriting it, unless
+// it holds a plaintext WebUI password: that is hashed and saved, and the
+// backup holding the plaintext is removed.
+func (m *RuntimeController) Reload() (ApplyResult, error) {
 	cfg, err := config.Load(m.configPath)
 	if err != nil {
 		return ApplyResult{}, err
@@ -279,7 +350,9 @@ func (m *RuntimeManager) Reload() (ApplyResult, error) {
 	return result, err
 }
 
-func (m *RuntimeManager) Shutdown() {
+// Shutdown stops the free-model availability checks and the current runtime's
+// background loops.
+func (m *RuntimeController) Shutdown() {
 	if m.availabilityCancel != nil {
 		m.availabilityCancel()
 	}
@@ -288,6 +361,8 @@ func (m *RuntimeManager) Shutdown() {
 	}
 }
 
+// ResourceSnapshot is the operator view of the current runtime's models, keys,
+// proxies and model metadata (see Resources).
 type ResourceSnapshot struct {
 	Models    modelcatalog.CatalogSnapshot  `json:"models"`
 	Keys      []KeyStatus                   `json:"keys"`
@@ -296,6 +371,9 @@ type ResourceSnapshot struct {
 	Metadata  modelcatalog.MetadataSnapshot `json:"metadata"`
 }
 
+// KeyStatus describes one upstream key by its display ID (its last five
+// characters): its tier, its current proxy binding, its consecutive failures
+// and any active cooldown.
 type KeyStatus struct {
 	ID            string     `json:"id"`
 	Tier          string     `json:"tier"`
@@ -305,6 +383,10 @@ type KeyStatus struct {
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 }
 
+// ProxyStatus describes one proxy route: its redacted address, its health,
+// whether a health check is in flight, and how many Zen and Go keys are bound
+// to it. Anonymous reports whether the anonymous lane, which uses every
+// proxy, is enabled.
 type ProxyStatus struct {
 	Index     int    `json:"index"`
 	Address   string `json:"address"`
@@ -315,7 +397,10 @@ type ProxyStatus struct {
 	Anonymous bool   `json:"anonymous"`
 }
 
-func (m *RuntimeManager) Resources() ResourceSnapshot {
+// Resources reports the current runtime's servable models, per-key state and
+// per-proxy health and key bindings, or an empty snapshot when no runtime
+// exists.
+func (m *RuntimeController) Resources() ResourceSnapshot {
 	runtime := m.current.Load()
 	if runtime == nil {
 		return ResourceSnapshot{}
@@ -345,7 +430,9 @@ func (m *RuntimeManager) Resources() ResourceSnapshot {
 	return result
 }
 
-func (m *RuntimeManager) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcatalog.MetadataSnapshot) {
+// DebugModels returns a routing diagnostic for every catalog model, with no
+// requested protocol, plus the catalog's metadata snapshot.
+func (m *RuntimeController) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcatalog.MetadataSnapshot) {
 	runtime := m.current.Load()
 	if runtime == nil {
 		return nil, modelcatalog.MetadataSnapshot{}
@@ -360,7 +447,9 @@ func (m *RuntimeManager) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcat
 	return result, metadata
 }
 
-func (m *RuntimeManager) DebugRoute(model string, requested protocol.Protocol) modelcatalog.RouteDiagnostic {
+// DebugRoute reports how the current runtime would route a request for model
+// sent on the requested protocol.
+func (m *RuntimeController) DebugRoute(model string, requested protocol.Protocol) modelcatalog.RouteDiagnostic {
 	runtime := m.current.Load()
 	if runtime == nil {
 		return modelcatalog.RouteDiagnostic{Model: model, RequestedProtocol: requested, RouteError: "gateway runtime is unavailable"}
@@ -382,7 +471,7 @@ type DebugKeyView struct {
 
 // DebugKeys lists every configured upstream key per tier so the Playground can
 // offer an explicit per-key test target.
-func (m *RuntimeManager) DebugKeys() map[string][]DebugKeyView {
+func (m *RuntimeController) DebugKeys() map[string][]DebugKeyView {
 	result := map[string][]DebugKeyView{"zen": {}, "go": {}}
 	runtime := m.current.Load()
 	if runtime == nil {
@@ -406,7 +495,9 @@ func (m *RuntimeManager) DebugKeys() map[string][]DebugKeyView {
 	return result
 }
 
-func (m *RuntimeManager) DebugKey(tier config.Tier, id string) *DebugKeyView {
+// DebugKey returns the view of the tier's key whose fingerprint is id, or nil
+// when no such key is configured.
+func (m *RuntimeController) DebugKey(tier config.Tier, id string) *DebugKeyView {
 	for _, view := range m.DebugKeys()[string(tier)] {
 		if view.ID == id {
 			selected := view
@@ -417,7 +508,7 @@ func (m *RuntimeManager) DebugKey(tier config.Tier, id string) *DebugKeyView {
 }
 
 // DebugRouteForTier reports the route a diagnostic against one tier would take.
-func (m *RuntimeManager) DebugRouteForTier(model string, tier config.Tier) (modelcatalog.RouteDiagnostic, error) {
+func (m *RuntimeController) DebugRouteForTier(model string, tier config.Tier) (modelcatalog.RouteDiagnostic, error) {
 	runtime := m.current.Load()
 	if runtime == nil {
 		return modelcatalog.RouteDiagnostic{Model: model, RouteError: "gateway runtime is unavailable"}, fmt.Errorf("gateway runtime is unavailable")
@@ -437,7 +528,7 @@ func (m *RuntimeManager) DebugRouteForTier(model string, tier config.Tier) (mode
 	return diagnostic, nil
 }
 
-func keyStatuses(tier string, pool *nodePool) []KeyStatus {
+func keyStatuses(tier string, pool *upstreamNodes) []KeyStatus {
 	result := make([]KeyStatus, 0, len(pool.nodes))
 	for _, node := range pool.nodes {
 		status := KeyStatus{ID: config.KeyDisplayID(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), Failures: node.failures.Load()}

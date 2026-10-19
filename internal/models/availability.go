@@ -8,15 +8,28 @@ import (
 	"time"
 )
 
+// FreeModelCheckInterval is the delay before a free model is probed again
+// after a success or an inconclusive failure.
 const FreeModelCheckInterval = time.Hour
+
+// FailedModelCheckInterval is the longer delay once a probe has found the model
+// unavailable, and after an inconclusive recheck of a disabled model.
 const FailedModelCheckInterval = 24 * time.Hour
 
+// EffortProbe is the result of the automatic reasoning-effort probe: the
+// highest Effort the model accepted ("none" when only the baseline request
+// succeeded) and the Protocol it was probed on. Reset is never persisted; it
+// asks Record to clear a previously stored result.
 type EffortProbe struct {
 	Effort   string `json:"effort,omitempty"`
 	Protocol string `json:"protocol,omitempty"`
 	Reset    bool   `json:"-"`
 }
 
+// Availability is the probe state of one free model. Generation lives only in
+// memory: every manual/automatic switch bumps it, so Record can drop the result
+// of a probe that started before the switch. ProbeVersion 0 marks a record
+// written by the old probe, which AvailabilityStore migrates on load.
 type Availability struct {
 	Model           string      `json:"model"`
 	Disabled        bool        `json:"disabled"`
@@ -31,14 +44,19 @@ type Availability struct {
 	EffortCheckedAt time.Time   `json:"effort_checked_at,omitempty"`
 }
 
-type AvailabilityStore struct {
+// AvailabilityRegistry tracks which free models the background probes found
+// available and which ones an operator put under manual control. It is
+// persisted as JSON at path, or kept in memory only when path is empty.
+type AvailabilityRegistry struct {
 	mu    sync.RWMutex
 	path  string
 	items map[string]Availability
 }
 
-func NewAvailabilityStore(path string) (*AvailabilityStore, error) {
-	s := &AvailabilityStore{path: path, items: map[string]Availability{}}
+// AvailabilityStore loads the registry from path. A missing file starts an
+// empty registry; an unreadable or malformed one is an error.
+func AvailabilityStore(path string) (*AvailabilityRegistry, error) {
+	s := &AvailabilityRegistry{path: path, items: map[string]Availability{}}
 	if path != "" {
 		b, err := os.ReadFile(path)
 		if err == nil {
@@ -74,7 +92,9 @@ func NewAvailabilityStore(path string) (*AvailabilityStore, error) {
 	return s, nil
 }
 
-func (s *AvailabilityStore) Get(model string) Availability {
+// Get returns the record of model, or an enabled, never-checked record when the
+// registry has none.
+func (s *AvailabilityRegistry) Get(model string) Availability {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	item := s.items[model]
@@ -82,12 +102,14 @@ func (s *AvailabilityStore) Get(model string) Availability {
 	return item
 }
 
-func (s *AvailabilityStore) Disabled(model string) bool { return s.Get(model).Disabled }
+func (s *AvailabilityRegistry) Disabled(model string) bool { return s.Get(model).Disabled }
 
 // SetManual switches a model between manual and automatic control. Manual
 // mode keeps the model enabled and excludes it from automatic probing;
-// switching back to automatic schedules a probe on the next check.
-func (s *AvailabilityStore) SetManual(model string, manual bool, now time.Time) error {
+// switching back to automatic schedules a probe on the next check. A call that
+// does not change the mode is a no-op. A switch bumps Generation, and the
+// previous record is restored when it cannot be persisted.
+func (s *AvailabilityRegistry) SetManual(model string, manual bool, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, existed := s.items[model]
@@ -120,13 +142,22 @@ func (s *AvailabilityStore) SetManual(model string, manual bool, now time.Time) 
 	return nil
 }
 
-// A manual restore takes the model under manual control and invalidates
-// results from probes that were already running.
-func (s *AvailabilityStore) Restore(model string, now time.Time) error {
+// Restore takes the model under manual control, which re-enables it and, by
+// bumping Generation, invalidates results from probes that were already
+// running. A model already under manual control is left untouched and its
+// Generation is not bumped; Record ignores manual records anyway.
+func (s *AvailabilityRegistry) Restore(model string, now time.Time) error {
 	return s.SetManual(model, true, now)
 }
 
-func (s *AvailabilityStore) Record(model string, generation uint64, success bool, reason, channel string, now time.Time, effort EffortProbe) error {
+// Record stores the result of an automatic probe that started when the record
+// was at generation. The result is dropped when Generation has moved on since
+// then or the model is under manual control. Only the reason
+// "model_unavailable" disables a model and moves it to the daily schedule; any
+// other failure of an enabled model is recorded with an hourly retry. A
+// successful probe stores effort when it names a level and clears the stored
+// level when effort.Reset is set.
+func (s *AvailabilityRegistry) Record(model string, generation uint64, success bool, reason, channel string, now time.Time, effort EffortProbe) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item := s.items[model]
@@ -173,7 +204,9 @@ func (s *AvailabilityStore) Record(model string, generation uint64, success bool
 	return s.saveLocked()
 }
 
-func (s *AvailabilityStore) saveLocked() error {
+// saveLocked rewrites the registry file through a temporary file and a rename.
+// It is a no-op without a path. The caller holds s.mu for writing.
+func (s *AvailabilityRegistry) saveLocked() error {
 	if s.path == "" {
 		return nil
 	}

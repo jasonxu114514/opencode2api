@@ -1,4 +1,5 @@
-// Package models discovers model capabilities, pricing, and available routes.
+// Package models discovers model capabilities, pricing, availability, and
+// available routes.
 package models
 
 import (
@@ -13,6 +14,9 @@ import (
 	wire "opencode2api/internal/protocol"
 )
 
+// Route is the plan for serving one model: the tier and native protocol of the
+// first attempt, the protocol of every tier a retry may reach, and the
+// authenticated fallback order.
 type Route struct {
 	ID       string
 	Tier     config.Tier
@@ -23,6 +27,8 @@ type Route struct {
 	// Messages on Go. The request must therefore be re-encoded when a retry
 	// crosses tiers.
 	Protocols map[config.Tier]wire.Protocol
+	// Anonymous marks a route that starts on the anonymous lane with the
+	// public credential; Tier is then always Zen.
 	Anonymous bool
 	// KeyTiers is the ordered authenticated fallback plan. Anonymous requests
 	// always start on Zen, then enter this list when the public credential does
@@ -30,6 +36,9 @@ type Route struct {
 	KeyTiers []config.Tier
 }
 
+// RouteDiagnostic explains how a model is routed: where its protocol comes
+// from, which tiers advertise it, its anonymous eligibility, and the route that
+// was built or the error that prevented one.
 type RouteDiagnostic struct {
 	Model                string                        `json:"model"`
 	RequestedProtocol    wire.Protocol                 `json:"requested_protocol,omitempty"`
@@ -48,7 +57,11 @@ type RouteDiagnostic struct {
 	RouteError           string                        `json:"route_error,omitempty"`
 }
 
-type Catalog struct {
+// ModelCatalog knows which models the Zen and Go tiers advertise, their native
+// protocols and metadata, and routes requests for them. mu guards every field;
+// methods ending in Locked expect the caller to hold it, and a read lock is
+// enough for all of them.
+type ModelCatalog struct {
 	mu        sync.RWMutex
 	zen       map[string]bool
 	goModels  map[string]bool
@@ -60,8 +73,8 @@ type Catalog struct {
 	modelMeta       map[config.Tier]map[string]Metadata
 	updatedAt       time.Time
 	prefer          config.Tier
-	pricing         *PricingStore
-	availability    *AvailabilityStore
+	pricing         *PricingRegistry
+	availability    *AvailabilityRegistry
 	cachePath       string
 	cacheSource     string
 	stale           bool
@@ -69,6 +82,11 @@ type Catalog struct {
 	freeOnly        bool
 }
 
+// CatalogSnapshot summarizes the catalog for health reporting. Exposed counts
+// the models with a usable protocol on a tier that advertises them;
+// AvailableModels narrows it to the models that can be routed. Stale is set
+// while the catalog still holds a disk cache, or when the last refresh is older
+// than twice the refresh interval (at least a minute).
 type CatalogSnapshot struct {
 	Zen         int       `json:"zen"`
 	Go          int       `json:"go"`
@@ -79,12 +97,15 @@ type CatalogSnapshot struct {
 	Stale       bool      `json:"stale"`
 }
 
-func NewCatalog(prefer config.Tier, overrides map[string]string) *Catalog {
+// Catalog creates an empty ModelCatalog. prefer is the tier authenticated
+// routes try first, and overrides are the configured per-model protocols that
+// take precedence over the upstream capability data.
+func Catalog(prefer config.Tier, overrides map[string]string) *ModelCatalog {
 	protocols := make(map[string]wire.Protocol, len(overrides))
 	for model, protocol := range overrides {
 		protocols[model] = wire.Protocol(protocol)
 	}
-	return &Catalog{
+	return &ModelCatalog{
 		zen: map[string]bool{}, goModels: map[string]bool{}, protocols: protocols,
 		nativeProtocols: map[config.Tier]map[string]wire.Protocol{config.TierZen: {}, config.TierGo: {}},
 		unsupported:     map[config.Tier]map[string]bool{config.TierZen: {}, config.TierGo: {}}, prefer: prefer,
@@ -93,20 +114,23 @@ func NewCatalog(prefer config.Tier, overrides map[string]string) *Catalog {
 }
 
 // SetPricingStore connects routing decisions to the shared pricing metadata.
-func (c *Catalog) SetPricingStore(store *PricingStore) {
+func (c *ModelCatalog) SetPricingStore(store *PricingRegistry) {
 	c.mu.Lock()
 	c.pricing = store
 	c.mu.Unlock()
 }
 
-func (c *Catalog) SetAvailabilityStore(store *AvailabilityStore) {
+// SetAvailabilityStore lets routing reject models that the availability probes
+// disabled.
+func (c *ModelCatalog) SetAvailabilityStore(store *AvailabilityRegistry) {
 	c.mu.Lock()
 	c.availability = store
 	c.mu.Unlock()
 }
 
-// MetadataSnapshot reports pricing freshness without exposing the store.
-func (c *Catalog) MetadataSnapshot() MetadataSnapshot {
+// MetadataSnapshot reports pricing freshness without exposing the registry. It
+// returns the zero snapshot while no PricingRegistry is attached.
+func (c *ModelCatalog) MetadataSnapshot() MetadataSnapshot {
 	c.mu.RLock()
 	store := c.pricing
 	c.mu.RUnlock()
@@ -116,40 +140,52 @@ func (c *Catalog) MetadataSnapshot() MetadataSnapshot {
 	return store.Snapshot()
 }
 
-func (c *Catalog) SetCachePath(path string) {
+// SetCachePath sets the file SaveCache writes; an empty path disables it.
+func (c *ModelCatalog) SetCachePath(path string) {
 	c.mu.Lock()
 	c.cachePath = path
 	c.mu.Unlock()
 }
 
-func (c *Catalog) SetRefreshInterval(interval time.Duration) {
+// SetRefreshInterval sets the expected catalog refresh interval, which decides
+// when a snapshot counts as stale. Zero disables the age check.
+func (c *ModelCatalog) SetRefreshInterval(interval time.Duration) {
 	c.mu.Lock()
 	c.refreshAfter = interval
 	c.mu.Unlock()
 }
 
-// SetFreeOnly hides every model that is not free from discovery and routing.
-func (c *Catalog) SetFreeOnly(enabled bool) {
+// SetFreeOnly makes routing reject every model that is not free. The models
+// listing (AvailableModels) and the rotation aliases are built from routes, so
+// they hide those models too. The upstream catalog refresh, List and Supported
+// are unaffected.
+func (c *ModelCatalog) SetFreeOnly(enabled bool) {
 	c.mu.Lock()
 	c.freeOnly = enabled
 	c.mu.Unlock()
 }
 
-// freeOnlyErrorLocked rejects paid models while models.free_only is set. Both
-// routing entry points check it, so /v1/models, inference, rotation aliases and
-// diagnostics agree on what is exposed.
-func (c *Catalog) freeOnlyErrorLocked(model string) error {
+// freeOnlyErrorLocked rejects models that are not free while models.free_only
+// is set. Both routing entry points (routeLocked and RouteForTier) check it, so
+// /v1/models, inference, rotation aliases and diagnostics agree on what is
+// exposed.
+func (c *ModelCatalog) freeOnlyErrorLocked(model string) error {
 	if c.freeOnly && !c.anonymousDecision(model).Allowed {
 		return fmt.Errorf("model %q is not free and models.free_only is enabled", model)
 	}
 	return nil
 }
 
-func (c *Catalog) Replace(zen, goModels []string) {
+// Replace installs freshly listed model IDs and keeps the capability data.
+func (c *ModelCatalog) Replace(zen, goModels []string) {
 	c.ReplaceWithCapabilities(zen, goModels, nil, nil, nil)
 }
 
-func (c *Catalog) ReplaceWithCapabilities(zen, goModels []string, native map[config.Tier]map[string]wire.Protocol, unsupported map[config.Tier]map[string]bool, metadata map[config.Tier]map[string]Metadata) {
+// ReplaceWithCapabilities installs the result of a live refresh and marks the
+// catalog fresh. A nil argument leaves that part of the state unchanged, so a
+// tier whose listing failed keeps its previous models; native and unsupported
+// are replaced per tier, metadata as a whole.
+func (c *ModelCatalog) ReplaceWithCapabilities(zen, goModels []string, native map[config.Tier]map[string]wire.Protocol, unsupported map[config.Tier]map[string]bool, metadata map[config.Tier]map[string]Metadata) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if zen != nil {
@@ -180,7 +216,12 @@ func (c *Catalog) ReplaceWithCapabilities(zen, goModels []string, native map[con
 	c.stale = false
 }
 
-func (c *Catalog) CopyState(source *Catalog) {
+// CopyState copies the discovered state of source (models, capabilities,
+// metadata and cache freshness) into c, so a runtime rebuilt for a config
+// change starts with the current catalog. Configuration (protocol overrides,
+// tier preference, free_only, cache path, refresh interval) and the attached
+// registries are not copied.
+func (c *ModelCatalog) CopyState(source *ModelCatalog) {
 	if source == nil {
 		return
 	}
@@ -215,13 +256,18 @@ func (c *Catalog) CopyState(source *Catalog) {
 	c.mu.Unlock()
 }
 
-func (c *Catalog) Route(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) (Route, error) {
+// Route plans how model is served given which credentials exist. A free model
+// can start on the anonymous lane when hasAnonymous is set; otherwise, and as
+// the fallback, the key tiers are tried in prefer order. It fails when the probes
+// disabled the model, when models.free_only hides it, or when no lane or tier
+// can serve it.
+func (c *ModelCatalog) Route(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) (Route, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.routeLocked(model, hasZenKeys, hasGoKeys, hasAnonymous)
 }
 
-func (c *Catalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) (Route, error) {
+func (c *ModelCatalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) (Route, error) {
 	if c.availability != nil && c.availability.Disabled(model) {
 		return Route{}, fmt.Errorf("model %q is disabled after a failed availability check; restore it in the WebUI or wait for the next probe", model)
 	}
@@ -229,9 +275,10 @@ func (c *Catalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous 
 		return Route{}, err
 	}
 	keyTiers := c.keyTierOrderLocked(model, hasZenKeys, hasGoKeys)
-	// OpenCode's public credential is a Zen-only lane. Every free model starts
-	// there, even if the current catalog only advertises it on Go: an upstream
-	// rejection will move the request into the authenticated fallback plan.
+	// OpenCode's public credential belongs to the Zen tier. Every free model
+	// starts there unless the Zen capability data marks it unsupported, even if
+	// the current catalog only advertises it on Go: an upstream rejection will
+	// move the request into the authenticated fallback plan.
 	decision := c.anonymousDecision(model)
 	if hasAnonymous && decision.Allowed && (c.protocols[model] != "" || !c.unsupported[config.TierZen][model]) &&
 		(len(c.zen) == 0 && len(c.goModels) == 0 || c.zen[model] || c.goModels[model]) {
@@ -245,6 +292,8 @@ func (c *Catalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous 
 	return Route{}, fmt.Errorf("model %q is not available in the configured Zen or Go pools", model)
 }
 
+// ProtocolFor returns the native protocol of the route on tier, or Protocol
+// when the route has no entry for that tier.
 func (r Route) ProtocolFor(tier config.Tier) wire.Protocol {
 	if protocol := r.Protocols[tier]; protocol != "" {
 		return protocol
@@ -252,7 +301,9 @@ func (r Route) ProtocolFor(tier config.Tier) wire.Protocol {
 	return r.Protocol
 }
 
-func (c *Catalog) protocolsForLocked(model string, keyTiers []config.Tier, includeZen bool) map[config.Tier]wire.Protocol {
+// protocolsForLocked resolves the protocol of every tier in keyTiers, plus Zen
+// when includeZen is set for an anonymous route.
+func (c *ModelCatalog) protocolsForLocked(model string, keyTiers []config.Tier, includeZen bool) map[config.Tier]wire.Protocol {
 	protocols := make(map[config.Tier]wire.Protocol, len(keyTiers)+1)
 	if includeZen {
 		protocols[config.TierZen] = c.protocolForLocked(model, config.TierZen)
@@ -263,7 +314,9 @@ func (c *Catalog) protocolsForLocked(model string, keyTiers []config.Tier, inclu
 	return protocols
 }
 
-func (c *Catalog) protocolForLocked(model string, tier config.Tier) wire.Protocol {
+// protocolForLocked resolves the protocol of model on tier: the configured
+// override first, then the tier's capability data, then Chat.
+func (c *ModelCatalog) protocolForLocked(model string, tier config.Tier) wire.Protocol {
 	if protocol := c.protocols[model]; protocol != "" {
 		return protocol
 	}
@@ -277,10 +330,11 @@ func (c *Catalog) protocolForLocked(model string, tier config.Tier) wire.Protoco
 }
 
 // keyTierOrderLocked builds an authenticated route in prefer order. A tier is
-// included only when it has a key and advertises the model. Before the first
-// successful catalog refresh, configured key pools remain usable so temporary
-// discovery failures do not take the gateway offline.
-func (c *Catalog) keyTierOrderLocked(model string, hasZenKeys, hasGoKeys bool) []config.Tier {
+// included only when it has a key, advertises the model, and can carry its
+// protocol (tierSupportedLocked). Before the first successful catalog refresh,
+// configured key pools remain usable so temporary discovery failures do not
+// take the gateway offline.
+func (c *ModelCatalog) keyTierOrderLocked(model string, hasZenKeys, hasGoKeys bool) []config.Tier {
 	catalogPending := len(c.zen) == 0 && len(c.goModels) == 0
 	available := func(tier config.Tier) bool {
 		switch tier {
@@ -309,7 +363,7 @@ func (c *Catalog) keyTierOrderLocked(model string, hasZenKeys, hasGoKeys bool) [
 // per-key diagnostics. It never selects the anonymous lane and never adds a
 // fallback tier: the operator asked to exercise one configured key, so the
 // result describes that key and nothing else.
-func (c *Catalog) RouteForTier(model string, tier config.Tier, hasZenKeys, hasGoKeys bool) (Route, error) {
+func (c *ModelCatalog) RouteForTier(model string, tier config.Tier, hasZenKeys, hasGoKeys bool) (Route, error) {
 	if tier != config.TierZen && tier != config.TierGo {
 		return Route{}, errors.New("selected key tier must be zen or go")
 	}
@@ -347,32 +401,45 @@ func (c *Catalog) RouteForTier(model string, tier config.Tier, hasZenKeys, hasGo
 	}, nil
 }
 
-func (c *Catalog) anonymousDecision(model string) AnonymousDecision {
-	if c.pricing != nil {
-		return c.pricing.Decide(model)
+// anonymousDecisionWithPricing asks the pricing registry snapshot whether model
+// is free and falls back to the name rule while none is attached.
+func anonymousDecisionWithPricing(model string, pricing *PricingRegistry) AnonymousDecision {
+	if pricing != nil {
+		return pricing.Decide(model)
 	}
 	return AnonymousDecision{Allowed: isFreeModel(model), Source: "name_fallback_metadata_pending"}
 }
 
-// IsFreeModel reports whether the catalog considers the model free-tier
-// (pricing metadata, falling back to the -free name convention). Key-tier
-// shaping uses it so free models without "free" in the name are covered.
-func (c *Catalog) IsFreeModel(model string) bool {
+func (c *ModelCatalog) anonymousDecision(model string) AnonymousDecision {
+	return anonymousDecisionWithPricing(model, c.pricing)
+}
+
+// IsFreeModel reports whether the catalog considers the model free-tier: its
+// name contains "free" in any case, or the pricing metadata lists it, not
+// deprecated, at zero input and output cost. Until the metadata is ready only
+// the name rule applies. Key-tier shaping uses it so free models without
+// "free" in the name are covered.
+func (c *ModelCatalog) IsFreeModel(model string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.anonymousDecision(model).Allowed
 }
 
-func (c *Catalog) Diagnostic(model string, requested wire.Protocol, hasZenKeys, hasGoKeys, hasAnonymous bool) RouteDiagnostic {
+// Diagnostic explains the protocol choice and the route of model for the given
+// credentials; requested is only echoed. It never fails: a routing error is
+// reported in RouteError.
+func (c *ModelCatalog) Diagnostic(model string, requested wire.Protocol, hasZenKeys, hasGoKeys, hasAnonymous bool) RouteDiagnostic {
 	c.mu.RLock()
 	configured, explicit := c.protocols[model]
 	zen, goModel := c.zen[model], c.goModels[model]
+	_, zenKnown := c.nativeProtocols[config.TierZen][model]
+	_, goKnown := c.nativeProtocols[config.TierGo][model]
+	prefer := c.prefer
 	nativeProtocols := map[config.Tier]wire.Protocol{
 		config.TierZen: c.protocolForLocked(model, config.TierZen),
 		config.TierGo:  c.protocolForLocked(model, config.TierGo),
 	}
-	_, zenKnown := c.nativeProtocols[config.TierZen][model]
-	_, goKnown := c.nativeProtocols[config.TierGo][model]
+	pricing := c.pricing
 	c.mu.RUnlock()
 	source := "configured"
 	if !explicit {
@@ -386,13 +453,13 @@ func (c *Catalog) Diagnostic(model string, requested wire.Protocol, hasZenKeys, 
 		// Route() below selects the preferred available tier. This is only the
 		// fallback shown when no route can currently be built.
 		protocol = nativeProtocols[config.TierZen]
-		if c.prefer == config.TierGo {
+		if prefer == config.TierGo {
 			protocol = nativeProtocols[config.TierGo]
 		}
 	}
 	diagnostic := RouteDiagnostic{
 		Model: model, RequestedProtocol: requested, NativeProtocol: protocol, NativeProtocols: nativeProtocols, ProtocolSource: source,
-		AvailableZen: zen, AvailableGo: goModel, AnonymousEligibility: c.anonymousDecision(model),
+		AvailableZen: zen, AvailableGo: goModel, AnonymousEligibility: anonymousDecisionWithPricing(model, pricing),
 	}
 	route, err := c.Route(model, hasZenKeys, hasGoKeys, hasAnonymous)
 	if err != nil {
@@ -406,11 +473,15 @@ func (c *Catalog) Diagnostic(model string, requested wire.Protocol, hasZenKeys, 
 	return diagnostic
 }
 
+// isFreeModel is the name rule: a model whose ID contains "free" in any case.
 func isFreeModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "free")
 }
 
-func (c *Catalog) List() []string {
+// List returns the sorted IDs of the advertised models that have a usable
+// protocol on a tier advertising them. It ignores credentials, availability and
+// models.free_only; AvailableModels applies those.
+func (c *ModelCatalog) List() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	ids := c.modelIDsLocked()
@@ -423,7 +494,7 @@ func (c *Catalog) List() []string {
 	return models
 }
 
-func (c *Catalog) modelIDsLocked() []string {
+func (c *ModelCatalog) modelIDsLocked() []string {
 	seen := make(map[string]bool, len(c.zen)+len(c.goModels))
 	for model := range c.zen {
 		seen[model] = true
@@ -434,15 +505,18 @@ func (c *Catalog) modelIDsLocked() []string {
 	return sortedSetKeys(seen)
 }
 
-func (c *Catalog) Snapshot() CatalogSnapshot {
+// Snapshot summarizes the catalog without route filtering.
+func (c *ModelCatalog) Snapshot() CatalogSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.snapshotLocked(c.modelIDsLocked())
 }
 
 // AvailableModels provides discovery and readiness with the same route
-// filtering, including configured key tiers and anonymous eligibility.
-func (c *Catalog) AvailableModels(hasZenKeys, hasGoKeys, hasAnonymous bool) ([]Route, CatalogSnapshot) {
+// filtering, including configured key tiers and anonymous eligibility. It
+// returns the route of every routable model and a snapshot whose Exposed
+// counts those routes.
+func (c *ModelCatalog) AvailableModels(hasZenKeys, hasGoKeys, hasAnonymous bool) ([]Route, CatalogSnapshot) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	ids := c.modelIDsLocked()
@@ -460,7 +534,7 @@ func (c *Catalog) AvailableModels(hasZenKeys, hasGoKeys, hasAnonymous bool) ([]R
 	return routes, snapshot
 }
 
-func (c *Catalog) snapshotLocked(ids []string) CatalogSnapshot {
+func (c *ModelCatalog) snapshotLocked(ids []string) CatalogSnapshot {
 	exposed := 0
 	for _, model := range ids {
 		if c.supportedLocked(model) {
@@ -477,21 +551,24 @@ func (c *Catalog) snapshotLocked(ids []string) CatalogSnapshot {
 	}
 }
 
-func (c *Catalog) Supported(model string) bool {
+// Supported reports whether some tier advertises model with a usable protocol.
+// Every model is supported while the catalog is still pending.
+func (c *ModelCatalog) Supported(model string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.supportedLocked(model)
 }
 
 // MetadataForTier returns the rich per-model metadata (context window,
-// reasoning, tool call, modalities) captured from the opencode catalog for
-// the tier that will actually serve the request. Same-named models can carry
-// different limits per tier, so callers must pass route.Tier — never a
-// tier-blind lookup. Anonymous routes always resolve to TierZen, which keeps
+// reasoning, tool call, modalities) captured from the OpenCode capability
+// catalog for the tier that will actually serve the request. Same-named models
+// can carry different limits per tier, so callers must pass route.Tier — never
+// a tier-blind lookup. Anonymous routes always resolve to TierZen, which keeps
 // the keyless path on Zen metadata. Limits the catalog omitted are filled from
-// models.dev; capability flags always come from the catalog. The zero value is
-// returned for models neither source describes (or before the first refresh).
-func (c *Catalog) MetadataForTier(model string, tier config.Tier) Metadata {
+// the OpenCode pricing metadata, which also supplies Cost; capability flags
+// always come from the catalog. The zero value is returned for models neither
+// source describes (or before the first refresh).
+func (c *ModelCatalog) MetadataForTier(model string, tier config.Tier) Metadata {
 	c.mu.RLock()
 	md := c.modelMeta[tier][model]
 	pricing := c.pricing
@@ -503,9 +580,9 @@ func (c *Catalog) MetadataForTier(model string, tier config.Tier) Metadata {
 	if !ok {
 		return md
 	}
-	// OpenCode's capability catalog is authoritative. Use models.dev limits
-	// only to fill fields it omitted so discovery clients still get per-model
-	// context and output limits.
+	// OpenCode's capability catalog is authoritative. Use the pricing
+	// metadata's limits only to fill fields it omitted so discovery clients
+	// still get per-model context and output limits.
 	if md.ContextWindow == 0 {
 		md.ContextWindow = price.ContextWindow
 	}
@@ -521,7 +598,7 @@ func (c *Catalog) MetadataForTier(model string, tier config.Tier) Metadata {
 	return md
 }
 
-func (c *Catalog) supportedLocked(model string) bool {
+func (c *ModelCatalog) supportedLocked(model string) bool {
 	if len(c.zen) == 0 && len(c.goModels) == 0 {
 		return true
 	}
@@ -534,7 +611,11 @@ func (c *Catalog) supportedLocked(model string) bool {
 	return false
 }
 
-func (c *Catalog) tierSupportedLocked(model string, tier config.Tier) bool {
+// tierSupportedLocked reports whether tier can carry model's protocol. A
+// configured override always can; otherwise the tier's capability data
+// decides, and a model it does not know is accepted only while the catalog is
+// pending.
+func (c *ModelCatalog) tierSupportedLocked(model string, tier config.Tier) bool {
 	if c.protocols[model] != "" {
 		return true
 	}

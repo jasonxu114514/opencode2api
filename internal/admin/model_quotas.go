@@ -13,8 +13,12 @@ import (
 
 	"opencode2api/internal/config"
 	"opencode2api/internal/httpx"
+	"opencode2api/internal/identity"
 )
 
+// quotaWindow is one subscription-wide quota window as the Go plan reports it:
+// its status ("ok" or "rate-limited"), the used percentage the upstream gave
+// (it rounds), the complement the WebUI shows, and when the window resets.
 type quotaWindow struct {
 	Status           string    `json:"status"`
 	UsedPercent      float64   `json:"used_percent"`
@@ -22,6 +26,9 @@ type quotaWindow struct {
 	ResetsAt         time.Time `json:"resets_at"`
 }
 
+// quotaAccount is one Go key's quota state. ID is the key fingerprint and
+// Display its masked value; FetchedAt is when the windows were last read
+// successfully, so a later failure reports "stale" rather than "unavailable".
 type quotaAccount struct {
 	ID        string                 `json:"id"`
 	Display   string                 `json:"display"`
@@ -32,11 +39,19 @@ type quotaAccount struct {
 	Windows   map[string]quotaWindow `json:"windows,omitempty"`
 }
 
+// quotaCacheEntry is a cached quotaAccount and the time it expires; a success
+// is kept for a minute, a failure for 15 seconds.
 type quotaCacheEntry struct {
 	Account quotaAccount
 	Expires time.Time
 }
 
+// decodeQuota reads the Go plan's /v1/usage answer. All three windows
+// (rolling, weekly and monthly) must be present and valid: a percentage from
+// 0 to 100, a non-zero resetsAt, and a status of "ok" or "rate-limited".
+// Anything else is reported as an incomplete answer rather than a partial
+// quota.
+//
 // The first-party endpoint returns subscription-wide percentages, not balances
 // for individual models. Never infer model dollars or sum keys' shared quotas.
 // Reference: anomalyco/opencode packages/console/app/src/routes/zen/go/v1/usage.ts
@@ -62,15 +77,23 @@ func decodeQuota(reader io.Reader) (map[string]quotaWindow, error) {
 	return result, nil
 }
 
+// fetchQuota reads endpoint once with the Go key and parses it with
+// decodeQuota. The statuses the operator can act on (invalid key, key not
+// allowed, rate limited) get their own messages. Redirects are not followed.
 func fetchQuota(ctx context.Context, endpoint, key string) (map[string]quotaWindow, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, errors.New("额度查询地址无效")
 	}
+	// The Go lane is a v2 lane: report the v2 CLI identity and a canonical
+	// session pinned to the key instead of anything naming the gateway.
+	session := identity.CanonicalSessionID("quota\x00" + config.Fingerprint(key))
 	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("User-Agent", "opencode2api-admin/1.0")
+	req.Header.Set("User-Agent", httpx.V2UserAgent())
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-opencode-session", "opencode2api-quota-"+config.Fingerprint(key))
+	req.Header.Set("x-opencode-client", "cli")
+	req.Header.Set("x-opencode-session", session)
+	req.Header.Set("x-opencode-session-id", session)
 	client := &http.Client{Timeout: 12 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -92,6 +115,9 @@ func fetchQuota(ctx context.Context, endpoint, key string) (map[string]quotaWind
 	return decodeQuota(resp.Body)
 }
 
+// refreshQuota builds the account entry for key, keeping the windows of the
+// previous entry when the query fails so the WebUI can still show them as
+// stale.
 func refreshQuota(ctx context.Context, endpoint, key string, previous quotaCacheEntry) quotaCacheEntry {
 	now := time.Now().UTC()
 	account := previous.Account
@@ -110,13 +136,19 @@ func refreshQuota(ctx context.Context, endpoint, key string, previous quotaCache
 	return quotaCacheEntry{Account: account, Expires: now.Add(60 * time.Second)}
 }
 
+// handleModelQuotas reports the shared Go plan quota per Go key and the models
+// the plan can serve. The upstream is queried per key, at most four at a time,
+// and a key's answer is cached for a minute (15 seconds after a failure), so
+// several open tabs share one round of queries. The cache is rebuilt from the
+// keys configured for this request, so entries of removed or changed keys do
+// not survive.
 func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	cfg := a.manager.Config()
 	endpoint := strings.TrimRight(cfg.Upstream.Go, "/") + "/v1/usage"
 	accounts := make([]quotaAccount, len(cfg.GoKeys))
 	// Coalesce refreshes from multiple browser tabs; at most four upstream
-	// queries run at a time. The cache is pruned when upstream credentials change.
+	// queries run at a time.
 	a.quotaMu.Lock()
 	if a.quotaCache == nil {
 		a.quotaCache = map[string]quotaCacheEntry{}
@@ -138,18 +170,19 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-r.Context().Done():
+				entries[i] = previous
 				return
 			}
 			entries[i] = refreshQuota(r.Context(), endpoint, key, previous)
 		}(i, key, previous)
 	}
 	wg.Wait()
-	newCache := map[string]quotaCacheEntry{}
+	cache := map[string]quotaCacheEntry{}
 	for i, key := range cfg.GoKeys {
-		newCache[endpoint+"|"+config.Fingerprint(key)] = entries[i]
+		cache[endpoint+"|"+config.Fingerprint(key)] = entries[i]
 		accounts[i] = entries[i].Account
 	}
-	a.quotaCache = newCache
+	a.quotaCache = cache
 	a.quotaMu.Unlock()
 	all, _ := a.manager.DebugModels()
 	type modelView struct {

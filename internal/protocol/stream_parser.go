@@ -8,6 +8,11 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// bridgeStreamParser turns one upstream protocol's SSE events into bridge
+// stream events, remembering across events which tool calls were announced and
+// which arguments or reasoning already arrived. A Chat stream is the only one
+// whose tool names can be split across events, so it accumulates them; the
+// other protocols report a complete name in one event.
 type bridgeStreamParser struct {
 	protocol          Protocol
 	started           bool
@@ -19,6 +24,10 @@ type bridgeStreamParser struct {
 	responseReasoning map[string]bool
 }
 
+// Parse turns one SSE event of the parser's protocol into zero or more bridge
+// events. An event the protocol has no meaning for yields none. Invalid JSON
+// is an error, and so is a "[DONE]" terminator on a protocol other than Chat,
+// which uses it to end the stream.
 func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamEvent, error) {
 	if data == "[DONE]" {
 		if parser.protocol != Chat {
@@ -42,10 +51,12 @@ func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamE
 	}
 }
 
-func (parser *bridgeStreamParser) parseChat(value map[string]any) []bridgeStreamEvent {
-	return parser.parseChatEvent("", value)
-}
-
+// parseChatEvent turns one Chat chunk into bridge events: an error envelope or
+// error finish_reason becomes an error event, the first chunk supplies the
+// response ID and model, usage is reported as it appears, and each choice
+// contributes reasoning, text, tool and finish events. A tool call whose
+// arguments arrive is started once its name is known, and a call whose name is
+// known but whose arguments never arrived is started at finish_reason.
 func (parser *bridgeStreamParser) parseChatEvent(eventName string, value map[string]any) []bridgeStreamEvent {
 	events := make([]bridgeStreamEvent, 0, 4)
 	if eventName == "error" {
@@ -113,10 +124,12 @@ func (parser *bridgeStreamParser) parseChatEvent(eventName string, value map[str
 	return events
 }
 
-func (parser *bridgeStreamParser) parseAnthropic(value map[string]any) ([]bridgeStreamEvent, error) {
-	return parser.parseAnthropicEvent("", value)
-}
-
+// parseAnthropicEvent turns one Anthropic stream event into bridge events,
+// keyed by its type (or the event name when the payload carries none):
+// message_start supplies the ID, model and usage, content blocks yield
+// reasoning, text and tool events, message_delta the usage and stop, and
+// message_stop the done event. A stop reason that reports an error becomes an
+// error event instead.
 func (parser *bridgeStreamParser) parseAnthropicEvent(eventName string, value map[string]any) ([]bridgeStreamEvent, error) {
 	typeName := jsonutil.StringAt(value, "type")
 	if typeName == "" {
@@ -190,6 +203,13 @@ func (parser *bridgeStreamParser) parseAnthropicEvent(eventName string, value ma
 	return nil, nil
 }
 
+// parseResponses turns one Responses stream event into bridge events, keyed by
+// its type (or the event name when the payload carries none): deltas become
+// text, reasoning and tool deltas, item events open and close tool calls, and
+// a terminal event reports the usage, the stop reason and done. A failed
+// response becomes an error event after any usage it reports. A tool's
+// arguments are taken from its deltas, and from the done event only when no
+// delta arrived.
 func (parser *bridgeStreamParser) parseResponses(eventName string, value map[string]any) []bridgeStreamEvent {
 	typeName := jsonutil.StringAt(value, "type")
 	if typeName == "" {
@@ -302,6 +322,8 @@ func (parser *bridgeStreamParser) responsesCompletedStop(response map[string]any
 	return "stop"
 }
 
+// streamErrorMessage extracts the upstream error text, accepting the OpenAI
+// nested error object, a top-level message and a bare error string.
 func streamErrorMessage(value map[string]any, fallback string) string {
 	if message := jsonutil.StringAt(value, "error", "message"); message != "" {
 		return message
@@ -315,10 +337,14 @@ func streamErrorMessage(value map[string]any, fallback string) string {
 	return fallback
 }
 
+// streamErrorType extracts the upstream error type, falling back to its code
+// and then to "upstream_error".
 func streamErrorType(value map[string]any) string {
 	return jsonutil.FirstString(jsonutil.StringAt(value, "error", "type"), jsonutil.StringAt(value, "error", "code"), "upstream_error")
 }
 
+// isStreamErrorFinish reports whether a finish or stop reason reports an
+// upstream error rather than a normal end.
 func isStreamErrorFinish(stop string) bool {
 	switch strings.ToLower(strings.TrimSpace(stop)) {
 	case "error", "network_error", "server_error":
@@ -328,6 +354,8 @@ func isStreamErrorFinish(stop string) bool {
 	}
 }
 
+// rememberTool records a tool call seen in a Responses stream: its key is
+// remembered as not yet started, and its ID and name are stored when given.
 func (parser *bridgeStreamParser) rememberTool(key, id, name string) {
 	if _, seen := parser.tools[key]; !seen {
 		parser.tools[key] = false
@@ -341,6 +369,10 @@ func (parser *bridgeStreamParser) rememberTool(key, id, name string) {
 	}
 }
 
+// mergeToolName folds a Chat name fragment into the name accumulated so far.
+// A fragment that repeats the current name replaces it, one that extends it
+// (the upstream re-sends a growing prefix) becomes the new name, and anything
+// else is appended.
 func mergeToolName(current, fragment string) string {
 	if current == "" || fragment == current {
 		return fragment
@@ -351,6 +383,9 @@ func mergeToolName(current, fragment string) string {
 	return current + fragment
 }
 
+// responseToolKey identifies the tool call a Responses event belongs to: the
+// item's id when the event carries an item, else the event's item_id, else its
+// output_index.
 func responseToolKey(event map[string]any, item map[string]any) string {
 	if item != nil {
 		if id := jsonutil.StringAt(item, "id"); id != "" {

@@ -10,7 +10,9 @@ import (
 	"opencode2api/internal/models"
 )
 
-func (m *RuntimeManager) AvailabilitySnapshot() []models.Availability {
+// AvailabilitySnapshot returns the availability state of every free model in
+// the current runtime's catalog.
+func (m *RuntimeController) AvailabilitySnapshot() []models.Availability {
 	items := []models.Availability{}
 	r := m.current.Load()
 	if r == nil {
@@ -24,7 +26,11 @@ func (m *RuntimeManager) AvailabilitySnapshot() []models.Availability {
 	return items
 }
 
-func (m *RuntimeManager) RestoreModel(model string) error {
+// RestoreModel re-enables a free model by putting it under manual control
+// (see AvailabilityRegistry.Restore), which also discards the results of
+// probes already in flight. It fails for a model that is not a free model of
+// the current catalog.
+func (m *RuntimeController) RestoreModel(model string) error {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
 	r := m.current.Load()
@@ -41,7 +47,7 @@ func (m *RuntimeManager) RestoreModel(model string) error {
 
 // SetManualModel switches a free model between manual and automatic control.
 // Manual models stay enabled and are excluded from automatic probing.
-func (m *RuntimeManager) SetManualModel(model string, manual bool) error {
+func (m *RuntimeController) SetManualModel(model string, manual bool) error {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
 	r := m.current.Load()
@@ -56,7 +62,10 @@ func (m *RuntimeManager) SetManualModel(model string, manual bool) error {
 	return errors.New("unknown free model")
 }
 
-func (m *RuntimeManager) startAvailabilityChecks() {
+// startAvailabilityChecks probes due free models at once and then every
+// minute until Shutdown or the root context stops it. It runs on the
+// controller's root context, so it survives runtime swaps.
+func (m *RuntimeController) startAvailabilityChecks() {
 	ctx, cancel := context.WithCancel(m.root)
 	m.availabilityCancel = cancel
 	go func() {
@@ -73,7 +82,10 @@ func (m *RuntimeManager) startAvailabilityChecks() {
 	}()
 }
 
-func (m *RuntimeManager) checkFreeModels(ctx context.Context) {
+// checkFreeModels probes, one at a time, every free model under automatic
+// control whose next check is due. A result is recorded only while the
+// runtime that ran the probe is still current.
+func (m *RuntimeController) checkFreeModels(ctx context.Context) {
 	for _, item := range m.AvailabilitySnapshot() {
 		if ctx.Err() != nil {
 			return

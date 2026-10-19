@@ -19,6 +19,10 @@ import (
 
 const adminCookieName = "opencode2api_session"
 
+// adminSession is a logged-in WebUI session. The map key is the SHA-256 digest
+// of the cookie token, so the raw token is never stored. AuthVersion is the
+// fingerprint of the password hash the session was created with: changing the
+// username or password invalidates every session.
 type adminSession struct {
 	Username    string
 	AuthVersion string
@@ -26,11 +30,17 @@ type adminSession struct {
 	Expires     time.Time
 }
 
+// loginWindow is a fixed-window counter for one client: Started is when the
+// window opened and Count the events in it. Login failures use a five-minute
+// window, Playground requests a one-minute one.
 type loginWindow struct {
 	Started time.Time
 	Count   int
 }
 
+// handleLogin checks the credentials against the configured username and
+// password hash, creates a session and its CSRF token, and sets the session
+// cookie. A successful login clears that client's failure window.
 func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	client := clientIP(r)
 	if !a.allowLogin(client) {
@@ -79,12 +89,16 @@ func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"username": cfg.WebUI.Username, "csrf_token": csrf, "expires_at": expires.UTC()})
 }
 
+// handleSession reports the current session's username, CSRF token and
+// expiry; it runs behind authenticate, so the session already exists.
 func (a *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r)
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": session.Username, "csrf_token": session.CSRF, "expires_at": session.Expires.UTC()})
 }
 
+// handleLogout deletes the session and expires the cookie; it answers 204 even
+// when the request carried no cookie.
 func (a *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, _ := r.Cookie(adminCookieName)
 	if cookie != nil {
@@ -98,6 +112,9 @@ func (a *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 type sessionContextKey struct{}
 
+// authenticate rejects a request without a live session cookie and otherwise
+// stores the session in the request context. A session dies with its expiry,
+// and also as soon as the configured username or password hash changes.
 func (a *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(adminCookieName)
@@ -127,11 +144,16 @@ func (a *Server) authenticate(next http.Handler) http.Handler {
 	})
 }
 
+// sessionFromContext returns the session authenticate stored, if any.
 func sessionFromContext(r *http.Request) (adminSession, bool) {
 	session, ok := r.Context().Value(sessionContextKey{}).(adminSession)
 	return session, ok
 }
 
+// csrf rejects a state-changing request whose X-CSRF-Token header does not
+// match the session's token. A request that carries an Origin header must also
+// have been sent by this server: same host and the scheme the request arrived
+// on.
 func (a *Server) csrf(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, ok := sessionFromContext(r)
@@ -154,6 +176,9 @@ func (a *Server) csrf(next http.Handler) http.Handler {
 	})
 }
 
+// handleAccount changes the WebUI username and/or password after verifying the
+// current password, then drops every session (including this one) and clears
+// the cookie, so the operator has to log in again.
 func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CurrentPassword string `json:"current_password"`
@@ -187,6 +212,9 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"updated": true, "reauthenticate": true})
 }
 
+// allowLogin reports whether client may try to log in: at most five failures
+// per five-minute window. Once more than 1024 clients are tracked it also
+// drops windows older than five minutes and evicts the oldest window at capacity.
 func (a *Server) allowLogin(client string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -199,7 +227,7 @@ func (a *Server) allowLogin(client string) bool {
 		}
 	}
 	if _, exists := a.attempts[client]; !exists && len(a.attempts) >= 4096 {
-		return false
+		a.removeOldestLoginWindowLocked()
 	}
 	window := a.attempts[client]
 	if window.Started.IsZero() || now.Sub(window.Started) > 5*time.Minute {
@@ -208,6 +236,8 @@ func (a *Server) allowLogin(client string) bool {
 	return window.Count < 5
 }
 
+// recordLoginFailure adds one failure for client, starting a new window when
+// the previous one is older than five minutes.
 func (a *Server) recordLoginFailure(client string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -216,10 +246,29 @@ func (a *Server) recordLoginFailure(client string) {
 	if window.Started.IsZero() || now.Sub(window.Started) > 5*time.Minute {
 		window = loginWindow{Started: now}
 	}
+	if _, exists := a.attempts[client]; !exists && len(a.attempts) >= 4096 {
+		a.removeOldestLoginWindowLocked()
+	}
 	window.Count++
 	a.attempts[client] = window
 }
 
+// removeOldestLoginWindowLocked evicts one window so inserting a new client
+// cannot exceed the cap. a.mu must be held.
+func (a *Server) removeOldestLoginWindowLocked() {
+	var oldestAddress string
+	var oldest time.Time
+	for address, candidate := range a.attempts {
+		if oldest.IsZero() || candidate.Started.Before(oldest) {
+			oldestAddress, oldest = address, candidate.Started
+		}
+	}
+	if !oldest.IsZero() {
+		delete(a.attempts, oldestAddress)
+	}
+}
+
+// cleanupSessionsLocked deletes the expired sessions; a.mu must be held.
 func (a *Server) cleanupSessionsLocked(now time.Time) {
 	for token, session := range a.sessions {
 		if now.After(session.Expires) {
@@ -228,6 +277,8 @@ func (a *Server) cleanupSessionsLocked(now time.Time) {
 	}
 }
 
+// removeEarliestSessionLocked deletes the session that expires first, making
+// room when the session map is full; a.mu must be held.
 func (a *Server) removeEarliestSessionLocked() {
 	var earliestToken string
 	var earliest time.Time
@@ -241,6 +292,8 @@ func (a *Server) removeEarliestSessionLocked() {
 	}
 }
 
+// randomToken returns length random bytes as unpadded base64url, safe for a
+// cookie value and a header.
 func randomToken(length int) (string, error) {
 	data := make([]byte, length)
 	if _, err := rand.Read(data); err != nil {
@@ -249,11 +302,18 @@ func randomToken(length int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
+// tokenDigest returns the hex SHA-256 of a session token, which is what the
+// session map is keyed by.
 func tokenDigest(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }
 
+// clientIP returns the IP address of the direct peer, without the port. It
+// deliberately ignores X-Forwarded-For: the header is client-controlled, so
+// trusting it would let anyone escape the login and Playground rate limits by
+// rotating a value. Behind a reverse proxy every client therefore shares the
+// proxy's address.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
@@ -262,6 +322,9 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// requestIsSecure reports whether the browser reached the server over TLS,
+// directly or, for the cookie's Secure flag and the CSRF origin check, through
+// a proxy that sets X-Forwarded-Proto to https.
 func requestIsSecure(r *http.Request) bool {
 	if r == nil {
 		return false

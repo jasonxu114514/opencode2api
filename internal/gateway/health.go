@@ -47,6 +47,10 @@ type healthProxies struct {
 	Unhealthy int `json:"unhealthy"`
 }
 
+// handleHealth reports readiness. It answers 503 while the model catalog is
+// pending or empty or no proxy is healthy, and 200 otherwise. Any issue,
+// including a stale catalog or no upstream credentials, marks the status
+// degraded, except that a pending catalog reports starting.
 func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, models := g.availableModels()
 	proxyTotal, proxyHealthy := g.transports.healthCounts()
@@ -135,6 +139,9 @@ func (g *Gateway) reasoningEfforts(model string, route modelcatalog.Route) []str
 	return slices.Clone(reasoningLevels)
 }
 
+// handleModels lists every servable model with its tier-scoped metadata in
+// the OpenAI list shape, plus, when Go keys are configured, one entry per
+// rotation group alias that has a Go-routable model.
 func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 	now := time.Now().Unix()
 	routes, _ := g.availableModels()

@@ -12,6 +12,12 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
+// bridgeStreamTool accumulates one tool call while a stream is encoded. Key is
+// the parser's stream key, ID and ItemID the call and output-item identifiers,
+// Arguments the full argument text so far and EmittedArguments how much of it
+// has reached the client. Index is the Chat index or Responses output index,
+// and AnthropicIndex the content block index; Started records whether the tool
+// was opened downstream.
 type bridgeStreamTool struct {
 	Key              string
 	ID               string
@@ -24,7 +30,12 @@ type bridgeStreamTool struct {
 	EmittedArguments int
 }
 
-type bridgeStreamEmitter struct {
+// bridgeStreamEncoder turns bridge stream events into one downstream protocol's
+// SSE stream. It opens the response on the first start or content event (or on
+// Finish when the stream carried none), tracks which text, reasoning and tool
+// blocks are open so each protocol's block ordering is respected, and records
+// usage as it goes.
+type bridgeStreamEncoder struct {
 	w                  io.Writer
 	flush              http.Flusher
 	target             Protocol
@@ -56,11 +67,13 @@ type bridgeStreamEmitter struct {
 	nextAnthropic   int
 	textItemID      string
 	textOutput      int
-	responseOutput  []any
 }
 
-func newBridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string) *bridgeStreamEmitter {
-	return &bridgeStreamEmitter{
+// bridgeStreamEmitter builds an encoder for the target protocol. The response
+// ID is taken from the first event that carries one and the model from the
+// last event that carries one, so the constructor's model is only a fallback.
+func bridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string) *bridgeStreamEncoder {
+	return &bridgeStreamEncoder{
 		w:       writer,
 		flush:   flusher,
 		target:  target,
@@ -70,7 +83,11 @@ func newBridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Proto
 	}
 }
 
-func (emitter *bridgeStreamEmitter) Emit(event bridgeStreamEvent) error {
+// Emit encodes one bridge stream event for the target protocol. The response
+// is opened before the first start or content event. "error" writes an in-band
+// error event and then returns errStreamUpstreamFailure; "done" finishes the
+// stream through Finish.
+func (emitter *bridgeStreamEncoder) Emit(event bridgeStreamEvent) error {
 	if event.ResponseID != "" && emitter.id == "" {
 		emitter.id = event.ResponseID
 	}
@@ -154,7 +171,10 @@ func (emitter *bridgeStreamEmitter) Emit(event bridgeStreamEvent) error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) emitError(message, errorType string) error {
+// emitError writes an error in the target protocol's stream form: an "error"
+// event for Anthropic, a response.failed event for Responses, and an error
+// object followed by [DONE] for Chat.
+func (emitter *bridgeStreamEncoder) emitError(message, errorType string) error {
 	switch emitter.target {
 	case Anthropic:
 		return emitter.sse("error", map[string]any{
@@ -182,7 +202,10 @@ func (emitter *bridgeStreamEmitter) emitError(message, errorType string) error {
 	}
 }
 
-func (emitter *bridgeStreamEmitter) tool(key string) *bridgeStreamTool {
+// tool returns the state for a stream tool key, creating it with fresh IDs and
+// the next index on first sight. An empty key gets a position-based one, so
+// each unnamed event starts its own tool.
+func (emitter *bridgeStreamEncoder) tool(key string) *bridgeStreamTool {
 	if key == "" {
 		key = fmt.Sprintf("tool-%d", len(emitter.order))
 	}
@@ -203,7 +226,7 @@ func (emitter *bridgeStreamEmitter) tool(key string) *bridgeStreamTool {
 // anyToolStarted reports whether at least one tool block was actually opened
 // downstream. Tools stuck without a name never start; their stop promise must
 // not be advertised as a tool stop.
-func (emitter *bridgeStreamEmitter) anyToolStarted() bool {
+func (emitter *bridgeStreamEncoder) anyToolStarted() bool {
 	for _, key := range emitter.order {
 		if tool := emitter.tools[key]; tool != nil && tool.Started {
 			return true
@@ -212,7 +235,10 @@ func (emitter *bridgeStreamEmitter) anyToolStarted() bool {
 	return false
 }
 
-func (emitter *bridgeStreamEmitter) start() error {
+// start opens the response in the target protocol's shape: a role chunk for
+// Chat, message_start for Anthropic, and response.created plus
+// response.in_progress for Responses. It is a no-op once started.
+func (emitter *bridgeStreamEncoder) start() error {
 	if emitter.started {
 		return nil
 	}
@@ -258,7 +284,11 @@ func (emitter *bridgeStreamEmitter) start() error {
 	}
 }
 
-func (emitter *bridgeStreamEmitter) emitText(delta string) error {
+// emitText writes a text delta, closing the reasoning block first for
+// Anthropic and Responses, whose content blocks are sequential. Anthropic
+// opens a text content block and Responses a message output item with a text
+// part, each on the first delta; Chat just takes the delta.
+func (emitter *bridgeStreamEncoder) emitText(delta string) error {
 	if emitter.target == Anthropic || emitter.target == Responses {
 		if err := emitter.finishReasoning(); err != nil {
 			return err
@@ -305,7 +335,9 @@ func (emitter *bridgeStreamEmitter) emitText(delta string) error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) emitReasoning(delta string) error {
+// emitReasoning writes a reasoning delta into the open reasoning block,
+// opening it first if needed. Responses reports the text as a summary delta.
+func (emitter *bridgeStreamEncoder) emitReasoning(delta string) error {
 	if err := emitter.startReasoning(); err != nil {
 		return err
 	}
@@ -324,7 +356,9 @@ func (emitter *bridgeStreamEmitter) emitReasoning(delta string) error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) emitReasoningSignature(signature string) error {
+// emitReasoningSignature writes a reasoning signature delta. Chat and Anthropic
+// have a field for it; Responses has none, so the signature is dropped there.
+func (emitter *bridgeStreamEncoder) emitReasoningSignature(signature string) error {
 	if err := emitter.startReasoning(); err != nil {
 		return err
 	}
@@ -341,7 +375,11 @@ func (emitter *bridgeStreamEmitter) emitReasoningSignature(signature string) err
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) startReasoning() error {
+// startReasoning opens the reasoning block, once: a thinking content block for
+// Anthropic, a reasoning output item with a summary part for Responses, and
+// nothing at all for Chat, which has no block to open. It also does nothing
+// after the block has been closed.
+func (emitter *bridgeStreamEncoder) startReasoning() error {
 	if emitter.reasoningOpen || emitter.reasoningClosed {
 		return nil
 	}
@@ -369,7 +407,10 @@ func (emitter *bridgeStreamEmitter) startReasoning() error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) finishReasoning() error {
+// finishReasoning closes the open reasoning block. Anthropic gets a
+// content_block_stop, and Responses the summary done events plus the completed
+// output item, which carries the encrypted content when the upstream sent any.
+func (emitter *bridgeStreamEncoder) finishReasoning() error {
 	if !emitter.reasoningOpen || emitter.reasoningClosed {
 		return nil
 	}
@@ -395,7 +436,11 @@ func (emitter *bridgeStreamEmitter) finishReasoning() error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) startTool(tool *bridgeStreamTool) error {
+// startTool opens a tool call downstream once its name is non-empty, closing
+// the reasoning block and, for Anthropic, the open text block first. A tool
+// with no name stays unstarted, so a phantom call is never announced. Unlike
+// usableToolBlocks, this check does not trim the name.
+func (emitter *bridgeStreamEncoder) startTool(tool *bridgeStreamTool) error {
 	if tool.Started || tool.Name == "" {
 		return nil
 	}
@@ -438,7 +483,9 @@ func (emitter *bridgeStreamEmitter) startTool(tool *bridgeStreamTool) error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) emitToolDelta(tool *bridgeStreamTool, delta string) error {
+// emitToolDelta writes a tool argument delta in the target protocol's form.
+// The caller is responsible for having started the tool first.
+func (emitter *bridgeStreamEncoder) emitToolDelta(tool *bridgeStreamTool, delta string) error {
 	if delta == "" {
 		return nil
 	}
@@ -456,7 +503,10 @@ func (emitter *bridgeStreamEmitter) emitToolDelta(tool *bridgeStreamTool, delta 
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) emitPendingToolArguments(tool *bridgeStreamTool) error {
+// emitPendingToolArguments writes the argument text a tool has accumulated but
+// not yet sent. A tool that has not started holds its arguments until it does,
+// so nothing is lost when the name arrives late.
+func (emitter *bridgeStreamEncoder) emitPendingToolArguments(tool *bridgeStreamTool) error {
 	if !tool.Started {
 		return nil
 	}
@@ -469,7 +519,12 @@ func (emitter *bridgeStreamEmitter) emitPendingToolArguments(tool *bridgeStreamT
 	return emitter.emitToolDelta(tool, delta)
 }
 
-func (emitter *bridgeStreamEmitter) Finish() error {
+// Finish closes the response in the target protocol's shape: the remaining
+// text, reasoning and tool blocks, the stop reason, and the usage report. The
+// stop reason defaults to "tool_calls" when any tool call was seen and "stop"
+// otherwise, and a tool stop with no started tool is demoted to "stop" so the
+// client does not wait for a call it never received. Finish is idempotent.
+func (emitter *bridgeStreamEncoder) Finish() error {
 	if emitter.done {
 		return nil
 	}
@@ -567,7 +622,10 @@ func (emitter *bridgeStreamEmitter) Finish() error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) finishResponsesItems() error {
+// finishResponsesItems closes the open text item and every tool item with the
+// done events a Responses client expects. A tool without arguments is closed
+// with "{}", so the item is still executable.
+func (emitter *bridgeStreamEncoder) finishResponsesItems() error {
 	if emitter.textOpen {
 		text := emitter.text.String()
 		if err := emitter.sse("response.output_text.done", map[string]any{"type": "response.output_text.done", "text": text, "item_id": emitter.textItemID, "output_index": emitter.textOutput, "content_index": 0, "sequence_number": emitter.nextSequence()}); err != nil {
@@ -605,7 +663,8 @@ func (emitter *bridgeStreamEmitter) finishResponsesItems() error {
 	return nil
 }
 
-func (emitter *bridgeStreamEmitter) chatChunk(delta map[string]any, finish any) error {
+// chatChunk writes one Chat chunk with the given delta and finish_reason.
+func (emitter *bridgeStreamEncoder) chatChunk(delta map[string]any, finish any) error {
 	return emitter.sse("", map[string]any{
 		"id":      asPrefix(emitter.id, "chatcmpl"),
 		"object":  "chat.completion.chunk",
@@ -619,7 +678,9 @@ func (emitter *bridgeStreamEmitter) chatChunk(delta map[string]any, finish any) 
 	})
 }
 
-func (emitter *bridgeStreamEmitter) responsesBase(status string, output []any) map[string]any {
+// responsesBase builds the response object that Responses lifecycle events
+// carry.
+func (emitter *bridgeStreamEncoder) responsesBase(status string, output []any) map[string]any {
 	return map[string]any{
 		"id":         asPrefix(emitter.id, "resp"),
 		"object":     "response",
@@ -631,13 +692,15 @@ func (emitter *bridgeStreamEmitter) responsesBase(status string, output []any) m
 	}
 }
 
-func (emitter *bridgeStreamEmitter) nextSequence() int {
+// nextSequence returns the next Responses sequence_number.
+func (emitter *bridgeStreamEncoder) nextSequence() int {
 	sequence := emitter.sequence
 	emitter.sequence++
 	return sequence
 }
 
-func (emitter *bridgeStreamEmitter) sse(eventName string, value any) error {
+// sse writes value as the data of one SSE event.
+func (emitter *bridgeStreamEncoder) sse(eventName string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -645,7 +708,9 @@ func (emitter *bridgeStreamEmitter) sse(eventName string, value any) error {
 	return emitter.rawSSE(eventName, string(data))
 }
 
-func (emitter *bridgeStreamEmitter) rawSSE(eventName, data string) error {
+// rawSSE writes one SSE event and flushes it, so the client sees each event as
+// it is produced. An empty eventName omits the event line, as Chat streams do.
+func (emitter *bridgeStreamEncoder) rawSSE(eventName, data string) error {
 	if eventName != "" {
 		if _, err := fmt.Fprintf(emitter.w, "event: %s\n", eventName); err != nil {
 			return err
@@ -658,6 +723,10 @@ func (emitter *bridgeStreamEmitter) rawSSE(eventName, data string) error {
 	return nil
 }
 
+// mergeBridgeUsage folds a usage report into the accumulated usage. A non-zero
+// field replaces the stored one, Total keeps the larger of the two, and Total
+// is finally raised to at least Input+Output so a report that leaves it out
+// still adds up.
 func mergeBridgeUsage(destination *Usage, source Usage) {
 	if source.Input != 0 {
 		destination.Input = source.Input

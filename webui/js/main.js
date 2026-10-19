@@ -87,7 +87,8 @@ async function boot() {
 setUnauthorizedHandler(showLogin);
 
 store.on("monitor", (data) => {
-  $("#version").textContent = `v${data.version}`;
+  const version = String(data.version || "");
+  $("#version").textContent = version.startsWith("v") || version === "dev" ? version : `v${version}`;
 });
 
 for (const page of PAGES) page.init?.();

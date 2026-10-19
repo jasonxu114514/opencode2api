@@ -158,6 +158,15 @@ pre {
   color: var(--text-3);
 }
 
+.sidebar-foot a {
+  text-decoration: none;
+}
+
+.sidebar-foot a:hover {
+  color: var(--text-1);
+  text-decoration: underline;
+}
+
 .content {
   display: flex;
   flex-direction: column;

@@ -20,6 +20,9 @@ import (
 	"opencode2api/internal/telemetry"
 )
 
+// syncRotation tells the rotation manager which catalog models the Go tier can
+// serve right now: every model with a Go route except System One models, and
+// none while no Go key is configured.
 func (g *Gateway) syncRotation() {
 	available := map[string]bool{}
 	for _, model := range g.catalog.List() {
@@ -29,19 +32,30 @@ func (g *Gateway) syncRotation() {
 	}
 	g.rotation.Sync(available)
 }
-func (m *RuntimeManager) RotationSnapshot() rotation.Snapshot {
+
+// RotationSnapshot resyncs the rotation groups with the current catalog and
+// returns their state.
+func (m *RuntimeController) RotationSnapshot() rotation.Snapshot {
 	r := m.current.Load()
 	r.gateway.syncRotation()
 	return m.rotation.Snapshot()
 }
-func (m *RuntimeManager) SelectRotation(id, model string) error {
+
+// SelectRotation manually switches rotation group id to model, clearing any
+// pause on it, after resyncing the groups with the current catalog. model
+// must be one of the group's currently available models.
+func (m *RuntimeController) SelectRotation(id, model string) error {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
 	m.current.Load().gateway.syncRotation()
 	return m.rotation.Manual(id, model)
 }
 
-// Explicit quota markers only: ordinary provider errors must keep their budget.
+// quotaError reports whether a failed rotation attempt hit a quota or rate
+// limit, which pauses the model for its Retry-After instead of spending the
+// request's ordinary-failure budget. Any 429 counts; otherwise only explicit
+// quota markers in the body do, since ordinary provider errors must keep
+// their budget.
 func quotaError(status int, body string) bool {
 	if status == 429 {
 		return true
@@ -55,6 +69,10 @@ func quotaError(status int, body string) bool {
 	return false
 }
 
+// groupAttempt is the outcome of one rotation attempt. quota marks a quota or
+// rate-limit failure, committed means the reply already reached the client,
+// pause is how long a quota failure pauses the model, and reason labels the
+// attempt record.
 type groupAttempt struct {
 	err              error
 	quota, committed bool
@@ -62,11 +80,21 @@ type groupAttempt struct {
 	reason           string
 }
 
+// handleRotation serves a request addressed to a rotation group alias on the
+// Go tier. It walks the group's usable models from the current one, giving
+// each up to three single-call attempts. A quota or rate-limit failure pauses
+// the model for its Retry-After (60 seconds without one) and moves on to the
+// next model; a model that fails a third time for another reason is paused
+// for 15 seconds. The walk ends on success, once a reply has been committed
+// downstream, once three models have failed for ordinary reasons, when no
+// usable model is left, or when the request budget runs out. Unless the client
+// went away, a request left without a reply then gets a 503, or a 504 when
+// the budget ran out.
 func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, external wire.Protocol, payload map[string]any, id, alias string) {
 	g.syncRotation()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
-	ids := identity.DeriveRequestIDs(r, payload)
+	ids := identity.DeriveRequestIDs(r, payload, callerScope(r.Context()))
 	meta := telemetry.MetaFromRequest(r)
 	if meta != nil {
 		meta.Request = ids.Request
@@ -163,6 +191,11 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 	wire.WriteError(w, external, status, message, "rotation_unavailable", ids.Request)
 }
 
+// rotationAttempt makes one upstream call for a rotation group model with the
+// attempt-th key the session's Go cursor yields. Nothing reaches the client
+// unless the first useful output (for a non-streaming reply, the whole body)
+// arrives within the rotation's first_output_seconds, and the reply names the
+// group alias as its model.
 func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter, original *http.Request, external wire.Protocol, payload map[string]any, alias string, route models.Route, ids identity.RequestIDs, attempt int) groupAttempt {
 	result := groupAttempt{reason: "upstream_error", pause: 60 * time.Second}
 	ctx, cancel := context.WithCancel(parent)
@@ -182,9 +215,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		return result
 	}
 	body, toolAlias, shaped := g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
-	if meta := telemetry.MetaFromContext(parent); meta != nil {
-		meta.ToolAlias = toolAlias
-	}
+	setRequestShape(parent, shaped, toolAlias)
 	cursor := g.goNodes.CursorFor(ids.Session)
 	var node *upstreamNode
 	// Each group attempt is exactly one HTTP call. Key selection may change,
@@ -201,7 +232,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.err = errors.New("no proxy")
 		return result
 	}
-	req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
+	req, err := upstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
 	if err != nil {
 		result.err = err
 		return result
@@ -212,15 +243,25 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
 	started := time.Now()
-	resp, err := client.Do(req)
+	if proxy.pool {
+		req.Close = true
+	}
+	resp, err := doInferenceAttempt(&client, req, 0, g.attemptTimeout)
+	if err != nil && ctx.Err() != nil && parent.Err() == nil && !isProxyFailure(err) {
+		// The rotation-specific first-output deadline is not evidence that the
+		// proxy route failed. It still counts as a failed key attempt.
+		err = errFirstEventTimeout
+	}
 	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
 	if resp != nil {
 		defer resp.Body.Close()
 	}
+	if parent.Err() == nil {
+		g.observeKeyResult(parent, g.goNodes, node, proxy, resp, err)
+	}
 	if err != nil {
 		result.err = err
-		result.reason = "transport_error"
-		if ctx.Err() != nil {
+		if errors.Is(err, errFirstEventTimeout) || ctx.Err() != nil {
 			result.reason = "first_output_timeout"
 		}
 		return result
@@ -264,7 +305,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 			g.monitor.BeginStream()
 			defer g.monitor.EndStream()
 		}
-		streamBody := wire.RenameStreamReader(resp.Body, route.Protocol, legacyAnonymousReadTool, toolAlias)
+		streamBody := wire.RenameStreamReader(resp.Body, route.Protocol, v1ReadTool, toolAlias)
 		usage, reported, committed, err := wire.RotationStream(original.Context(), w, streamBody, route.Protocol, external, alias, ready)
 		if meta != nil {
 			meta.Usage = usage
@@ -302,7 +343,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		b, err = wire.CollapseStream(bytes.NewReader(b), route.Protocol, route.ID)
 	}
 	if err == nil {
-		b = wire.RenameResponseTool(b, route.Protocol, legacyAnonymousReadTool, toolAlias)
+		b = wire.RenameResponseTool(b, route.Protocol, v1ReadTool, toolAlias)
 	}
 	var document map[string]any
 	if err == nil {
