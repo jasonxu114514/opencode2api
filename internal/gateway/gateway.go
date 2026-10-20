@@ -83,6 +83,10 @@ type Gateway struct {
 	// the header wait. Zero arms no per-attempt deadline: each attempt is then
 	// bounded only by the request-level budget.
 	attemptTimeout time.Duration
+	// streamIdleTimeout bounds silence inside an established stream. The
+	// forward loop re-arms it on every read, so only a stall ends the
+	// request; a slow but active generation is never cut. Zero disables it.
+	streamIdleTimeout time.Duration
 }
 
 // New builds a Gateway for cfg: one proxy transport per runtime proxy (a
@@ -113,16 +117,17 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics) (*G
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
 	return &Gateway{
-		cfg:            cfg,
-		rotation:       rotationManager,
-		logger:         logger,
-		transports:     transports,
-		zenNodes:       zenNodes,
-		goNodes:        goNodes,
-		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown),
-		catalog:        catalog,
-		monitor:        monitor,
-		attemptTimeout: attemptDeadline(cfg),
+		cfg:               cfg,
+		rotation:          rotationManager,
+		logger:            logger,
+		transports:        transports,
+		zenNodes:          zenNodes,
+		goNodes:           goNodes,
+		anonymous:         anonymousPool(cfg.Anonymous, transports, cooldown),
+		catalog:           catalog,
+		monitor:           monitor,
+		attemptTimeout:    attemptDeadline(cfg),
+		streamIdleTimeout: time.Duration(cfg.Performance.StreamIdleTimeoutSeconds) * time.Second,
 	}, nil
 }
 
@@ -346,7 +351,14 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
+			// The response now belongs to the client, so the only remaining
+			// failure mode is silence: an exit that keeps the connection
+			// open but stops sending. The watchdog closes the body, which is
+			// what unblocks the parked read; the reader then reports the
+			// stall as an upstream error instead of the request waiting out
+			// the whole budget.
 			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, v1ReadTool, toolAlias)
+			streamBody = wire.IdleReader(streamBody, resp.Body, g.streamIdleTimeout)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {

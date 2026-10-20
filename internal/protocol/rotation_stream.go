@@ -122,7 +122,10 @@ func RotationStream(ctx context.Context, w http.ResponseWriter, reader io.Reader
 		readErr = &StreamFailure{Type: "unexpected_eof"}
 	}
 	var writeErr *ClientWriteError
-	if committed && ctx.Err() == nil && !errors.As(readErr, &writeErr) {
+	// An idle timeout cancels the request context from our own watchdog, so
+	// ctx.Err() alone cannot tell it apart from a client that went away: the
+	// client is still connected and must be told the stream stalled.
+	if committed && (ctx.Err() == nil || errors.Is(readErr, errStreamIdleTimeout)) && !errors.As(readErr, &writeErr) {
 		_ = emit(bridgeStreamEvent{Kind: "error", Error: "当前上游模型的输出中断；本次响应已结束，请重新发起请求。", ErrorType: "upstream_error"})
 	}
 	return usage, reported, committed, readErr

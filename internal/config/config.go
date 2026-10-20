@@ -142,6 +142,12 @@ type PerformanceConfig struct {
 	FailureCooldownSeconds   int `json:"failure_cooldown_seconds"`
 	AttemptTimeoutSeconds    int `json:"attempt_timeout_seconds"`
 	FirstEventTimeoutSeconds int `json:"first_event_timeout_seconds"`
+	// StreamIdleTimeoutSeconds bounds silence inside an established stream:
+	// a gap with no upstream data for longer than this ends the attempt
+	// instead of waiting for the request-level timeout. 0 disables it, and
+	// there is no upper bound because a deliberately slow relay (a polled
+	// backend) may legitimately idle for minutes.
+	StreamIdleTimeoutSeconds int `json:"stream_idle_timeout_seconds"`
 }
 
 // AttemptTimeout returns the bound for a single upstream attempt. When
@@ -262,6 +268,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Performance.AttemptTimeoutSeconds < 0 {
 		return Config{}, errors.New("performance.attempt_timeout_seconds must not be negative (0 keeps the retry timeout)")
+	}
+	if cfg.Performance.StreamIdleTimeoutSeconds < 0 {
+		return Config{}, errors.New("performance.stream_idle_timeout_seconds must not be negative (0 disables the idle watchdog)")
 	}
 	if cfg.Performance.FirstEventTimeoutSeconds < 0 || cfg.Performance.FirstEventTimeoutSeconds > 86400 {
 		return Config{}, errors.New("performance.first_event_timeout_seconds must be between 0 and 86400 (0 disables the first-event timeout)")

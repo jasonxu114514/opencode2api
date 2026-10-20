@@ -306,6 +306,9 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 			defer g.monitor.EndStream()
 		}
 		streamBody := wire.RenameStreamReader(resp.Body, route.Protocol, v1ReadTool, toolAlias)
+		// Silence after the stream is committed must not hold the request
+		// until the rotation budget runs out; see the inference path.
+		streamBody = wire.IdleReader(streamBody, resp.Body, g.streamIdleTimeout)
 		usage, reported, committed, err := wire.RotationStream(original.Context(), w, streamBody, route.Protocol, external, alias, ready)
 		if meta != nil {
 			meta.Usage = usage

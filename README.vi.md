@@ -221,7 +221,7 @@ Trình tự định tuyến là:
 
 Các lần thử ẩn danh không bị `retry.max_attempts` cắt ngắn, nhưng mọi lần thử đều dùng chung timeout của request. Lỗi mạng, xác thực thất bại, giới hạn tần suất và lỗi máy chủ có thể làm luân chuyển key. Các phản hồi 4xx khác kết thúc tier hiện tại; một tier khác còn khả dụng vẫn có thể được thử.
 
-Request được mã hoá theo giao thức riêng của từng tier. Khi bật `performance.first_event_timeout_seconds`, một phản hồi SSE thành công sẽ được giữ lại cho tới sự kiện dữ liệu hoàn chỉnh đầu tiên. Timeout hoặc mất kết nối trước sự kiện đó sẽ dùng ngân sách retry key/proxy hiện có; comment không tính là thoát timeout. Sau khi được giải phóng xuống phía dưới, luồng không bao giờ được phát lại. Mặc định là `0` (tắt); hãy thử `15` giây cho các upstream nhận request nhưng không gửi sự kiện nào. Giới hạn này áp dụng cho sự kiện đầu tiên, không phải token văn bản đầu tiên, và không áp dụng cho System One. Bí danh luân chuyển dùng timeout riêng `rotation.first_output_seconds`. Một tham chiếu reasoning Responses bị lỗi thời đã nhận diện có thể kích hoạt một lượt sửa; chẩn đoán chọn key cụ thể không bao giờ dùng lượt phát lại đó.
+Request được mã hoá theo giao thức riêng của từng tier. Khi bật `performance.first_event_timeout_seconds`, một phản hồi SSE thành công sẽ được giữ lại cho tới sự kiện dữ liệu hoàn chỉnh đầu tiên. Timeout hoặc mất kết nối trước sự kiện đó sẽ dùng ngân sách retry key/proxy hiện có; comment không tính là thoát timeout. Sau khi được giải phóng xuống phía dưới, luồng không bao giờ được phát lại. Mặc định là `0` (tắt); hãy thử `15` giây cho các upstream nhận request nhưng không gửi sự kiện nào. Giới hạn này áp dụng cho sự kiện đầu tiên, không phải token văn bản đầu tiên, và không áp dụng cho System One. Sau khi luồng được thiết lập, `performance.stream_idle_timeout_seconds` giới hạn thời gian im lặng: nếu upstream không gửi byte nào trong khoảng đó, request kết thúc bằng một sự kiện lỗi thay vì giữ kết nối tới timeout của request. Bí danh luân chuyển dùng timeout riêng `rotation.first_output_seconds`. Một tham chiếu reasoning Responses bị lỗi thời đã nhận diện có thể kích hoạt một lượt sửa; chẩn đoán chọn key cụ thể không bao giờ dùng lượt phát lại đó.
 
 Khi chỉ cấu hình truy cập ẩn danh, `/v1/models` chỉ công khai các mô hình đủ điều kiện cho làn đó.
 
@@ -335,6 +335,7 @@ Dùng khi bản thân endpoint sau URL đã tự luân chuyển, còn từng exi
 | `retry.max_attempts`                     | `3`      | Số lần thử cho mỗi tier có xác thực, kể cả lần đầu.        |
 | `retry.timeout_seconds`                  | `300`    | Timeout suy luận tổng, gồm cả thời gian đọc luồng.          |
 | `performance.attempt_timeout_seconds`    | `0`      | Giới hạn cho một lần thử; 0 dùng timeout của request.      |
+| `performance.stream_idle_timeout_seconds` | `0`     | Thời gian im lặng cho phép trong luồng đã thiết lập; 0 là tắt. |
 | `performance.connect_timeout_seconds`    | `5`      | Timeout thiết lập kết nối.                                  |
 | `performance.failure_cooldown_seconds`   | `15`     | Cooldown lỗi cơ sở.                                          |
 | `performance.max_idle_conns`             | `2048`   | Giới hạn kết nối rảnh cho mỗi transport proxy.              |

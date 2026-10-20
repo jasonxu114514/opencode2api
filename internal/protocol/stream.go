@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"opencode2api/internal/jsonutil"
 )
@@ -116,6 +118,14 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		if errors.Is(readErr, errStreamNormalTermination) {
 			return emitter.usage, emitter.usageReported, nil
 		}
+		if errors.Is(readErr, errStreamIdleTimeout) {
+			// The watchdog canceled our own context, so this is not a client
+			// cancel: report the stall in-band before returning.
+			if emitErr := emitUnexpectedStreamError(emitter, readErr); emitErr != nil {
+				return emitter.usage, emitter.usageReported, emitErr
+			}
+			return emitter.usage, emitter.usageReported, readErr
+		}
 		if ClientCanceled(ctx, readErr) {
 			return emitter.usage, emitter.usageReported, readErr
 		}
@@ -182,6 +192,59 @@ func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// errStreamIdleTimeout reports a stream that went quiet for longer than the
+// configured idle window. It is a terminal condition for the attempt: the
+// upstream is still connected but no longer producing events.
+var errStreamIdleTimeout = errors.New("upstream stream idle timeout")
+
+// IdleReader wraps an upstream stream reader with a silence watchdog. Every
+// completed read re-arms the timer, so a long generation that keeps emitting
+// events is never cut. When the timer expires the upstream body is closed,
+// which is what actually unblocks a Read that is parked on a silent socket;
+// canceling a context alone does not help, because the body was opened under
+// the request context and the watchdog has no handle on it.
+//
+// The returned reader then reports errStreamIdleTimeout, so callers classify
+// the stall as an upstream failure instead of a client cancel. Closing the
+// body also discards the connection, which is correct for a wedged exit.
+//
+// Without this, an upstream that holds the connection open but stops sending
+// blocks the forward loop until the whole request timeout
+// (retry.timeout_seconds, 300s by default) is spent, with no bytes reaching
+// the client. The gateway's first-event wait only covers the wait for headers
+// plus the first SSE event, so silence after that is invisible.
+//
+// A zero or negative timeout, or a nil closer, returns reader unchanged.
+func IdleReader(reader io.Reader, upstream io.Closer, timeout time.Duration) io.Reader {
+	if timeout <= 0 || upstream == nil {
+		return reader
+	}
+	return &idleReader{reader: reader, upstream: upstream, timeout: timeout}
+}
+
+// idleReader is the reader IdleReader returns. The timer only runs while a
+// read is outstanding: a stream that ended normally is not reported as idle
+// merely because the caller took a while to notice.
+type idleReader struct {
+	reader   io.Reader
+	upstream io.Closer
+	timeout  time.Duration
+	timedOut atomic.Bool
+}
+
+func (r *idleReader) Read(data []byte) (int, error) {
+	timer := time.AfterFunc(r.timeout, func() {
+		r.timedOut.Store(true)
+		_ = r.upstream.Close()
+	})
+	n, err := r.reader.Read(data)
+	timer.Stop()
+	if r.timedOut.Load() {
+		return n, errStreamIdleTimeout
+	}
+	return n, err
+}
+
 // ForwardStream relays a same-protocol upstream stream to the client byte for
 // byte, flushing each write, while a usage tracker reads the same bytes
 // through a TeeReader. It returns the tracked usage and whether the upstream
@@ -205,6 +268,16 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		return usage, observer.Reported(), errStreamUpstreamFailure
 	}
 	if observer.NormalTermination() && observer.ParseError() == nil {
+		return usage, observer.Reported(), copyErr
+	}
+	// The idle watchdog cancels the request context too, so it must be
+	// classified before ClientCanceled: the client is still connected and is
+	// owed an error event explaining why the stream stopped.
+	if errors.Is(copyErr, errStreamIdleTimeout) {
+		emitter := bridgeStreamEmitter(w, flusher, protocol, model)
+		if err := emitUnexpectedStreamError(emitter, copyErr); err != nil {
+			return usage, observer.Reported(), err
+		}
 		return usage, observer.Reported(), copyErr
 	}
 	if ClientCanceled(ctx, copyErr) {

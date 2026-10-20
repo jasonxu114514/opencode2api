@@ -28,7 +28,8 @@
     "connect_timeout_seconds": 5,
     "failure_cooldown_seconds": 15,
     "attempt_timeout_seconds": 0,
-    "first_event_timeout_seconds": 0
+    "first_event_timeout_seconds": 0,
+    "stream_idle_timeout_seconds": 0
   },
   "logging": {
     "level": "info",
