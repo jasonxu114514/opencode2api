@@ -274,7 +274,8 @@ Lưu cấu hình kiểm tra và tạo runtime thay thế trước khi áp dụng
 | Cấu hình và phiên bản trước | `config.json`, `config.json.bak`. |
 | Cache mô hình/metadata | `config.json.models.catalog.json`, `config.json.models.dev.json`. |
 | Khả dụng và luân chuyển | `config.json.<upstream-fingerprint>.availability.json`, `config.json.rotation.json`. |
-| Phiên, sử dụng, yêu cầu/lần thử gần đây, log vòng, Playground gần nhất | Bộ nhớ; xóa khi tiến trình khởi động lại. |
+| Phiên, mức dùng một giờ của từng key, yêu cầu/lần thử gần đây, log vòng, Playground gần nhất | Bộ nhớ; xóa khi tiến trình khởi động lại. |
+| Mức dùng lifetime của từng server key | `usage.json` cạnh file cấu hình: nạp khi khởi động, ghi lại mỗi 5 phút và khi thoát; cửa sổ một giờ vẫn ở bộ nhớ. |
 | Log cấu trúc | JSON trên stdout; cần bộ thu để lưu lâu dài. |
 
 Tên tệp theo đường dẫn cấu hình thực tế. Theo dõi giữ qua nạp nóng nhưng không chia sẻ giữa tiến trình. Token chỉ lấy số upstream báo, không ước tính phần thiếu. Kết quả toàn yêu cầu và lần thử đến khi nhận header là hai thước đo khác nhau. Playground có nhóm sử dụng riêng. Một giờ gần nhất giữ tối đa 10.000 yêu cầu/20.000 lần thử, API trả tối đa 500 mỗi loại.

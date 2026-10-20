@@ -276,7 +276,8 @@ Configuration saves validate and construct a replacement runtime before applying
 | Configuration and previous version | `config.json`, `config.json.bak`. |
 | Model and metadata caches | `config.json.models.catalog.json`, `config.json.models.dev.json`. |
 | Availability and rotation | `config.json.<upstream-fingerprint>.availability.json`, `config.json.rotation.json`. |
-| Sessions, usage, recent requests/attempts, log ring, last Playground result | Memory; reset on process restart. |
+| Sessions, per-key last-hour usage, recent requests/attempts, log ring, last Playground result | Memory; reset on process restart. |
+| Per-server-key lifetime usage | `usage.json` beside the config: loaded on start, rewritten every 5 minutes and on shutdown; the last-hour window stays in memory. |
 | Structured logs | JSON on stdout; retention requires an external collector. |
 
 Names use the actual configuration path. Monitoring survives hot reloads but is not shared across processes. Token counts use upstream-reported usage; missing usage is not estimated. Request completion and upstream header-attempt metrics measure different things. Playground has a separate usage bucket. The recent-hour buffers retain at most 10,000 requests/20,000 attempts and return at most 500 of each.
