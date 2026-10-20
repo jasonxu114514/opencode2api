@@ -145,12 +145,18 @@ func (g *Gateway) reasoningEfforts(model string, route modelcatalog.Route) []str
 func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 	now := time.Now().Unix()
 	routes, _ := g.availableModels()
+	// One pass over the catalog decides every published name, so discovery and
+	// request routing cannot disagree about what a model is called.
+	published := g.publicNames()
 	data := make([]map[string]any, 0, len(routes))
 	for _, route := range routes {
 		model := route.ID
+		if public, ok := published[route.ID]; ok && public != "" {
+			model = public
+		}
 		// Tier-scoped metadata: the advertised context window must match
 		// the tier that will serve the request (anonymous ⇒ Zen).
-		md := g.catalog.MetadataForTier(model, route.Tier)
+		md := g.catalog.MetadataForTier(route.ID, route.Tier)
 		entry := map[string]any{
 			"id": model, "object": "model", "created": now, "owned_by": "opencode",
 			"metadata":        md,
@@ -176,12 +182,12 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if md.Reasoning {
 			entry["reasoning"] = true
 			entry["supports_reasoning"] = true
-			efforts := g.reasoningEfforts(model, route)
+			efforts := g.reasoningEfforts(route.ID, route)
 			entry["reasoning_efforts"] = efforts
 			// OpenClaw and similar harnesses read effort levels from compat
 			// rather than inferring them, and otherwise offer only off/max.
 			entry["compat"] = map[string]any{"supportsReasoningEffort": true, "supportedReasoningEfforts": efforts}
-			if effort := g.resolvedEffort(model, route.Tier, route.Protocol); effort != "" && effort != "none" {
+			if effort := g.resolvedEffort(route.ID, route.Tier, route.Protocol); effort != "" && effort != "none" {
 				entry["default_reasoning_effort"] = effort
 			}
 		}

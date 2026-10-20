@@ -18,7 +18,9 @@
   "models": {
     "refresh_seconds": 300,
     "protocols": {},
-    "free_only": false
+    "free_only": false,
+    "strip_free_suffix": false,
+    "aliases": {}
   },
   "performance": {
     "max_idle_conns": 2048,

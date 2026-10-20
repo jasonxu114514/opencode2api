@@ -597,3 +597,28 @@ func renameToolInMap(payload map[string]any, protocol Protocol, fromName, toName
 	}
 	return changed
 }
+
+// RenameResponseModel rewrites the top-level "model" of a response document so
+// a client that asked for an alias sees that alias back. Protocol-specific
+// nesting is not a concern: every supported non-streaming document puts the
+// model at the top level. Bodies that already name the target are returned
+// untouched.
+func RenameResponseModel(body []byte, fromModel, toModel string) []byte {
+	if fromModel == "" || toModel == "" || fromModel == toModel || len(body) == 0 {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	model, ok := payload["model"].(string)
+	if !ok || model != fromModel {
+		return body
+	}
+	payload["model"] = toModel
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
+}

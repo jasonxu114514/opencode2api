@@ -223,6 +223,35 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 免费模型不需要 Zen Key：启用 `anonymous: true` 后由匿名通道提供，已配置的 Key 只作为回退。如果想保留 Key 但只暴露免费模型，设置 `models.free_only: true`：付费模型不再出现在 `/v1/models`，直接请求会被拒绝，轮转别名只保留免费成员；免费模型仍可回退到已配置的 Key。
 
+### 模型命名
+
+两个互相独立的选项控制客户端看到的模型名。
+
+`models.strip_free_suffix` 把以 `-free` 结尾的 id 去掉后缀对外提供，并且两种写法都能用。它不需要维护：上游以后新增的模型会在下次刷新时自动改名。
+
+```json
+{ "models": { "strip_free_suffix": true } }
+```
+
+`deepseek-v4.1-flash-free` 因此显示为 `deepseek-v4.1-flash`，两种名称都可请求。
+
+`models.aliases` 手工指定名称：键是客户端看到的名称，值是实际提供服务的上游 id。
+
+```json
+{
+  "models": {
+    "strip_free_suffix": true,
+    "aliases": { "beam-pro": "beam-free" }
+  }
+}
+```
+
+手动别名优先于自动名称，因此两者可以组合：全局打开去后缀，再对个别模型覆盖成需要的名字。
+
+改名只改名字：`/v1/models` 用公开名列出，能力与上限仍取自真实模型；请求按上游 id 路由；chat、responses 和 Anthropic 响应（流式与非流式）都回显公开名。上游 id 在任何情况下仍然可用，因此加改名不会让已有客户端失效。
+
+如果去掉后缀后的名称与另一个可服务模型重名，该模型保留上游 id，因此 `x` 和 `x-free` 仍然作为两个模型对外提供。不要通过改能力目录或计价元数据来改名：两者都以上游 id 为键，改掉会连带破坏免费档的请求整形。
+
 ### 免费模型可用性
 
 只探测 ID 含 `free`（不区分大小写），或元数据输入、输出价格均为零且未弃用的模型，按模型原生协议发送简短探测请求。先尝试已启用的匿名通道，再尝试一个配置的 Zen Key；任一通道返回完整有效响应即视为可用，只有所有实际尝试的通道都明确返回模型不存在或已下架时才自动禁用，从模型列表与路由中移除。认证失败、429、超时、网络错误、5xx 和响应格式异常均视为结果不确定，不新增禁用，1 小时后复测。探测不修改生产 Key / 代理的冷却状态，也不计入请求统计，但仍会访问上游并可能消耗免费额度。
@@ -268,6 +297,8 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
 | `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
 | `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
+| `models.strip_free_suffix`  | `false`；把 `-free` 模型去掉后缀对外提供，两种名称都可用。                            |
+| `models.aliases`            | `{}`；用固定名称对外提供模型（公开名 → 上游 id）。                                    |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |
 

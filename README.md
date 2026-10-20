@@ -200,6 +200,48 @@ Cost, deprecation, and model limits come from the official [OpenCode metadata en
 
 Each `/v1/models` entry also carries `cost` (USD per million tokens: `input`, `output`, `cache_read`, `cache_write`, plus OpenClaw's `cacheRead`/`cacheWrite`) when the metadata states a price. Reasoning models list their levels in `reasoning_efforts` and in OpenClaw's `compat.supportedReasoningEfforts`: `minimal` through `max`, capped at the probed ceiling when the model's effort is `auto`. A forced or probed level is reported as `default_reasoning_effort`. Cache prices appear after the next metadata refresh.
 
+### Model names
+
+Two independent options control the names clients see.
+
+`models.strip_free_suffix` publishes every id ending in `-free` without the
+suffix and accepts both spellings on input. It needs no maintenance: a model the
+upstream adds later is renamed on the next refresh.
+
+```json
+{ "models": { "strip_free_suffix": true } }
+```
+
+`deepseek-v4.1-flash-free` then appears as `deepseek-v4.1-flash`, and requests
+may use either name.
+
+`models.aliases` pins a name by hand. The key is what clients see, the value is
+the upstream id that serves it:
+
+```json
+{
+  "models": {
+    "strip_free_suffix": true,
+    "aliases": { "beam-pro": "beam-free" }
+  }
+}
+```
+
+An explicit alias always wins over the automatic name, so the two compose: turn
+on stripping for the whole catalog and override the few models that need a
+different name.
+
+Renaming changes names only. `/v1/models` lists the public name with the real
+model's capabilities and limits, requests are routed by the upstream id, and
+chat, responses, and Anthropic replies (streaming and non-streaming) echo the
+public name back. The upstream id keeps working in every case, so adding a rename
+never breaks an existing client.
+
+A stripped name is skipped when it would collide with another servable model, so
+`x` and `x-free` can be published as two distinct models. Do not rename models by
+editing the capability catalog or pricing metadata instead: both are keyed by the
+upstream id, and changing them there also breaks free-tier request shaping.
+
 ### Anonymous access and fallback
 
 With `anonymous: true`, either condition makes a model eligible for the anonymous Zen lane:
@@ -268,6 +310,8 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
+| `models.strip_free_suffix`  | `false`; publish `-free` models without the suffix and accept both names.   |
+| `models.aliases`            | `{}`; publish a model under a fixed name (public name → upstream id).       |
 | `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
 | `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |
 
