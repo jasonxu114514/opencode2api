@@ -266,7 +266,7 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 | `prefer`                   | `go`; nhận `go` hoặc `zen`.                                      |
 | `upstream.zen`             | `https://opencode.ai/zen`.                                       |
 | `upstream.go`              | `https://opencode.ai/zen/go`.                                    |
-| `upstream.anonymous`       | `https://opencode.ai/inference`; upstream dự phòng của kênh ẩn danh sau `/zen`. |
+| `upstream.anonymous`       | `https://opencode.ai/inference`; kênh ẩn danh thử trước, dự phòng về `/zen`. |
 | `proxies`                  | Rơi về `["direct"]` khi cả hai nguồn proxy đều rỗng.              |
 | `proxyfile`                | Không bắt buộc; đường dẫn tương đối được phân giải cạnh file cấu hình. |
 | `models.refresh_seconds`   | `300`; tối thiểu 1.                                              |

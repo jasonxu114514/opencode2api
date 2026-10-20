@@ -105,8 +105,8 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	if g.cfg.Anonymous {
 		cursor := g.anonymous.CursorFor(ids.Session)
 		if node := cursor.Next(); node != nil {
-			// Prefer the v1 lane (/zen) before falling back to the v2
-			// /inference origin.
+			// Try the anonymous upstreams in preference order: the v2
+			// /inference origin before the v1 fallback.
 			for _, baseURL := range g.anonymousUpstreams() {
 				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, g.inferenceClient(node.proxy, baseURL, model)})
 			}
