@@ -548,8 +548,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte,
 	// title-generation request that carries the agent tool list (403
 	// FreeTierError) even though the identical request without tools succeeds,
 	// and OpenCode's own title generator is sent tool-free. Leave such a
-	// request tool-free on both gates instead of injecting tools, since the
-	// v1 lane is tried before the v2 /inference gate.
+	// request tool-free on both gates instead of injecting tools.
 	if !isTitleGenerationRequest(payload) {
 		if v1 {
 			var toolChanged bool
