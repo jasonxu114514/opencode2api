@@ -21,7 +21,11 @@
           "type": "boolean"
         }
       },
-      "required": ["path", "oldString", "newString"],
+      "required": [
+        "path",
+        "oldString",
+        "newString"
+      ],
       "type": "object"
     }
   },
@@ -34,7 +38,9 @@
           "type": "string"
         }
       },
-      "required": ["code"],
+      "required": [
+        "code"
+      ],
       "type": "object"
     }
   },
@@ -61,7 +67,9 @@
           "type": "string"
         }
       },
-      "required": ["pattern"],
+      "required": [
+        "pattern"
+      ],
       "type": "object"
     }
   },
@@ -97,7 +105,9 @@
           "type": "string"
         }
       },
-      "required": ["pattern"],
+      "required": [
+        "pattern"
+      ],
       "type": "object"
     }
   },
@@ -132,7 +142,10 @@
                       "type": "string"
                     }
                   },
-                  "required": ["label", "description"],
+                  "required": [
+                    "label",
+                    "description"
+                  ],
                   "type": "object"
                 },
                 "type": "array"
@@ -142,14 +155,20 @@
                 "type": "string"
               }
             },
-            "required": ["question", "header", "options"],
+            "required": [
+              "question",
+              "header",
+              "options"
+            ],
             "type": "object"
           },
           "minItems": 1,
           "type": "array"
         }
       },
-      "required": ["questions"],
+      "required": [
+        "questions"
+      ],
       "type": "object"
     }
   },
@@ -173,12 +192,14 @@
           "type": "string"
         }
       },
-      "required": ["path"],
+      "required": [
+        "path"
+      ],
       "type": "object"
     }
   },
   "shell": {
-    "description": "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+    "description": "Execute a shell command and return its output. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
     "parameters": {
       "additionalProperties": false,
       "properties": {
@@ -200,7 +221,9 @@
           "type": "string"
         }
       },
-      "required": ["command"],
+      "required": [
+        "command"
+      ],
       "type": "object"
     }
   },
@@ -214,7 +237,9 @@
           "type": "string"
         }
       },
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "type": "object"
     }
   },
@@ -249,7 +274,11 @@
           "type": "string"
         }
       },
-      "required": ["agent", "description", "prompt"],
+      "required": [
+        "agent",
+        "description",
+        "prompt"
+      ],
       "type": "object"
     }
   },
@@ -260,7 +289,11 @@
       "properties": {
         "format": {
           "description": "The format to return the content in. Defaults to markdown.",
-          "enum": ["text", "markdown", "html"],
+          "enum": [
+            "text",
+            "markdown",
+            "html"
+          ],
           "type": "string"
         },
         "timeout": {
@@ -274,7 +307,9 @@
           "type": "string"
         }
       },
-      "required": ["url"],
+      "required": [
+        "url"
+      ],
       "type": "object"
     }
   },
@@ -288,7 +323,9 @@
           "type": "string"
         }
       },
-      "required": ["query"],
+      "required": [
+        "query"
+      ],
       "type": "object"
     }
   },
@@ -306,8 +343,27 @@
           "type": "string"
         }
       },
-      "required": ["path", "content"],
+      "required": [
+        "path",
+        "content"
+      ],
       "type": "object"
+    }
+  },
+  "patch": {
+    "description": "Use the `patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, you get a sequence of file operations.\nYou MUST include a header to specify the action you are taking.\nEach operation starts with one of three headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place (optionally with a rename).\n\nExample patch:\n\n```\n*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-print(\"Hi\")\n+print(\"Hello, world!\")\n*** Delete File: obsolete.txt\n*** End Patch\n```\n\nIt is important to remember:\n\n- You must include a header with your intended action (Add/Delete/Update)\n- You must prefix new lines with `+` even when creating a new file",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "patchText": {
+          "type": "string",
+          "description": "The full patch text describing add, update, and delete operations to perform."
+        }
+      },
+      "required": [
+        "patchText"
+      ],
+      "additionalProperties": false
     }
   }
 }

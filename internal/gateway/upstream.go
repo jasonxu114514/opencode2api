@@ -431,7 +431,7 @@ func (g *Gateway) anonymousUpstreams() []string {
 	if primary == "" || strings.EqualFold(v1, primary) {
 		return []string{models.V1Base}
 	}
-	return []string{models.V1Base, g.cfg.Upstream.Anonymous}
+	return []string{g.cfg.Upstream.Anonymous, models.V1Base}
 }
 
 // inferenceClient picks the client of proxy for a request for model to
@@ -1228,6 +1228,9 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 // token on every other one; the anonymous lane passes anonymousZenKey.
 func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
+	if protocol == wire.Anthropic && !strings.Contains(endpoint, "beta=true") {
+		endpoint += "?beta=true"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -1292,17 +1295,22 @@ func setV1Headers(header http.Header, protocol wire.Protocol, body []byte, ids i
 func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.RequestIDs) {
 	header.Set("Accept", "application/json, text/event-stream")
 	header.Set("x-opencode-client", "cli")
-	header.Set("x-opencode-session", ids.Session)
-	header.Set("x-session-affinity", ids.Session)
-	header.Set("X-Session-Id", ids.Session)
-	header.Set("User-Agent", httpx.V2UserAgent())
-	header.Set("x-opencode-session-id", ids.Session)
-	header.Set("x-opencode-project", v2ProjectID(ids.Project))
+	rootSession := ids.Session
 	if ids.ParentSession != "" {
-		header.Set("x-parent-session-id", ids.ParentSession)
+		parent := identity.CanonicalSessionID(ids.ParentSession)
+		rootSession = parent
+		header.Set("x-opencode-parent-session-id", parent)
+		header.Set("x-parent-session-id", parent)
 	}
+	header.Set("x-session-affinity", rootSession)
+	header.Set("X-Session-Id", rootSession)
+	header.Set("x-opencode-session", rootSession)
+	header.Set("x-opencode-session-id", ids.Session)
+	header.Set("User-Agent", httpx.V2UserAgent())
+	header.Set("x-opencode-project", v2ProjectID(ids.Project))
 	if protocol == wire.Anthropic {
-		header.Set("anthropic-beta", "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
+		header.Set("anthropic-version", "2023-06-01")
+		header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
 	}
 }
 
@@ -1484,6 +1492,9 @@ func anthropicSupportsStructuredOutput(model string) bool {
 // to one stable upstream project id. v1ProjectID reuses it to fit a
 // non-genuine project into the git commit shape.
 func v2ProjectID(project string) string {
+	if project == "global" || gitCommitPattern.MatchString(project) {
+		return project
+	}
 	sum := sha256.Sum256([]byte("opencode-project\x00" + project))
 	return hex.EncodeToString(sum[:20])
 }
