@@ -75,9 +75,9 @@ type UpstreamConfig struct {
 	// CLI shape. The WebUI also reads the plan's quota from its /v1/usage.
 	Go string `json:"go"`
 	// Anonymous is the v2 /inference origin of the keyless free tier. The
-	// anonymous lane tries the v1 /zen origin (models.V1Base, not Zen) first
-	// and falls back to this one, which is skipped when it equals the v1
-	// origin. Empty means https://opencode.ai/inference.
+	// anonymous lane tries this origin first and falls back to the v1 /zen
+	// origin (models.V1Base, not Zen), which is the only upstream used when
+	// this one equals the v1 origin. Empty means https://opencode.ai/inference.
 	Anonymous string `json:"anonymous"`
 }
 

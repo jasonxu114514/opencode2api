@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
@@ -293,14 +294,14 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 // doAnonymousUpstream walks the session's anonymous proxy cursor. Each static
 // proxy is tried at most once; rotating #pool proxies may be drawn again until
 // Retry.MaxAttempts proxies were used. For each proxy it tries the upstreams in
-// anonymousUpstreams order: the v1 lane (models.V1Base) before the v2
-// /inference upstream (Upstream.Anonymous). Any failure, including an HTTP
-// error response, advances to the next upstream or proxy; a proxy-route
-// failure, or a proxy marked unhealthy, skips that proxy's remaining
-// upstreams. Only a successful response ends the anonymous phase; exhausting
-// the proxy cursor returns control to the preferred authenticated tiers. It
-// returns the last response (body still open), else the last error, plus the
-// number of attempts made.
+// anonymousUpstreams order: the configured v2 /inference upstream
+// (Upstream.Anonymous) before the v1 lane (models.V1Base). Any failure,
+// including an HTTP error response, advances to the next upstream or proxy; a
+// proxy-route failure, or a proxy marked unhealthy, skips that proxy's
+// remaining upstreams. Only a successful response ends the anonymous phase;
+// exhausting the proxy cursor returns control to the preferred authenticated
+// tiers. It returns the last response (body still open), else the last error,
+// plus the number of attempts made.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	var lastResponse *http.Response
 	var lastErr error
@@ -421,17 +422,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 }
 
 // anonymousUpstreams returns the ordered base URLs for the keyless free tier:
-// the v1 origin (models.V1Base) is tried first, and the configured v2
-// /inference origin (Upstream.Anonymous) is kept as a fallback. Only the v1
-// origin is returned when Upstream.Anonymous is empty or names that same
-// origin.
+// the configured v2 /inference origin (Upstream.Anonymous) is tried first, and
+// the v1 origin (models.V1Base) is kept as a fallback. Only the v1 origin is
+// returned when Upstream.Anonymous is empty or names that same origin.
 func (g *Gateway) anonymousUpstreams() []string {
 	v1 := strings.TrimRight(models.V1Base, "/")
 	primary := strings.TrimRight(g.cfg.Upstream.Anonymous, "/")
 	if primary == "" || strings.EqualFold(v1, primary) {
 		return []string{models.V1Base}
 	}
-	return []string{models.V1Base, g.cfg.Upstream.Anonymous}
+	return []string{g.cfg.Upstream.Anonymous, models.V1Base}
 }
 
 // inferenceClient picks the client of proxy for a request for model to
@@ -1293,11 +1293,16 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 
 // upstreamRequest builds the POST for one attempt: baseURL plus the protocol's
 // /v1/... route, carrying body. The header set follows the lane: setV1Headers
-// when models.IsV1Upstream(baseURL), setV2Headers otherwise. key is sent as
-// x-api-key (with anthropic-version) on the Anthropic protocol and as a Bearer
-// token on every other one; the anonymous lane passes anonymousZenKey.
+// when models.IsV1Upstream(baseURL), setV2Headers otherwise. Anthropic
+// endpoints on a v2 lane gain beta=true, matching the 2.x client; the 1.x lane
+// keeps its shape. key is sent as x-api-key (with anthropic-version) on the
+// Anthropic protocol and as a Bearer token on every other one; the anonymous
+// lane passes anonymousZenKey.
 func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
+	if protocol == wire.Anthropic && !models.IsV1Upstream(baseURL) {
+		endpoint = withAnthropicBeta(endpoint)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -1320,6 +1325,22 @@ func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol
 	return req, nil
 }
 
+// withAnthropicBeta marks an Anthropic endpoint as beta the way the OpenCode
+// 2.x client does, preserving any query a configured base URL already carries.
+func withAnthropicBeta(endpoint string) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	query := parsed.Query()
+	if query.Get("beta") == "true" {
+		return endpoint
+	}
+	query.Set("beta", "true")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 // setV1Headers renders the v1 lane's header set, that of an OpenCode 1.19.3
 // model request on its opencode provider, as captured from the official
 // release: the AI SDK User-Agent of the package serving the protocol, both
@@ -1339,7 +1360,7 @@ func setV1Headers(header http.Header, protocol wire.Protocol, body []byte, ids i
 		message = identity.AscendingID("msg", time.Now())
 	}
 	header.Set("x-opencode-request", message)
-	header.Set("x-opencode-project", v1ProjectID(ids.Project))
+	header.Set("x-opencode-project", projectID(ids.Project))
 	if ids.ParentSession != "" {
 		parent := identity.CanonicalSessionID(ids.ParentSession)
 		header.Set("x-opencode-parent-session-id", parent)
@@ -1353,26 +1374,36 @@ func setV1Headers(header http.Header, protocol wire.Protocol, body []byte, ids i
 }
 
 // setV2Headers renders the OpenCode 2.x CLI header set the v2 gates
-// fingerprint: the "opencode/<channel>/<version>/cli" User-Agent, every
-// session header (x-opencode-session, x-opencode-session-id,
-// x-session-affinity, X-Session-Id) set to the same descending-encoded id,
-// and a bare 40-character hex x-opencode-project. The v2 gate rejects
-// x-opencode-request and canonical prj_* project ids with 403 FreeTierError,
-// so neither is sent. Anthropic requests carry a fixed anthropic-beta set.
+// fingerprint: the "opencode/<channel>/<version>/cli" User-Agent, the
+// client's child session as x-opencode-session-id, the conversation affinity
+// (the canonical parent when one is present) as x-opencode-session,
+// x-session-affinity and X-Session-Id, and a bare 40-character hex
+// x-opencode-project. The v2 gate rejects x-opencode-request and canonical
+// prj_* project ids with 403 FreeTierError, so neither is sent. Anthropic
+// requests carry a fixed anthropic-beta set; upstreamRequest adds
+// anthropic-version and the beta query.
 func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.RequestIDs) {
 	header.Set("Accept", "application/json, text/event-stream")
 	header.Set("x-opencode-client", "cli")
-	header.Set("x-opencode-session", ids.Session)
-	header.Set("x-session-affinity", ids.Session)
-	header.Set("X-Session-Id", ids.Session)
-	header.Set("User-Agent", httpx.V2UserAgent())
-	header.Set("x-opencode-session-id", ids.Session)
-	header.Set("x-opencode-project", v2ProjectID(ids.Project))
+	rootSession := ids.Session
 	if ids.ParentSession != "" {
-		header.Set("x-parent-session-id", ids.ParentSession)
+		parent := identity.CanonicalSessionID(ids.ParentSession)
+		rootSession = parent
+		header.Set("x-opencode-parent-session-id", parent)
+		header.Set("x-parent-session-id", parent)
 	}
+	childSession := ids.ChildSession
+	if childSession == "" {
+		childSession = ids.Session
+	}
+	header.Set("x-session-affinity", rootSession)
+	header.Set("X-Session-Id", rootSession)
+	header.Set("x-opencode-session", rootSession)
+	header.Set("x-opencode-session-id", childSession)
+	header.Set("User-Agent", httpx.V2UserAgent())
+	header.Set("x-opencode-project", projectID(ids.Project))
 	if protocol == wire.Anthropic {
-		header.Set("anthropic-beta", "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
+		header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
 	}
 }
 
@@ -1390,20 +1421,9 @@ func v1ProviderUtils(protocol wire.Protocol) string {
 	}
 }
 
-// gitCommitPattern matches the git root commit hash OpenCode 1.x uses as its
-// project id.
+// gitCommitPattern matches the git root commit hash OpenCode uses as its
+// project id on both lanes.
 var gitCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-
-// v1ProjectID renders the project header the way the OpenCode 1.x client
-// does: the git root commit hash of the project, or "global" outside a git
-// repository. A genuine value from a v1 client is kept verbatim; any other
-// project is hashed into the commit shape (see v2ProjectID).
-func v1ProjectID(project string) string {
-	if project == "global" || gitCommitPattern.MatchString(project) {
-		return project
-	}
-	return v2ProjectID(project)
-}
 
 // v1AnthropicBetaRequest holds the Messages body fields the AI SDK
 // anthropic provider derives beta flags from. Fields whose JSON type varies
@@ -1547,13 +1567,16 @@ func anthropicSupportsStructuredOutput(model string) bool {
 	return strings.Contains(model, "claude-")
 }
 
-// v2ProjectID renders the project header in the shape the OpenCode 2.x CLI
-// sends to the v2 gates: a bare 40-character lowercase hex id, here the first
-// 20 bytes of a domain-separated SHA-256 of the project. The value itself is
-// not checked upstream, only its shape, but hashing keeps one project mapped
-// to one stable upstream project id. v1ProjectID reuses it to fit a
-// non-genuine project into the git commit shape.
-func v2ProjectID(project string) string {
+// projectID renders the project header in the shape both lanes use: the
+// genuine git root commit hash or "global" is kept verbatim, and any other
+// project is hashed into the same 40-character lowercase hex shape. The value
+// itself is not checked upstream, only its shape, but hashing keeps one
+// project mapped to one stable upstream project id and masks a caller's
+// prj_*-style project, which the v2 gate rejects.
+func projectID(project string) string {
+	if project == "global" || gitCommitPattern.MatchString(project) {
+		return project
+	}
 	sum := sha256.Sum256([]byte("opencode-project\x00" + project))
 	return hex.EncodeToString(sum[:20])
 }

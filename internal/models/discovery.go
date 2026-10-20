@@ -26,7 +26,7 @@ const (
 	GoDocsURL       = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx"
 	// V1Base is the v1 lane's origin: the /zen console (serving /zen/v1/*) that
 	// expects the OpenCode 1.x request shape. It is the default keyed Zen
-	// upstream, and the anonymous lane tries it before the v2 /inference
+	// upstream and the anonymous lane's fallback after the v2 /inference
 	// origin. It also serves the models listing.
 	V1Base = "https://opencode.ai/zen"
 )

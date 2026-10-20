@@ -5,7 +5,8 @@
 // carry the v1 lane's x-opencode-request header. The identity that matters
 // upstream is therefore the pair (x-opencode-session, x-opencode-session-id):
 // Session is the conversation-affinity key and must keep the descending layout
-// minted by CanonicalSessionID.
+// minted by CanonicalSessionID; ChildSession preserves the client's own
+// x-opencode-session-id when it differs, as it does for a subagent.
 package identity
 
 import (
@@ -22,13 +23,16 @@ import (
 )
 
 // RequestIDs carries the identity headers the upstream free tier inspects.
-// Session is sent as both x-opencode-session and x-opencode-session-id.
-// Message is the user message id the v1 lane receives as x-opencode-request;
-// the v2 lane rejects that header. Request only identifies the request inside
-// the gateway. Project is rendered per lane by the gateway (prj_* on the v1
-// lane, bare 40-hex on the v2 lane).
+// Session is the conversation-affinity key sent as x-opencode-session; the
+// v2 lane sends ChildSession, the client's own x-opencode-session-id, as
+// x-opencode-session-id so a subagent keeps its child id while affinity stays
+// on the parent. The v1 lane sends Session as both headers. Message is the
+// user message id the v1 lane receives as x-opencode-request; the v2 lane
+// rejects that header. Request only identifies the request inside the
+// gateway. Project is rendered per lane by the gateway.
 type RequestIDs struct {
 	Session       string
+	ChildSession  string
 	Request       string
 	Message       string
 	Project       string
@@ -68,6 +72,10 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 		signal = RandomID("fallback", 16)
 	}
 	session := scopedSessionID(scope, signal)
+	childSession := r.Header.Get("x-opencode-session-id")
+	if childSession != "" {
+		childSession = scopedSessionID(scope, childSession)
+	}
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
 		// Without a client project every caller would otherwise share one
@@ -81,8 +89,12 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 		r.Header.Get("x-parent-session-id"),
 		jsonutil.StringAt(body, "metadata", "parent_session_id"),
 	)
+	if parentSession != "" {
+		parentSession = scopedSessionID(scope, parentSession)
+	}
 	return RequestIDs{
 		Session:       session,
+		ChildSession:  childSession,
 		Request:       RandomID("req", 16),
 		Message:       UserMessageID(r, body, session),
 		Project:       projectSignal,
