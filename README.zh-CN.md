@@ -36,7 +36,7 @@ go build -o opencode2api ./cmd/opencode2api
 启动前编辑 `config.json`：
 
 1. 将 `server_keys` 替换为自己的本地 API Key。
-2. 填入 Zen 或 Go Key；也可以设置 `anonymous: true`，并清空两个上游 Key 数组。
+2. 可选：填入 Zen 或 Go Key；示例已启用匿名通道，并清空两个上游 Key 数组。
 3. 替换 `webui.password`。示例配置启用了 WebUI，用户名为 `admin`。
 
 ```bash
@@ -211,11 +211,13 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 路由顺序：
 
-1. 符合条件的模型先尝试匿名通道，每个可用代理最多一次。
+1. 符合条件的模型最多尝试 `performance.max_anonymous_exits` 个可用匿名代理，每个代理一次；每个代理先走 v2 `/inference`，再走 v1 `/zen`。
 2. 按 `prefer` 顺序尝试认证通道，仅包含已配置 Key 且可以提供该模型的 Tier。
 3. 每个认证 Tier 分别使用 `retry.max_attempts` 预算。
 
-匿名阶段不受 `retry.max_attempts` 截断，但所有阶段共享请求总超时。网络错误、认证失败、限流和服务端错误可以触发 Key 轮换；其他 4xx 会结束当前 Tier，仍可继续尝试另一个可用 Tier。
+匿名阶段不受 `retry.max_attempts` 截断，但所有阶段共享请求总超时。网络错误、认证失败、限流和服务端错误可以触发出口轮换。请求级 `400`/`413`/`422`（例如 `context_length_exceeded`）会立即结束请求：换出口或换 Tier 都无法改变请求本身。IP 级 abuse `403` 只淘汰当前出口；所有出口都被封时停止扫描，已配置的 Go Key 仍可继续服务。
+
+配置 `models.anonymous_backoff` 后，连续 `threshold` 次匿名失败或所有出口都被 IP 封禁会暂停整条匿名通道 `base_hours`，之后每次再触发翻倍，直到 `max_hours`。单个非滥用 `403` 或 `429` 不会立即熔断，只计入连续失败。暂停期间不取代理、不发任何上游请求（包括模型目录刷新和可用性探测），路由直接落到认证通道。窗口到期后只允许一个请求做半开探测：成功关闭熔断并恢复匿名通道，失败则开启下一个更长的窗口。省略该配置块时熔断关闭。
 
 每个 Tier 使用自己的原生协议编码请求。启用 `performance.first_event_timeout_seconds` 后，会先等待完整的 SSE data 事件再向客户端交付响应；注释心跳不算首事件。首事件前超时或断开会沿用现有 Key / 代理重试预算，交付后不再重放。默认 `0` 关闭，可对接受请求后无事件的上游尝试设置为 `15` 秒。它限制首事件而非首个文本 token，不适用于 System One；轮转别名使用独立的 `rotation.first_output_seconds`。识别到过期的 Responses reasoning 引用时，可执行一次修复重试；指定 Key 的诊断不会执行该重试。
 
@@ -268,6 +270,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
 | `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
 | `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
+| `models.anonymous_backoff`  | 缺省关闭；`{threshold, base_hours, max_hours}`，默认 6、1、24。                       |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |
 
@@ -329,7 +332,7 @@ pool+http://127.0.0.1:7891
 | 连接复用     | Keep-alive + HTTP/2 多路复用（`performance.*` 连接池参数） | 每次请求新建 TCP + CONNECT 隧道（`DisableKeepAlives`，禁用 HTTP/2） |
 | 失败冷却     | 15s–120s 指数退避，并受 `Retry-After` 影响  | 无冷却：下一次请求直接换一个新出口 IP                     |
 | 可用性剔除   | 标记不可用、迁移 Key、每 15 分钟复检        | 永不剔除，完全跳过健康检查                                |
-| 匿名通道重试 | 每个配置的代理最多尝试一次                  | 最多尝试 `retry.max_attempts` 次，循环该池条目            |
+| 匿名通道重试 | 每个出口最多访问一次，最多 `performance.max_anonymous_exits` 个出口 | 最多尝试 `retry.max_attempts` 次，循环该池条目            |
 
 当 URL 背后的服务本身就在做轮换、而池内出口 IP 会被单独限流或不稳定时使用它：网关会把每次尝试都当作新出口，而不是把整个会话固定在某个出口上。只要一条 `#pool` 条目即可，无需再罗列几十个出口。静态条目仍然保留下文的连接池行为。
 
@@ -340,6 +343,8 @@ pool+http://127.0.0.1:7891
 | `retry.max_attempts`                    | `3`    | 每个认证 Tier 的尝试次数，包含首次请求。         |
 | `retry.timeout_seconds`                 | `300`  | 推理请求总超时，包含流式响应读取。               |
 | `performance.attempt_timeout_seconds`   | `0`    | 单次尝试的总超时；0 表示使用请求总超时。         |
+| `performance.max_anonymous_exits`       | `8`    | 每个匿名请求最多尝试的静态代理出口数。           |
+| `performance.free_tier_block_seconds`   | `900`  | 被免费层标记的出口冷却时长。                     |
 | `performance.connect_timeout_seconds`   | `5`    | 建立连接的超时。                                 |
 | `performance.failure_cooldown_seconds`  | `15`   | 失败冷却基数。                                   |
 | `performance.max_idle_conns`            | `2048` | 每个代理 Transport 的空闲连接上限。              |

@@ -100,6 +100,46 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
+	// AnonymousBackoff configures a circuit breaker for the keyless lane:
+	// after Threshold consecutive failed attempts, or when every exit is under
+	// the free tier's IP block, the lane pauses for BaseHours, doubling on
+	// every further trip up to MaxHours. An absent block leaves the lane
+	// unpaused, which is the previous behavior.
+	AnonymousBackoff *AnonymousBackoffConfig `json:"anonymous_backoff,omitempty"`
+}
+
+// AnonymousBackoffConfig tunes the keyless lane's circuit breaker. Zero fields
+// take the defaults shown in Normalize.
+type AnonymousBackoffConfig struct {
+	Threshold int `json:"threshold,omitempty"`
+	BaseHours int `json:"base_hours,omitempty"`
+	MaxHours  int `json:"max_hours,omitempty"`
+}
+
+// Normalize fills the defaults and rejects nonsensical windows.
+func (b *AnonymousBackoffConfig) Normalize() error {
+	if b == nil {
+		return nil
+	}
+	if b.Threshold == 0 {
+		b.Threshold = 6
+	}
+	if b.BaseHours == 0 {
+		b.BaseHours = 1
+	}
+	if b.MaxHours == 0 {
+		b.MaxHours = 24
+	}
+	if b.Threshold < 1 {
+		return errors.New("models.anonymous_backoff.threshold must be at least 1")
+	}
+	if b.BaseHours < 1 {
+		return errors.New("models.anonymous_backoff.base_hours must be at least 1")
+	}
+	if b.MaxHours < b.BaseHours {
+		return errors.New("models.anonymous_backoff.max_hours must not be smaller than base_hours")
+	}
+	return nil
 }
 
 // LoggingConfig sets the minimum log level (debug, info, warn or error) and
@@ -131,8 +171,10 @@ type WebUIConfig struct {
 // handling: the connection pool limits (MaxConnsPerHost 0 means unlimited),
 // the dial timeout, the base cooldown after an upstream key or anonymous
 // proxy fails, and the per-attempt and first-event timeouts.
-// AttemptTimeoutSeconds 0 leaves only the request-level timeout in place, and
-// FirstEventTimeoutSeconds 0 disables the first-event wait.
+// AttemptTimeoutSeconds 0 leaves only the request-level timeout in place,
+// FirstEventTimeoutSeconds 0 disables the first-event wait, MaxAnonymousExits
+// 0 uses the built-in cap, and FreeTierBlockSeconds 0 uses the built-in
+// cool-down for an exit the free tier flagged.
 type PerformanceConfig struct {
 	MaxIdleConns             int `json:"max_idle_conns"`
 	MaxIdleConnsPerHost      int `json:"max_idle_conns_per_host"`
@@ -142,6 +184,16 @@ type PerformanceConfig struct {
 	FailureCooldownSeconds   int `json:"failure_cooldown_seconds"`
 	AttemptTimeoutSeconds    int `json:"attempt_timeout_seconds"`
 	FirstEventTimeoutSeconds int `json:"first_event_timeout_seconds"`
+	// MaxAnonymousExits bounds how many distinct static proxy exits one
+	// anonymous request may walk. Each exit may still try the v2 /inference
+	// lane and the v1 /zen lane, so the upstream request count can be twice
+	// this value; a rotating #pool entry is drawn once per retry.max_attempts
+	// instead.
+	MaxAnonymousExits int `json:"max_anonymous_exits"`
+	// FreeTierBlockSeconds is how long an exit the free tier flagged as
+	// abusive stays out of the anonymous cursor. Upstream does not publish
+	// the block duration, so the default is a conservative 15 minutes.
+	FreeTierBlockSeconds int `json:"free_tier_block_seconds"`
 }
 
 // AttemptTimeout returns the bound for a single upstream attempt. When
@@ -217,6 +269,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 
 	trimList(&cfg.ZenKeys)
 	trimList(&cfg.GoKeys)
+	// A placeholder copied from the documentation is not a credential. Treating
+	// it as one routes every free-model failure into a 401 from the keyed tier.
+	cfg = DropPlaceholderKeys(cfg)
 	cfg.ProxyFile = strings.TrimSpace(cfg.ProxyFile)
 	if err := resolveProxyFiles(path, &cfg); err != nil {
 		return Config{}, err
@@ -266,6 +321,12 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if cfg.Performance.FirstEventTimeoutSeconds < 0 || cfg.Performance.FirstEventTimeoutSeconds > 86400 {
 		return Config{}, errors.New("performance.first_event_timeout_seconds must be between 0 and 86400 (0 disables the first-event timeout)")
 	}
+	if cfg.Performance.MaxAnonymousExits < 0 {
+		return Config{}, errors.New("performance.max_anonymous_exits must not be negative (0 uses the built-in cap)")
+	}
+	if cfg.Performance.FreeTierBlockSeconds < 0 {
+		return Config{}, errors.New("performance.free_tier_block_seconds must not be negative (0 uses the built-in cool-down)")
+	}
 	if cfg.Logging.Level != "debug" && cfg.Logging.Level != "info" && cfg.Logging.Level != "warn" && cfg.Logging.Level != "error" {
 		return Config{}, errors.New("logging.level must be debug, info, warn, or error")
 	}
@@ -305,6 +366,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 		default:
 			return Config{}, fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
 		}
+	}
+	if err := cfg.Models.AnonymousBackoff.Normalize(); err != nil {
+		return Config{}, err
 	}
 	for model, protocol := range cfg.Models.Protocols {
 		if model == "" || !wire.Valid(wire.Protocol(protocol)) {

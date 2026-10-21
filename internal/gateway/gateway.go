@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	"opencode2api/internal/models"
@@ -83,6 +84,9 @@ type Gateway struct {
 	// the header wait. Zero arms no per-attempt deadline: each attempt is then
 	// bounded only by the request-level budget.
 	attemptTimeout time.Duration
+	// freeTierBlock is how long an exit the free tier flagged stays out of the
+	// anonymous cursor. Zero uses freeTierBlockTTL.
+	freeTierBlock time.Duration
 }
 
 // New builds a Gateway for cfg: one proxy transport per runtime proxy (a
@@ -119,11 +123,25 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics) (*G
 		transports:     transports,
 		zenNodes:       zenNodes,
 		goNodes:        goNodes,
-		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown),
+		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
 		catalog:        catalog,
 		monitor:        monitor,
 		attemptTimeout: attemptDeadline(cfg),
+		freeTierBlock:  time.Duration(cfg.Performance.FreeTierBlockSeconds) * time.Second,
 	}, nil
+}
+
+// anonymousBackoffFromConfig converts the configured hours into the breaker's
+// thresholds and durations. A nil block disables the breaker (threshold 0).
+func anonymousBackoffFromConfig(cfg *config.AnonymousBackoffConfig) anonymousBackoff {
+	if cfg == nil {
+		return anonymousBackoff{}
+	}
+	return anonymousBackoff{
+		threshold: int32(cfg.Threshold),
+		base:      time.Duration(cfg.BaseHours) * time.Hour,
+		max:       time.Duration(cfg.MaxHours) * time.Hour,
+	}
 }
 
 // Handler returns the gateway's HTTP API: the server-key authenticated /v1
@@ -290,6 +308,12 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		defer cancel()
 		resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
 		if err != nil {
+			// The error branch never forwards the last response body, so close
+			// it here; otherwise a block or a paused lane leaks one upstream
+			// connection on every request.
+			if resp != nil && resp.Body != nil {
+				httpx.DrainAndClose(resp.Body)
+			}
 			finalTier := route.Tier
 			if meta != nil && meta.Tier != "" {
 				finalTier = config.Tier(meta.Tier)
@@ -317,6 +341,21 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			// distinction matters to clients that retry on 502.
 			if errors.Is(err, context.DeadlineExceeded) {
 				wire.WriteError(w, external, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)
+				return
+			}
+			// Every exit this request could use is under the free tier's IP
+			// block. A 502 would read as a transient upstream fault and invite
+			// the client to retry into the same penalty, so answer with the
+			// block itself.
+			if errors.Is(err, errFreeTierIPBlocked) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, freeTierBlockedMessage, "free_tier_ip_blocked", ids.Request)
+				return
+			}
+			// The anonymous lane's circuit breaker is open. Report the pause
+			// distinctly so the operator does not look for a credential or a
+			// model problem in the upstream error.
+			if errors.Is(err, errAnonymousLanePaused) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, anonymousLanePausedMessage, "free_tier_lane_paused", ids.Request)
 				return
 			}
 			wire.WriteError(w, external, http.StatusBadGateway, "all upstream attempts failed", "upstream_error", ids.Request)

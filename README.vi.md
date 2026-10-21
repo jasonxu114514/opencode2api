@@ -38,7 +38,7 @@ go build -o opencode2api ./cmd/opencode2api
 Trước khi khởi động, hãy sửa `config.json`:
 
 1. Thay `server_keys` bằng API key cục bộ của bạn.
-2. Cung cấp key Zen hoặc Go. Nếu không, đặt `anonymous: true` và để cả hai mảng key upstream rỗng.
+2. Tùy chọn: thêm key Zen hoặc Go; ví dụ đã bật làn ẩn danh và để trống cả hai mảng key thượng nguồn.
 3. Thay `webui.password`. File mẫu bật WebUI với tài khoản `admin`.
 
 ```bash
@@ -215,11 +215,13 @@ Khi `anonymous: true`, chỉ cần một trong hai điều kiện sau là mô h�
 
 Trình tự định tuyến là:
 
-1. Với mô hình đủ điều kiện, thử lần lượt mỗi proxy ẩn danh khả dụng.
+1. Với mô hình đủ điều kiện, thử tối đa `performance.max_anonymous_exits` proxy ẩn danh khả dụng, mỗi proxy một lần; mỗi proxy thử làn v2 `/inference` trước, rồi làn v1 `/zen`.
 2. Thử các tier có xác thực theo thứ tự `prefer`, chỉ dùng những tier có key được cấu hình và có route cho mô hình đó.
 3. Áp dụng `retry.max_attempts` riêng cho từng tier có xác thực.
 
-Các lần thử ẩn danh không bị `retry.max_attempts` cắt ngắn, nhưng mọi lần thử đều dùng chung timeout của request. Lỗi mạng, xác thực thất bại, giới hạn tần suất và lỗi máy chủ có thể làm luân chuyển key. Các phản hồi 4xx khác kết thúc tier hiện tại; một tier khác còn khả dụng vẫn có thể được thử.
+Các lần thử ẩn danh không bị `retry.max_attempts` cắt ngắn, nhưng mọi lần thử đều dùng chung timeout của request. Lỗi mạng, xác thực thất bại, giới hạn tần suất và lỗi máy chủ có thể làm luân chuyển exit. Request-level `400`/`413`/`422` (ví dụ `context_length_exceeded`) kết thúc request ngay: đổi exit hay tier không thể thay đổi bản thân request. Abuse `403` ở mức IP chỉ loại bỏ exit hiện tại; khi mọi exit đều bị chặn, gateway ngừng quét và key Go đã cấu hình vẫn có thể phục vụ.
+
+Khi bật `models.anonymous_backoff`, `threshold` lần lỗi ẩn danh liên tiếp hoặc việc mọi exit bị chặn IP sẽ tạm dừng toàn bộ làn ẩn danh trong `base_hours`, tăng gấp đôi sau mỗi lần kích hoạt cho tới `max_hours`. Một `403` không phải lạm dụng hoặc `429` đơn lẻ không mở cầu dao mà chỉ tính vào ngưỡng. Trong thời gian tạm dừng, không rút proxy và không gửi request thượng nguồn (kể cả làm mới catalog và probe), định tuyến chuyển thẳng sang tier có xác thực. Khi hết cửa sổ, chỉ một request thắng probe bán mở: thành công sẽ đóng cầu dao và khôi phục làn ẩn danh, thất bại sẽ mở cửa sổ dài hơn tiếp theo. Bỏ khối cấu hình này thì cầu dao tắt.
 
 Request được mã hoá theo giao thức riêng của từng tier. Khi bật `performance.first_event_timeout_seconds`, một phản hồi SSE thành công sẽ được giữ lại cho tới sự kiện dữ liệu hoàn chỉnh đầu tiên. Timeout hoặc mất kết nối trước sự kiện đó sẽ dùng ngân sách retry key/proxy hiện có; comment không tính là thoát timeout. Sau khi được giải phóng xuống phía dưới, luồng không bao giờ được phát lại. Mặc định là `0` (tắt); hãy thử `15` giây cho các upstream nhận request nhưng không gửi sự kiện nào. Giới hạn này áp dụng cho sự kiện đầu tiên, không phải token văn bản đầu tiên, và không áp dụng cho System One. Bí danh luân chuyển dùng timeout riêng `rotation.first_output_seconds`. Một tham chiếu reasoning Responses bị lỗi thời đã nhận diện có thể kích hoạt một lượt sửa; chẩn đoán chọn key cụ thể không bao giờ dùng lượt phát lại đó.
 
@@ -272,6 +274,7 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 | `models.refresh_seconds`   | `300`; tối thiểu 1.                                              |
 | `models.protocols`         | `{}`; ghi đè giao thức gốc theo từng mô hình.                   |
 | `models.free_only`         | `false`; chỉ công khai và định tuyến mô hình miễn phí, kể cả khi có key Zen hoặc Go. |
+| `models.anonymous_backoff` | Tắt khi vắng mặt; `{threshold, base_hours, max_hours}`, mặc định 6, 1, 24. |
 | `reasoning.effort`         | Rỗng (tắt); `minimal`, `low`, `medium`, `high`, `xhigh`, `max` hoặc `none`. |
 | `reasoning.effort_by_model`| `{}`; ghi đè `reasoning.effort` theo từng mô hình.              |
 
@@ -324,7 +327,7 @@ Mục `#pool` được xử lý khác hoàn toàn so với proxy tĩnh:
 | Tái sử dụng kết nối   | Keep-alive và ghép kênh HTTP/2 (tham số `performance.*`)       | Một tunnel TCP + CONNECT mới cho mỗi request (`DisableKeepAlives`, không HTTP/2) |
 | Cooldown khi lỗi      | 15s–120s lùi theo cấp số nhân, cộng thêm `Retry-After`         | Không: request kế tiếp lấy luôn exit IP mới                              |
 | Loại bỏ theo sức khoẻ | Đánh dấu không khoẻ, chuyển key, kiểm tra lại mỗi 15 phút      | Không bao giờ bị loại bỏ; bỏ qua hoàn toàn health check                 |
-| Số lần thử kênh ẩn danh | Tối đa một lần cho mỗi proxy đã cấu hình                     | Tối đa `retry.max_attempts` lần, quay vòng mục pool                      |
+| Số lần thử kênh ẩn danh | Một lần ghé mỗi exit, tối đa `performance.max_anonymous_exits` exit | Tối đa `retry.max_attempts` lần, quay vòng mục pool                      |
 
 Dùng khi bản thân endpoint sau URL đã tự luân chuyển, còn từng exit IP trong pool bị giới hạn riêng hoặc chập chờn: gateway sẽ coi mỗi lần thử là một endpoint mới thay vì ghim cả phiên vào một exit. Chỉ cần một mục `#pool` là đủ, không cần liệt kê hàng chục exit. Các mục tĩnh vẫn giữ hành vi pooling mô tả bên dưới.
 
@@ -335,6 +338,8 @@ Dùng khi bản thân endpoint sau URL đã tự luân chuyển, còn từng exi
 | `retry.max_attempts`                     | `3`      | Số lần thử cho mỗi tier có xác thực, kể cả lần đầu.        |
 | `retry.timeout_seconds`                  | `300`    | Timeout suy luận tổng, gồm cả thời gian đọc luồng.          |
 | `performance.attempt_timeout_seconds`    | `0`      | Giới hạn cho một lần thử; 0 dùng timeout của request.      |
+| `performance.max_anonymous_exits`        | `8`      | Số exit proxy tĩnh tối đa cho mỗi request ẩn danh.          |
+| `performance.free_tier_block_seconds`    | `900`    | Thời gian cooldown cho exit bị tầng miễn phí đánh dấu.      |
 | `performance.connect_timeout_seconds`    | `5`      | Timeout thiết lập kết nối.                                  |
 | `performance.failure_cooldown_seconds`   | `15`     | Cooldown lỗi cơ sở.                                          |
 | `performance.max_idle_conns`             | `2048`   | Giới hạn kết nối rảnh cho mỗi transport proxy.              |

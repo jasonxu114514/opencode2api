@@ -1,9 +1,9 @@
 {
   "listen": "127.0.0.1:8080",
   "server_keys": ["change-this-local-key"],
-  "zen_keys": ["sk-your-zen-key"],
+  "zen_keys": [],
   "go_keys": [],
-  "anonymous": false,
+  "anonymous": true,
   "proxies": ["direct"],
   "proxyfile": "",
   "upstream": {
@@ -28,7 +28,9 @@
     "connect_timeout_seconds": 5,
     "failure_cooldown_seconds": 15,
     "attempt_timeout_seconds": 0,
-    "first_event_timeout_seconds": 0
+    "first_event_timeout_seconds": 0,
+    "max_anonymous_exits": 8,
+    "free_tier_block_seconds": 900
   },
   "logging": {
     "level": "info",
