@@ -37,6 +37,7 @@ type Server struct {
 	lastInference *DebugInferenceResult
 	quotaMu       sync.Mutex
 	quotaCache    map[string]quotaCacheEntry
+	proxyChecks   chan struct{}
 }
 
 // New returns a Server for manager, reporting to monitor and logs.
@@ -44,6 +45,7 @@ func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *t
 	return &Server{
 		manager: manager, monitor: monitor, logs: logs, logger: logger, sessions: make(map[string]adminSession),
 		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow),
+		proxyChecks: make(chan struct{}, 8),
 	}
 }
 
@@ -61,6 +63,7 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/config", a.authenticate(a.csrf(http.HandlerFunc(a.handlePutConfig))))
 	mux.Handle("POST /api/config/reload", a.authenticate(a.csrf(http.HandlerFunc(a.handleReload))))
 	mux.Handle("POST /api/config/reveal", a.authenticate(a.csrf(http.HandlerFunc(a.handleReveal))))
+	mux.Handle("POST /api/proxies/check", a.authenticate(a.csrf(http.HandlerFunc(a.handleCheckProxy))))
 	mux.Handle("PUT /api/account", a.authenticate(a.csrf(http.HandlerFunc(a.handleAccount))))
 	mux.Handle("GET /api/monitor", a.authenticate(http.HandlerFunc(a.handleMonitor)))
 	mux.Handle("GET /api/debug/models", a.authenticate(http.HandlerFunc(a.handleDebugModels)))

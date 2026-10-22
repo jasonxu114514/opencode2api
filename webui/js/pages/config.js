@@ -4,6 +4,7 @@ import { loadConfig, loadDebugModels } from "../data.js";
 import * as store from "../store.js";
 import { t, onChange } from "../i18n.js";
 import { $, $$, bindTabs, el, openDialog, toast } from "../ui.js";
+import { fillProxies, initProxies, proxyInputs, resetProxies } from "./proxies.js";
 
 function renderChips(name) {
   const host = $(`#${name}-chips`);
@@ -75,7 +76,8 @@ function fillConfig(value) {
   $("#c-level").value = value.logging.level;
   $("#c-ring").value = value.logging.ring_size;
   $("#c-dump-bodies").checked = !!value.logging.dump_request_bodies;
-  ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(renderChips);
+  ["server_keys", "zen_keys", "go_keys"].forEach(renderChips);
+  fillProxies(value.proxies || []);
   renderRestartNotice(value);
 }
 
@@ -90,7 +92,7 @@ async function save(event) {
       zen_keys: secretInputs("zen_keys"),
       go_keys: secretInputs("go_keys"),
       anonymous: $("#c-anonymous").checked,
-      proxies: secretInputs("proxies"),
+      proxies: proxyInputs(),
       proxyfile: $("#c-proxyfile").value,
       prefer: $("#c-prefer").value,
       upstream: { zen: $("#c-up-zen").value, go: $("#c-up-go").value },
@@ -127,6 +129,7 @@ async function save(event) {
       },
     };
     const result = await api("/api/config", { method: "PUT", body: JSON.stringify(update) });
+    $("#proxies-new").value = "";
     store.set("config", result.config);
     ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(
       (name) => ($(`#${name}-new`).value = ""),
@@ -203,9 +206,11 @@ export default {
   id: "config",
   title: "配置中心",
   sub: "验证后原子保存，并热应用可变字段。",
+  reset: resetProxies,
   init() {
     store.on("config", fillConfig);
     bindTabs($("#page-config"));
+    initProxies();
     $("#config-form").addEventListener("submit", save);
     $("#reload-config").addEventListener("click", reload);
     $("#reveal").addEventListener("click", reveal);
