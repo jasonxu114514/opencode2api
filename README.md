@@ -320,6 +320,27 @@ direct
 
 Comment markers are `#`, `;`, and `//` at the start of a line or after whitespace.
 
+#### Pruning a proxy file
+
+A proxy file assembled from public lists accumulates entries that have stopped
+working. The gateway marks those unhealthy at runtime, but the file keeps them,
+so every start pays their connect timeouts again before reaching a working
+entry. `cmd/poolclean` is the offline counterpart:
+
+```sh
+go run ./cmd/poolclean -config config.json            # report only
+go run ./cmd/poolclean -config config.json -write     # rewrite without the dead entries
+```
+
+It probes every entry and removes only the ones whose route failed, using the
+same rule the gateway applies (`isProxyFailure` in `internal/gateway`): any HTTP
+response, including `403` and `429`, keeps the entry, because it proves the
+proxy reached opencode.ai and was merely rate limited. `direct` and `#pool`
+entries are never removed. A candidate must fail every round and then also fail
+when re-tested on its own before it is dropped, so a proxy that is merely busy
+survives. Comments and every other line are preserved, and the file is replaced
+atomically.
+
 #### Rotating proxy pools
 
 Suffix an entry with `#pool` (or prefix it with `pool+`) to declare that the endpoint is a rotating proxy pool such as [Resin](https://github.com/Resinat/Resin), where every new TCP connection exits from a different IP:
