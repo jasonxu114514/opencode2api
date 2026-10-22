@@ -1372,7 +1372,12 @@ func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol
 	if protocol == wire.Anthropic && !models.IsV1Upstream(baseURL) {
 		endpoint = withAnthropicBeta(endpoint)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	// The request carries the stream-phase context when one is configured, so
+	// the connection that carries a long thinking turn survives past the
+	// request-level budget. The attempt phase keeps its own bounds
+	// (attempt_timeout_seconds, ResponseHeaderTimeout, connect timeout), so
+	// a wedged upstream cannot hold the connection open.
+	req, err := http.NewRequestWithContext(streamContextFor(ctx), http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

@@ -89,6 +89,23 @@ type UpstreamConfig struct {
 type RetryConfig struct {
 	MaxAttempts    int `json:"max_attempts"`
 	TimeoutSeconds int `json:"timeout_seconds"`
+	// StreamTimeoutSeconds bounds the STREAM phase only: the time an
+	// established upstream stream may keep producing after the headers
+	// arrived. It exists because a long thinking turn (xhigh/max reasoning,
+	// large context) legitimately runs for many minutes, and the request-level
+	// budget used to cover the whole downstream stream. When that budget
+	// expired mid-generation the upstream connection was torn down and the
+	// client saw a truncated stream with no explanation — the request looked
+	// like a context-limit error because "context deadline exceeded" contains
+	// the word "context".
+	//
+	// The request-level budget still bounds the attempt phase (dial, write,
+	// headers, first event), so a wedged upstream cannot hold a connection
+	// open. This budget only applies once the stream is already flowing.
+	//
+	// 0 keeps the historical behavior: the request-level timeout also bounds
+	// the stream.
+	StreamTimeoutSeconds int `json:"stream_timeout_seconds,omitempty"`
 }
 
 // ModelsConfig controls model discovery and routing. RefreshSeconds is the

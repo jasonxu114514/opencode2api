@@ -52,6 +52,27 @@ func attemptDeadline(cfg config.Config) time.Duration {
 	return cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second)
 }
 
+// streamContextKey carries the context that bounds an established upstream
+// stream, as opposed to the request-level context that bounds the attempt
+// phase. It travels in the request context so the upstream HTTP request (and
+// therefore the connection that carries the stream) outlives the request
+// budget when the operator configured a separate stream budget.
+type streamContextKey struct{}
+
+// withStreamContext attaches the stream-phase context to ctx.
+func withStreamContext(ctx, streamCtx context.Context) context.Context {
+	return context.WithValue(ctx, streamContextKey{}, streamCtx)
+}
+
+// streamContextFor returns the stream-phase context carried by ctx, or ctx
+// itself when no separate stream budget is configured.
+func streamContextFor(ctx context.Context) context.Context {
+	if streamCtx, ok := ctx.Value(streamContextKey{}).(context.Context); ok && streamCtx != nil {
+		return streamCtx
+	}
+	return ctx
+}
+
 // statusClientClosedRequest is nginx's 499: the client went away before the
 // gateway could answer, so the failure is neither upstream nor ours.
 const statusClientClosedRequest = 499
@@ -306,6 +327,35 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 		defer cancel()
+		// The attempt phase is bounded by requestCtx (dial, write, headers,
+		// first event). Once an upstream stream is established it needs its own
+		// budget: a long thinking turn (xhigh/max reasoning, large context)
+		// legitimately runs for many minutes, and sharing the request budget
+		// with the stream killed those turns mid-generation. The client saw a
+		// truncated stream and read the Go error text "context deadline
+		// exceeded" as a context-limit failure.
+		//
+		// The stream context is derived from the CLIENT context, not from
+		// requestCtx: a client disconnect must still tear the stream down
+		// immediately, and only the deadline changes. The upstream HTTP
+		// request is built with it, so the connection survives past the
+		// request budget; the attempt phase keeps its own bounds
+		// (attempt_timeout_seconds, ResponseHeaderTimeout, connect timeout).
+		streamCtx, streamCancel := context.WithCancelCause(r.Context())
+		if budget := time.Duration(g.cfg.Retry.StreamTimeoutSeconds) * time.Second; budget > 0 {
+			timer := time.AfterFunc(budget, func() { streamCancel(context.DeadlineExceeded) })
+			defer timer.Stop()
+		}
+		// Without a stream budget the request-level budget must still bound
+		// the stream. The request context is what the upstream request is
+		// built from in that case, so the request deadline tears the stream
+		// down on its own.
+		if g.cfg.Retry.StreamTimeoutSeconds <= 0 {
+			streamCtx = requestCtx
+			streamCancel = func(error) {}
+		}
+		defer streamCancel(nil)
+		requestCtx = withStreamContext(requestCtx, streamCtx)
 		resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
 		if err != nil {
 			// The error branch never forwards the last response body, so close
