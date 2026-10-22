@@ -44,6 +44,14 @@ import (
 // defaultTarget is the endpoint every probe requests. It answers 200 quickly
 // and needs no credentials, so a probe result reflects the proxy rather than
 // the upstream's opinion of the caller.
+//
+// Note what this target can and cannot see. It answers 200 even to an exit
+// whose IP the free tier has already blocked, so a blocked-but-reachable proxy
+// stays in the file. That is intended: this tool removes entries that cannot
+// carry traffic at all, and an IP block is a property of the exit on the
+// upstream side, not evidence that the proxy is broken. Point --target at
+// /zen/v1/chat/completions if a stricter answer is wanted, at the cost of
+// treating every 403 from a shared exit as a reason to delete it.
 const defaultTarget = "https://opencode.ai/zen/v1/models"
 
 // verdict values. Only dead entries are ever removed.
@@ -60,9 +68,17 @@ type result struct {
 	latency time.Duration
 }
 
+// errDroppedTooMany reports that the write was refused because the confirmed
+// dead share crossed --max-drop-ratio. It is a verdict about the pool, not a
+// crash, so it exits 2 instead of 1 and a wrapper can tell them apart.
+var errDroppedTooMany = errors.New("drop exceeds --max-drop-ratio")
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "poolclean: %v\n", err)
+		if errors.Is(err, errDroppedTooMany) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }
@@ -77,6 +93,9 @@ func run() error {
 	confirm := flag.Int("confirm", 2, "re-tests a candidate on its own; any pass keeps it")
 	write := flag.Bool("write", false, "rewrite the proxy file without the dead entries")
 	dryRun := flag.Bool("dry-run", false, "report only; the default unless --write is given")
+	maxDrop := flag.Float64("max-drop-ratio", 0.5,
+		"refuse to rewrite when the confirmed-dead share exceeds this ratio; 0 disables the guard")
+	force := flag.Bool("force", false, "rewrite even when the drop exceeds --max-drop-ratio")
 	flag.Parse()
 
 	path := *file
@@ -108,11 +127,23 @@ func run() error {
 
 	fmt.Printf("%s: %d entries, probing %s\n", path, len(entries), *target)
 	results := probeRounds(entries, *target, *workers, *timeout, *rounds)
-	report(results)
+	counts := report(results)
+	// One machine-readable line closes every run, so a wrapper script can gate
+	// on the shape of the pool instead of scraping the human output above.
+	summary := func(confirmed int) {
+		ratio := 0.0
+		if len(entries) > 0 {
+			ratio = float64(confirmed) / float64(len(entries))
+		}
+		fmt.Printf("summary: entries=%d ok=%d dead=%d skipped=%d confirmed=%d ratio=%.0f%% remaining=%d\n",
+			len(entries), counts[verdictOK], counts[verdictDead], counts[verdictSkipped],
+			confirmed, ratio*100, len(entries)-confirmed)
+	}
 
 	candidates := deadEntries(results)
 	if len(candidates) == 0 {
 		fmt.Println("no entry failed every round; nothing to remove")
+		summary(0)
 		return nil
 	}
 
@@ -125,6 +156,7 @@ func run() error {
 	}
 	if len(drop) == 0 {
 		fmt.Printf("%d candidate(s) all passed the confirmation pass; keeping them\n", len(candidates))
+		summary(0)
 		return nil
 	}
 
@@ -138,14 +170,28 @@ func run() error {
 		fmt.Printf("  %s\n", config.RedactURL(entry))
 	}
 
+	ratio := 0.0
+	if len(entries) > 0 {
+		ratio = float64(len(names)) / float64(len(entries))
+	}
+	remaining := len(entries) - len(names)
+	summary(len(names))
+
 	if !*write || *dryRun {
 		fmt.Println("dry run: rerun with --write to remove them")
 		return nil
 	}
+	// A run that suddenly calls most of the pool dead is far more likely to be
+	// a network or upstream problem than a genuine mass failure, and writing it
+	// would be unrecoverable without a backup. Refuse instead of obeying.
+	if *maxDrop > 0 && ratio > *maxDrop && !*force {
+		return fmt.Errorf("%w: %d of %d entries (%.0f%%) are confirmed dead, above the %.0f%% limit; the probe environment is the likelier cause, rerun with --force only if the pool really is down",
+			errDroppedTooMany, len(names), len(entries), ratio*100, *maxDrop*100)
+	}
 	if err := rewrite(path, drop); err != nil {
 		return err
 	}
-	fmt.Printf("rewrote %s: %d entries\n", path, len(entries)-len(names))
+	fmt.Printf("rewrote %s: %d entries\n", path, remaining)
 	return nil
 }
 
@@ -359,7 +405,7 @@ func deadEntries(results []result) []string {
 	return dead
 }
 
-func report(results []result) {
+func report(results []result) map[string]int {
 	counts := map[string]int{}
 	for _, r := range results {
 		counts[r.verdict]++
@@ -370,4 +416,5 @@ func report(results []result) {
 			fmt.Printf("  dead  %-46s %s\n", config.RedactURL(r.entry), r.detail)
 		}
 	}
+	return counts
 }
