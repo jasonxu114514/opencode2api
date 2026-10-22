@@ -484,6 +484,12 @@ func (cfg *Config) PasswordForSave() {
 func Clone(cfg Config) Config {
 	cfg.Rotation.SOTA.Order = append([]string(nil), cfg.Rotation.SOTA.Order...)
 	cfg.Rotation.Sweet.Order = append([]string(nil), cfg.Rotation.Sweet.Order...)
+	custom := make([]RotationGroup, len(cfg.Rotation.Custom))
+	for i, group := range cfg.Rotation.Custom {
+		group.Order = append([]string(nil), group.Order...)
+		custom[i] = group
+	}
+	cfg.Rotation.Custom = custom
 	cfg.ServerKeys = append([]string(nil), cfg.ServerKeys...)
 	metadata := make(map[string]ServerKeyMetadata, len(cfg.ServerKeyMetadata))
 	for id, item := range cfg.ServerKeyMetadata {

@@ -694,9 +694,9 @@
             <section class="section">
               <div class="section-head">
                 <div>
-                  <h2 class="section-title" data-i18n="rotation.title">SOTA / 甜点模型轮转</h2>
+                  <h2 class="section-title" data-i18n="rotation.title">模型轮转</h2>
                   <p class="section-caption" data-i18n="rotation.caption">
-                    成功后继续使用当前模型；额度不足或错误时按顺序切换，仅使用 OpenCode Go。
+                    内置 SOTA / 甜点分组，并可自定义任意分组；成员可来自 OpenCode Go 或 Zen。成功后继续使用当前模型，额度不足或错误时按顺序切换。
                   </p>
                 </div>
                 <button id="rotation-refresh" class="btn btn-sm" data-i18n="rotation.refresh">刷新状态</button>
@@ -708,7 +708,30 @@
               <p id="rotation-status" class="section-caption" role="status"></p>
             </section>
             <form id="rotation-form" class="stack">
-              <div id="rotation-groups"></div>
+              <div class="rotation-layout">
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="rotation.list.title">分组列表</h2>
+                      <p class="section-caption" data-i18n="rotation.list.caption">
+                        选择分组查看详情，或新建自定义轮转。
+                      </p>
+                    </div>
+                  </div>
+                  <div id="rotation-list" class="rotation-list"></div>
+                  <div class="actions">
+                    <button
+                      id="rotation-add"
+                      type="button"
+                      class="btn btn-sm btn-ghost"
+                      data-i18n="rotation.newGroup"
+                    >
+                      新增自定义分组
+                    </button>
+                  </div>
+                </section>
+                <div id="rotation-detail"></div>
+              </div>
               <section class="section">
                 <div class="field">
                   <label for="rotation-timeout" data-i18n="rotation.timeout">首个有效输出等待上限（秒）</label>
@@ -716,7 +739,7 @@
                 </div>
                 <div class="actions">
                   <button id="rotation-save" class="btn btn-sm btn-primary" data-i18n="rotation.save">
-                    保存别名与顺序
+                    保存分组配置
                   </button>
                 </div>
                 <p class="section-caption" data-i18n="rotation.saveNote">

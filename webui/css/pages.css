@@ -301,7 +301,61 @@
   margin-left: auto;
 }
 
-.rotation-group .field {
+.rotation-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: var(--sp-4);
+  margin-top: var(--sp-4);
+}
+
+.rotation-layout .section {
+  margin-top: 0;
+}
+
+.rotation-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.rotation-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  border: 1px solid var(--border-1);
+  background: var(--surface);
+  color: var(--text-1);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+
+.rotation-item.active {
+  border-color: var(--text-1);
+  box-shadow: inset 3px 0 0 var(--text-1);
+}
+
+.rotation-item-name {
+  font-weight: 700;
+}
+
+.rotation-item-alias,
+.rotation-item-meta {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.rotation-add {
+  margin: var(--sp-3) 0;
+}
+
+@media (max-width: 980px) {
+  .rotation-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+#rotation-detail .field {
   max-width: 360px;
 }
 

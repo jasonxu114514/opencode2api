@@ -18,7 +18,7 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 - Configuration hot reload with validation before switching new requests to a replacement gateway.
 - Go subscription quota dashboard with remaining percentages, reset times, and available models.
 - Local API key creation, naming, enabling, disabling, and deletion with immediate updates.
-- Sticky `sota` / `sweet` model groups with ordering, failure fallback, streaming protection, and persisted state.
+- Sticky model-rotation groups (built-in `sota` / `sweet` plus arbitrary custom groups), drawing on both Zen and Go, with ordering, failure fallback, streaming protection, and persisted state.
 
 See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
@@ -229,7 +229,7 @@ Free models never need a Zen key: with `anonymous: true` they are served by the 
 
 The gateway probes models whose IDs contain `free` (case-insensitive), or whose metadata reports zero input/output cost without deprecation, with a short request using its native protocol. It tries the enabled anonymous lane first and then one configured Zen Key. A valid completed response on either lane keeps the model enabled; the model is disabled in discovery and routing only when every attempted lane explicitly reports that the model does not exist or has been retired. Authentication errors, rate limits, timeouts, transport errors, 5xx responses, and malformed replies are inconclusive: they do not create a new disable, and are checked again in one hour. Probe traffic does not alter production key/proxy cooldowns or request statistics. It still reaches the upstream and may consume its free allowance.
 
-System One models use a native `noul` question asking whether 1 + 1 equals 2; they are never sent chat/tool payloads. Model discovery includes `native_protocol` and `supported_endpoints`; rotation aliases are listed only when Go keys and eligible models exist. Legacy v1.3.6 disables are cleared on load and scheduled for immediate recheck because those probes used invalid session IDs.
+System One models use a native `noul` question asking whether 1 + 1 equals 2; they are never sent chat/tool payloads. Model discovery includes `native_protocol` and `supported_endpoints`; rotation aliases are listed only when a Zen or Go key and eligible models exist. Legacy v1.3.6 disables are cleared on load and scheduled for immediate recheck because those probes used invalid session IDs.
 
 The intervals are fixed: enabled models are checked every **1 hour**, models confirmed unavailable every **24 hours**. An inconclusive due recheck of a disabled model preserves its original disable reason and schedules another retry in 24 hours. A successful recheck restores the model automatically. The WebUI **Free model availability** page can restore it immediately, which puts the model under manual control: it stays enabled and is excluded from automatic probing, so later probe results cannot overwrite it. Use the per-model **manual/automatic toggle** on the same page to return it to automatic probing; the next scheduler pass then schedules a probe. Records left as `manually_enabled` by older versions migrate to manual control on load. An in-flight probe cannot undo a manual restore. Models without a usable Zen/anonymous lane, or without a supported inference protocol, are skipped.
 
@@ -248,6 +248,31 @@ A stable session hash selects the preferred key or anonymous proxy. Send an expl
 Sessions and projects the gateway derives itself are scoped to the caller's server key, so different keys never share an upstream session, preferred key, or anonymous proxy. Official OpenCode sessions (`ses_…`) sent by the client are kept as-is. Without an explicit ID, the system prompt and the first user message are used as a seed. Conversations under the same key that begin with the same system prompt and content can therefore still share affinity; give users who must stay isolated their own server keys. Changing pool membership can change the selected node.
 
 Cooldowns grow exponentially up to eight times `performance.failure_cooldown_seconds`, and a longer `Retry-After` is honored. A configured `models.anonymous_backoff` breaker is a separate lane-level guard: it pauses the whole anonymous lane for hours, while these cooldowns stay per exit and short. If every authenticated key is cooling down, routing may try the key whose cooldown ends first. Anonymous nodes still in cooldown are skipped.
+
+### Model rotation groups
+
+A rotation group is a virtual model: its alias is requested like any other model, and the gateway serves it from a sticky, ordered real model chosen each request. A group draws from **both the Zen and Go key tiers**: a model advertised on both follows `prefer`, while a model on only one tier uses that tier's key pool. The anonymous lane is not part of a rotation.
+
+Two groups are built in and any number of custom groups may be added:
+
+- `sota` — fixed membership: the five SOTA models, order adjustable.
+- `sweet` — fallback group. An empty `order` absorbs every other available Zen/Go model; a non-empty `order` narrows it.
+- `custom` — operator-defined groups, each rotating exactly the models in its `order`.
+
+```json
+{
+  "rotation": {
+    "sota": { "alias": "sota", "order": ["deepseek-v4.1-flash", "glm-5.3", "grok-4.6", "kimi-k3", "qwen3.8-max"] },
+    "sweet": { "alias": "sweet", "order": [] },
+    "custom": [
+      { "alias": "fast", "order": ["claude-haiku-5", "gemini-3.5-flash"] }
+    ],
+    "first_output_seconds": 30
+  }
+}
+```
+
+Aliases are listed in `/v1/models` whenever at least one member is routable; custom groups take priority when claiming a model. Keep the `sota` group's five fixed models, do not put SOTA models in `sweet`, and give every custom group at least one model. Aliases must be unique and must not equal a real model ID. A custom group's `order` may include models from either tier. The management API edits groups through `GET`/`PUT /api/rotation`, and the WebUI lists every group with a per-group detail view.
 
 ## Configuration reference
 
