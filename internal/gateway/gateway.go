@@ -263,7 +263,19 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			return
 		}
 		if !g.catalog.Supported(model) {
-			wire.WriteError(w, external, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
+			// A model the catalog has never heard of is a bad model NAME: 404
+			// tells a client to pick a different model. A model the catalog
+			// knows but cannot serve is a capability or routing problem, and
+			// the old 400 phrasing ("the model uses an upstream protocol that
+			// opencode2api does not expose") is accurate for it. The old code
+			// returned that 400 for BOTH, so a request for a model the
+			// upstream retired (it answers 410 Gone) looked like a gateway
+			// capability bug and clients retried forever.
+			if g.catalog.Known(model) {
+				wire.WriteError(w, external, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
+			} else {
+				wire.WriteError(w, external, http.StatusNotFound, fmt.Sprintf("model %q was not found in the upstream model catalog", model), "model_not_found", "model")
+			}
 			return
 		}
 		route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
@@ -340,7 +352,15 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			// An exhausted request budget is a timeout, not a bad gateway: the
 			// distinction matters to clients that retry on 502.
 			if errors.Is(err, context.DeadlineExceeded) {
-				wire.WriteError(w, external, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)
+				// A write-phase failure means the upstream never finished
+				// reading the request body: the payload is too large. Report
+				// it as 413 so a client that can shrink the request (a harness
+				// that strips oversized inline images) knows to shrink it
+				// instead of retrying the same oversized payload forever. A
+				// header- or first-event-phase failure is the upstream being
+				// slow, which is not the client's fault, and stays a 504.
+				status, message, code := timeoutStatus(err, requestCtx.Err() == nil)
+				wire.WriteError(w, external, status, message, code, ids.Request)
 				return
 			}
 			// Every exit this request could use is under the free tier's IP
@@ -467,7 +487,14 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !g.catalog.Supported(model) {
-		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
+		// Same split as the chat path: a model the catalog has never heard of
+		// is a bad model NAME (404), a model it knows but cannot serve is a
+		// capability or routing problem (400).
+		if g.catalog.Known(model) {
+			wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
+		} else {
+			wire.WriteError(w, wire.SystemOne, http.StatusNotFound, fmt.Sprintf("model %q was not found in the upstream model catalog", model), "model_not_found", "model")
+		}
 		return
 	}
 	route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
@@ -529,7 +556,11 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 			return
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			wire.WriteError(w, wire.SystemOne, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)
+			// Same split as the chat path: a write-phase failure means the
+			// payload is too large (413), every other phase is a slow
+			// upstream (504).
+			status, message, code := timeoutStatus(err, requestCtx.Err() == nil)
+			wire.WriteError(w, wire.SystemOne, status, message, code, ids.Request)
 			return
 		}
 		wire.WriteError(w, wire.SystemOne, http.StatusBadGateway, "all upstream attempts failed", "upstream_error", ids.Request)
