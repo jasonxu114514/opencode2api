@@ -113,6 +113,13 @@ func RuntimeManager(root context.Context, configPath string, cfg config.Config, 
 		return nil, err
 	}
 	manager.rotation = rotationManager
+	// Cost and deprecation changes arrive on the models.dev ticker, not the
+	// capability catalog. Re-evaluate dynamic rotation queries when they land.
+	manager.metadata.SetOnRefresh(func() {
+		if runtime := manager.current.Load(); runtime != nil {
+			runtime.gateway.syncRotation()
+		}
+	})
 	runtime, err := manager.build(cfg)
 	if err != nil {
 		return nil, err

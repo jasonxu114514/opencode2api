@@ -570,9 +570,13 @@ func (c *ModelCatalog) Supported(model string) bool {
 // source describes (or before the first refresh).
 func (c *ModelCatalog) MetadataForTier(model string, tier config.Tier) Metadata {
 	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.metadataForTierLocked(model, tier)
+}
+
+func (c *ModelCatalog) metadataForTierLocked(model string, tier config.Tier) Metadata {
 	md := c.modelMeta[tier][model]
 	pricing := c.pricing
-	c.mu.RUnlock()
 	if pricing == nil {
 		return md
 	}
@@ -596,6 +600,70 @@ func (c *ModelCatalog) MetadataForTier(model string, tier config.Tier) Metadata 
 		md.Cost = &Cost{Input: price.Input, Output: price.Output, CacheRead: price.CacheRead, CacheWrite: price.CacheWrite}
 	}
 	return md
+}
+
+// Facts projects every supported model into the queryable shape used by
+// dynamic rotation groups. Capability and cost fields come from the tier that
+// would actually serve the model (prefer order), so per-tier differences stay
+// consistent with routing. Routable reflects whether a credential route can be
+// built right now; it excludes the System One protocol, which is never rotated.
+func (c *ModelCatalog) Facts(hasZenKeys, hasGoKeys, hasAnonymous bool) []config.ModelFacts {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ids := c.modelIDsLocked()
+	facts := make([]config.ModelFacts, 0, len(ids))
+	for _, model := range ids {
+		if !c.supportedLocked(model) {
+			continue
+		}
+		tiers := make([]string, 0, 2)
+		if c.zen[model] {
+			tiers = append(tiers, string(config.TierZen))
+		}
+		if c.goModels[model] {
+			tiers = append(tiers, string(config.TierGo))
+		}
+		tier := c.prefer
+		if !c.advertisedLocked(model, tier) {
+			if c.advertisedLocked(model, config.TierZen) {
+				tier = config.TierZen
+			} else if c.advertisedLocked(model, config.TierGo) {
+				tier = config.TierGo
+			}
+		}
+		md := c.metadataForTierLocked(model, tier)
+		fact := config.ModelFacts{
+			ID: model, Tier: tiers, Protocol: string(c.protocolForLocked(model, tier)),
+			Free: c.anonymousDecision(model).Allowed, Deprecated: c.priceDeprecatedLocked(model), SOTA: config.IsSOTA(model),
+			Reasoning: md.Reasoning, ToolCall: md.ToolCall, StructuredOutput: md.StructuredOutput,
+			ContextWindow: md.ContextWindow, MaxInput: md.MaxInput, MaxOutput: md.MaxOutput,
+			InputModalities: md.InputModalities, OutputModalities: md.OutputModalities,
+		}
+		if md.Cost != nil {
+			fact.CostInput, fact.CostOutput, fact.CostRead, fact.CostWrite = md.Cost.Input, md.Cost.Output, md.Cost.CacheRead, md.Cost.CacheWrite
+		}
+		if route, err := c.routeLocked(model, hasZenKeys, hasGoKeys, hasAnonymous); err == nil && route.Protocol != wire.SystemOne {
+			fact.Routable = true
+		}
+		facts = append(facts, fact)
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
+	return facts
+}
+
+func (c *ModelCatalog) advertisedLocked(model string, tier config.Tier) bool {
+	if tier == config.TierGo {
+		return c.goModels[model]
+	}
+	return c.zen[model]
+}
+
+func (c *ModelCatalog) priceDeprecatedLocked(model string) bool {
+	if c.pricing == nil {
+		return false
+	}
+	price, ok := c.pricing.Price(model)
+	return ok && price.Deprecated
 }
 
 func (c *ModelCatalog) supportedLocked(model string) bool {

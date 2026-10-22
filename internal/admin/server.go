@@ -69,6 +69,7 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("POST /api/models/manual", a.authenticate(a.csrf(http.HandlerFunc(a.handleManualModel))))
 	mux.Handle("GET /api/rotation", a.authenticate(http.HandlerFunc(a.handleRotation)))
 	mux.Handle("PUT /api/rotation", a.authenticate(a.csrf(http.HandlerFunc(a.handleSaveRotation))))
+	mux.Handle("POST /api/rotation/preview", a.authenticate(a.csrf(http.HandlerFunc(a.handlePreviewRotation))))
 	mux.Handle("POST /api/rotation/current", a.authenticate(a.csrf(http.HandlerFunc(a.handleSelectRotation))))
 	mux.Handle("GET /api/model-quotas", a.authenticate(http.HandlerFunc(a.handleModelQuotas)))
 	mux.Handle("GET /api/api-keys", a.authenticate(http.HandlerFunc(a.handleListAPIKeys)))
