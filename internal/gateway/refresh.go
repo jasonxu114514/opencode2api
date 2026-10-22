@@ -298,29 +298,75 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 // refreshTier lists the models at base with up to retry.max_attempts keys
 // from nodes, updating proxy health and key cooldowns after every attempt. It
 // returns nil when the pool has no keys or every attempt fails.
+//
+// A model is servable when ANY configured key can serve it, and the upstream
+// per-key listings are not equal: a free-tier account sees a smaller catalog
+// than a paid one. Measured on a live deployment: four of six keys listed 85
+// models, two listed 44, and the 44-model set was a strict subset of the
+// 85-model one (the difference was exactly the 41 paid-tier models).
+//
+// Querying a single key and adopting its list made the catalog oscillate
+// between the two sizes on every refresh, and every model missing from the
+// adopted list became a client-visible 400 ("the model uses an upstream
+// protocol that opencode2api does not expose") even though another key could
+// have served it.
+//
+// So the tier listing is the UNION over the configured keys. A key that fails
+// contributes nothing; a tier with no working key returns nil, which leaves
+// the previous catalog in place.
+//
+// A model is servable when ANY configured key can serve it, and the upstream
+// per-key listings are not equal: a free-tier account sees a smaller catalog
+// than a paid one. Measured on a live deployment: four of six keys listed 85
+// models, two listed 44, and the 44-model set was a strict subset of the
+// 85-model one (the difference was exactly the 41 paid-tier models).
+//
+// Querying a single key and adopting its list made the catalog oscillate
+// between the two sizes on every refresh, and every model missing from the
+// adopted list became a client-visible 400 ("the model uses an upstream
+// protocol that opencode2api does not expose") even though another key could
+// have served it.
+//
+// So the tier listing is the UNION over the configured keys. A key that fails
+// contributes nothing; a tier with no working key returns nil, which leaves
+// the previous catalog in place.
 func (g *Gateway) refreshTier(ctx context.Context, base string, nodes *upstreamNodes) []string {
 	cursor := nodes.Cursor()
+	seen := map[string]bool{}
+	var ordered []string
+	working := 0
 	for attempt := 0; attempt < g.cfg.Retry.MaxAttempts; attempt++ {
 		node := cursor.Next()
 		if node == nil {
-			return nil
+			break
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		proxy := nodes.Proxy(node)
 		if proxy == nil {
 			cancel()
-			return nil
+			break
 		}
 		models, status, err := modelcatalog.FetchModels(refreshCtx, proxy.client, base, node.key)
 		g.syncProxyResult(refreshCtx, proxy, status, err)
 		cancel()
-		if err == nil {
-			nodes.MarkSuccess(node)
-			return models
+		if err != nil {
+			nodes.MarkFailure(node, nil, err)
+			g.logger.Debug("model catalog refresh attempt failed", "component", "models", "event", "refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt+1, "error", err)
+			continue
 		}
-		nodes.MarkFailure(node, nil, err)
-		g.logger.Debug("model catalog refresh attempt failed", "component", "models", "event", "refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt+1, "error", err)
+		nodes.MarkSuccess(node)
+		working++
+		for _, model := range models {
+			if !seen[model] {
+				seen[model] = true
+				ordered = append(ordered, model)
+			}
+		}
 	}
-	g.logger.Warn("model catalog refresh failed", "component", "models", "event", "refresh_failed", "upstream", config.RedactURL(base))
-	return nil
+	if working == 0 {
+		g.logger.Warn("model catalog refresh failed", "component", "models", "event", "refresh_failed", "upstream", config.RedactURL(base))
+		return nil
+	}
+	g.logger.Debug("model catalog tier listing merged", "component", "models", "event", "refresh_merged", "upstream", config.RedactURL(base), "keys_answered", working, "models", len(ordered))
+	return ordered
 }
