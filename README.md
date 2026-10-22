@@ -440,7 +440,8 @@ Token statistics use reported usage only. Input tokens include cache reads and w
 
 | Data                                                      | Storage / retention                                                                          |
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Sessions, metrics, token totals, latest Playground result | Process memory; cleared on restart.                                                          |
+| Sessions, metrics, latest Playground result               | Process memory; cleared on restart.                                                          |
+| Per-server-key lifetime usage                             | `usage.json` next to the config: loaded on start, rewritten every 5 minutes and on shutdown. The last-hour window is not persisted. |
 | Request and attempt details                               | Recent hour, capped at 10,000 requests and 20,000 attempts; API returns at most 500 of each. |
 | Live log ring                                             | Process memory; size set by `logging.ring_size`.                                             |
 | Structured logs                                           | JSON on stdout; collect externally for durable history.                                      |
