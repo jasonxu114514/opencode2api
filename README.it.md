@@ -283,7 +283,7 @@ Consulta [config.example.json](config.example.json) per una configurazione inizi
 }
 ```
 
-Un livello specificato esplicitamente dal client ha sempre la precedenza. L'impostazione sostituisce solo un livello non richiesto: assente oppure derivato da `thinking.budget_tokens`. Usa `"none"` per rimuovere il ragionamento dalle richieste che non lo richiedono.
+Le disattivazioni esplicite del client restano attive durante la conversione tra protocolli: `thinking.type="disabled"` nativo di Anthropic e l'effort `"none"` di Chat/Responses non possono essere riattivati da un valore predefinito configurato.
 
 I livelli vengono riportati fedelmente in entrambe le direzioni. Un `output_config.effort` esplicito sopravvive alla conversione e non viene sovrascritto da un blocco `thinking`; `budget_tokens` conserva il proprio livello (`8192` corrisponde a `high`, `32000` a `xhigh`), e la destinazione Responses trasporta il livello in `reasoning.effort`.
 

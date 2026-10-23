@@ -291,7 +291,7 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 }
 ```
 
-Bậc do client nêu tường minh luôn thắng, nên thiết lập này chỉ thay thế một bậc mà không ai yêu cầu: bậc bị thiếu, hoặc bậc suy ra từ `thinking.budget_tokens`. Dùng `"none"` để loại bỏ reasoning khỏi các request không yêu cầu nó.
+Việc tắt reasoning do client chỉ định luôn được ưu tiên. `thinking.type="disabled"` nguyên bản của Anthropic và effort `"none"` của Chat/Responses vẫn được giữ ở trạng thái tắt sau khi chuyển đổi giao thức, không thể bị bật lại bởi giá trị mặc định đã cấu hình.
 
 Các bậc được báo trung thực theo cả hai chiều. Một `output_config.effort` tường minh sống sót qua chuyển đổi thay vì bị khối `thinking` che khuất, `budget_tokens` giữ đúng bậc của nó (`8192` là `high`, `32000` là `xhigh`, nên hai mức vẫn phân biệt được), và phía Responses mang bậc này dưới dạng `reasoning.effort` thay vì bỏ mất.
 
