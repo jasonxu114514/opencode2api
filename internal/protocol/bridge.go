@@ -243,22 +243,23 @@ func responsesTextFormat(format any) any {
 // output_config.effort threw the explicit effort away and reported the budget
 // bucket instead, so a client asking for "max" was served as "high".
 //
-// Without a stated level, an object of type "disabled" yields nil, one of type
-// "enabled"/"adaptive" the effortForThinkingBudget rung of its budget_tokens,
-// and any other object its "type" value as the level (nil when it has none). A
-// non-object value passes through unchanged, except that the strings "none"
-// and "disabled" yield nil.
+// Explicitly disabled reasoning remains distinct from an unset value so later
+// defaults cannot turn it back on.
 func reasoningEffort(value any) any {
 	if object, ok := value.(map[string]any); ok {
+		if jsonutil.StringAt(object, "type") == "disabled" {
+			return "none"
+		}
 		if effort, ok := explicitEffort(object); ok {
 			return effort
 		}
 		switch jsonutil.StringAt(object, "type") {
-		case "disabled":
-			return nil
 		case "enabled", "adaptive":
 			return effortForThinkingBudget(jsonutil.IntAt(object, "budget_tokens"))
 		default:
+			if effort, ok := normalizeEffortValue(object["type"]); ok {
+				return effort
+			}
 			return object["type"]
 		}
 	}
@@ -266,6 +267,12 @@ func reasoningEffort(value any) any {
 		return effort
 	}
 	return value
+}
+
+// reasoningDisabled reports whether a reasoning value explicitly disables it.
+func reasoningDisabled(value any) bool {
+	effort, ok := reasoningEffort(value).(string)
+	return ok && effort == "none"
 }
 
 // explicitEffort reports the effort a client stated verbatim in a reasoning
@@ -302,9 +309,7 @@ func normalizeEffortValue(value any) (any, bool) {
 	}
 	switch strings.ToLower(strings.TrimSpace(text)) {
 	case "none", "disabled":
-		// Explicitly no reasoning: clear any inferred level instead of
-		// resurrecting one from a budget.
-		return nil, true
+		return "none", true
 	case "":
 		return nil, false
 	}
@@ -329,6 +334,9 @@ func normalizeEffortValue(value any) (any, bool) {
 func anthropicThinking(value any) (any, map[string]any) {
 	if value == nil {
 		return nil, nil
+	}
+	if reasoningDisabled(value) {
+		return map[string]any{"type": "disabled"}, nil
 	}
 	budget := 0
 	if object, ok := value.(map[string]any); ok {

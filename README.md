@@ -292,9 +292,9 @@ surfaces, so a forced level reaches a rung that the budget alone cannot express.
 }
 ```
 
-A level a client states explicitly always wins, so this only replaces a level
-nobody asked for: an absent one, or one derived from `thinking.budget_tokens`.
-Use `"none"` to remove reasoning from requests that do not ask for it.
+Explicit client disables remain disabled across protocol conversion: Anthropic
+`thinking.type="disabled"` and Chat/Responses effort `"none"` cannot be re-enabled
+by a configured default.
 
 Levels are reported faithfully in both directions. An explicit
 `output_config.effort` survives conversion instead of being shadowed by a

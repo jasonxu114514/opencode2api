@@ -290,9 +290,8 @@ Responses 近似表达，而强制指定的强度可以到达单独靠预算表�
 }
 ```
 
-客户端显式指定的强度始终优先，因此它只替换无人指定的强度：完全未设置，
-或由 `thinking.budget_tokens` 推断出来的强度。设为 `"none"` 可为未请求思考的
-请求移除思考配置。
+客户端显式关闭始终优先。Anthropic 原生 `thinking.type="disabled"` 和 Chat/Responses 的 effort
+`"none"` 都会在协议转换后保持关闭，不会被配置的默认强度重新开启。
 
 两个方向的强度都会如实保留：显式的 `output_config.effort` 不会再被 `thinking`
 块遮蔽，`budget_tokens` 保持其档位（`8192` 为 `high`，`32000` 为 `xhigh`，
