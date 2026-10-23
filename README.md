@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
 
 A Go gateway for **OpenCode Zen and Zen Go**. It exposes Chat Completions, Responses, and Anthropic Messages endpoints, translates between their native protocols, and manages upstream keys and proxies.
 
@@ -292,9 +292,9 @@ surfaces, so a forced level reaches a rung that the budget alone cannot express.
 }
 ```
 
-A level a client states explicitly always wins, so this only replaces a level
-nobody asked for: an absent one, or one derived from `thinking.budget_tokens`.
-Use `"none"` to remove reasoning from requests that do not ask for it.
+Explicit client disables remain disabled across protocol conversion: Anthropic
+`thinking.type="disabled"` and Chat/Responses effort `"none"` cannot be re-enabled
+by a configured default.
 
 Levels are reported faithfully in both directions. An explicit
 `output_config.effort` survives conversion instead of being shadowed by a
@@ -415,14 +415,14 @@ After execution, the management endpoint returns HTTP 200 with the actual result
 
 ### Interface language
 
-The WebUI loads its translations from `webui/js/i18n.js`. It ships with **简体中文** (default), **English**, and **Tiếng Việt**. The original Simplified Chinese copy lives in `index.html` and `webui/js/` and stays the fallback for every string without a translation, so adding a language never rewrites the original.
+The WebUI loads its translations from `webui/js/i18n.js`. It ships with **简体中文** (default), **English**, **Tiếng Việt**, and **Italiano**. The original Simplified Chinese copy lives in `index.html` and `webui/js/` and stays the fallback for every string without a translation, so adding a language never rewrites the original.
 
 - The selector sits in the topbar, and on the login card.
 - The choice is stored in `localStorage` under `opencode2api.ui.lang`.
 - Switching re-renders both static text (`data-i18n`, `data-i18n-attr`) and JavaScript-generated text without reloading the page.
 - Dates and times follow the selected locale as well.
 
-To add a language, add one block to `DICTIONARY` in `webui/js/i18n.js`, then register its code in `SUPPORTED`, `LABELS`, and `DATE_LOCALES`.
+To add a language, add one block to `DICTIONARY` in `webui/js/i18n.js`, then register its code in `SUPPORTED`, `LABELS`, `FLAGS`, and `DATE_LOCALES`, and add it to the `browserLocale` detection chain.
 
 ### Saving and reloading
 
@@ -507,7 +507,7 @@ Node.js is only needed for the WebUI JavaScript syntax check:
 for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
 ```
 
-`.editorconfig`, `.gitattributes`, and Go formatting standardize the source. CI runs `go vet` and builds with Go 1.24 and stable Go on Linux/Windows, plus Go formatting, WebUI syntax, and entrypoint shell syntax checks. Release archives include all three READMEs.
+`.editorconfig`, `.gitattributes`, and Go formatting standardize the source. CI runs `go vet` and builds with Go 1.24 and stable Go on Linux/Windows, plus Go formatting, WebUI syntax, and entrypoint shell syntax checks. Release archives include all four READMEs.
 
 ## Troubleshooting
 

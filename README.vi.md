@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
 
 Một gateway viết bằng Go cho **OpenCode Zen và Zen Go**. Nó cung cấp các endpoint Chat Completions, Responses và Anthropic Messages, chuyển đổi qua lại giữa các giao thức gốc của chúng, và quản lý upstream key cùng proxy.
 
@@ -20,7 +20,7 @@ File thực thi đã bao gồm WebUI. Việc chạy dịch vụ không cần Nod
 - Tạo, đặt tên, bật, tắt và xoá API key cục bộ, có hiệu lực tức thì.
 - Nhóm mô hình `sota` / `sweet` bám dính, có thứ tự, chuyển khi lỗi, bảo vệ luồng và trạng thái được lưu.
 
-Giao diện quản trị hỗ trợ **简体中文** (mặc định), **English** và **Tiếng Việt**; lựa chọn được lưu trong trình duyệt và không làm thay đổi bản gốc.
+Giao diện quản trị hỗ trợ **简体中文** (mặc định), **English**, **Tiếng Việt** và **Italiano**; lựa chọn được lưu trong trình duyệt và không làm thay đổi bản gốc.
 
 Xem [hướng dẫn bảng điều khiển quản trị (tiếng Trung)](docs/management.zh-CN.md) để biết các trang mới và tuỳ chọn cấu hình.
 
@@ -291,7 +291,7 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 }
 ```
 
-Bậc do client nêu tường minh luôn thắng, nên thiết lập này chỉ thay thế một bậc mà không ai yêu cầu: bậc bị thiếu, hoặc bậc suy ra từ `thinking.budget_tokens`. Dùng `"none"` để loại bỏ reasoning khỏi các request không yêu cầu nó.
+Việc tắt reasoning do client chỉ định luôn được ưu tiên. `thinking.type="disabled"` nguyên bản của Anthropic và effort `"none"` của Chat/Responses vẫn được giữ ở trạng thái tắt sau khi chuyển đổi giao thức, không thể bị bật lại bởi giá trị mặc định đã cấu hình.
 
 Các bậc được báo trung thực theo cả hai chiều. Một `output_config.effort` tường minh sống sót qua chuyển đổi thay vì bị khối `thinking` che khuất, `budget_tokens` giữ đúng bậc của nó (`8192` là `high`, `32000` là `xhigh`, nên hai mức vẫn phân biệt được), và phía Responses mang bậc này dưới dạng `reasoning.effort` thay vì bỏ mất.
 
@@ -405,14 +405,14 @@ Sau khi thực thi, endpoint quản trị trả HTTP 200 với kết quả thự
 
 ### Ngôn ngữ giao diện
 
-WebUI tải bản dịch từ `webui/js/i18n.js`. Bản dịch có sẵn gồm **简体中文** (mặc định), **English** và **Tiếng Việt**. Ngôn ngữ gốc **简体中文** nằm ngay trong `index.html` và `webui/js/`, và luôn được dùng làm dự phòng cho mọi chuỗi không có bản dịch — vì vậy việc thêm ngôn ngữ không làm thay đổi bản gốc.
+WebUI tải bản dịch từ `webui/js/i18n.js`. Bản dịch có sẵn gồm **简体中文** (mặc định), **English**, **Tiếng Việt** và **Italiano**. Ngôn ngữ gốc **简体中文** nằm ngay trong `index.html` và `webui/js/`, và luôn được dùng làm dự phòng cho mọi chuỗi không có bản dịch — vì vậy việc thêm ngôn ngữ không làm thay đổi bản gốc.
 
 - Bộ chọn ngôn ngữ nằm ở góc phải thanh công cụ (và trên thẻ đăng nhập).
 - Lựa chọn được lưu trong `localStorage` với khoá `opencode2api.ui.lang`.
 - Đổi ngôn ngữ sẽ dịch lại cả văn bản tĩnh (`data-i18n`, `data-i18n-attr`) lẫn văn bản do JavaScript tạo ra, mà không cần tải lại trang.
 - Định dạng ngày giờ cũng theo ngôn ngữ đang chọn.
 
-Thêm một ngôn ngữ mới chỉ cần thêm một khối vào `DICTIONARY` trong `webui/js/i18n.js`, rồi khai báo mã trong `SUPPORTED`, `LABELS` và `DATE_LOCALES`.
+Thêm một ngôn ngữ mới chỉ cần thêm một khối vào `DICTIONARY` trong `webui/js/i18n.js`, rồi khai báo mã trong `SUPPORTED`, `LABELS`, `FLAGS` và `DATE_LOCALES`, và thêm vào chuỗi phát hiện `browserLocale`.
 
 ### Lưu và nạp lại
 
@@ -497,7 +497,7 @@ Node.js chỉ cần cho bước kiểm tra cú pháp JavaScript của WebUI:
 for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
 ```
 
-`.editorconfig`, `.gitattributes` và định dạng Go chuẩn hoá mã nguồn. CI chạy `go vet` và build với Go 1.24 và Go ở bản ổn định trên Linux/Windows, đồng thời kiểm tra định dạng Go, cú pháp WebUI và cú pháp shell của entrypoint. Gói phát hành gồm cả ba README.
+`.editorconfig`, `.gitattributes` và định dạng Go chuẩn hoá mã nguồn. CI chạy `go vet` và build với Go 1.24 và Go ở bản ổn định trên Linux/Windows, đồng thời kiểm tra định dạng Go, cú pháp WebUI và cú pháp shell của entrypoint. Gói phát hành gồm cả bốn README.
 
 ## Khắc phục sự cố
 

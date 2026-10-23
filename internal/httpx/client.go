@@ -4,7 +4,7 @@ package httpx
 // the v2 lanes (/inference and /zen/go). Upstream accepts a range of releases
 // (the version number itself is not validated), so this only needs bumping
 // when it starts rejecting older ones.
-const v2ClientVersion = "2.0.32"
+const v2ClientVersion = "2.1.1"
 
 // v1ClientVersion is the OpenCode 1.x release the gateway claims to be on the
 // v1 lane (/zen), and v1BunVersion is the Bun runtime that release ships with.

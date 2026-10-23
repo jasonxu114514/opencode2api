@@ -128,7 +128,7 @@ jobs:
         run: |
           mkdir -p "dist/$PACKAGE_NAME"
           go build -trimpath -ldflags="-s -w -X main.version=$RELEASE_TAG" -o "dist/$PACKAGE_NAME/opencode2api$EXTENSION" ./cmd/opencode2api
-          cp README.md README.zh-CN.md LICENSE config.example.json "dist/$PACKAGE_NAME/"
+          cp README.md README.zh-CN.md README.vi.md README.it.md LICENSE config.example.json "dist/$PACKAGE_NAME/"
           cp -r docs "dist/$PACKAGE_NAME/"
           if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
             (cd dist && zip -q -r "$PACKAGE_NAME.zip" "$PACKAGE_NAME")

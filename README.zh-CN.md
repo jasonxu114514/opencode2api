@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
 
 使用 Go 编写的 **OpenCode Zen / Zen Go API 网关**。对外提供 Chat Completions、Responses 和 Anthropic Messages 接口，按上游原生协议转换请求，并统一管理上游 Key 与代理。
 
@@ -290,9 +290,8 @@ Responses 近似表达，而强制指定的强度可以到达单独靠预算表�
 }
 ```
 
-客户端显式指定的强度始终优先，因此它只替换无人指定的强度：完全未设置，
-或由 `thinking.budget_tokens` 推断出来的强度。设为 `"none"` 可为未请求思考的
-请求移除思考配置。
+客户端显式关闭始终优先。Anthropic 原生 `thinking.type="disabled"` 和 Chat/Responses 的 effort
+`"none"` 都会在协议转换后保持关闭，不会被配置的默认强度重新开启。
 
 两个方向的强度都会如实保留：显式的 `output_config.effort` 不会再被 `thinking`
 块遮蔽，`budget_tokens` 保持其档位（`8192` 为 `high`，`32000` 为 `xhigh`，
@@ -410,14 +409,14 @@ Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP �
 
 ### 界面语言
 
-WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English** 和 **Tiếng Việt**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。
+WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English**、**Tiếng Việt** 和 **Italiano**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。
 
 - 语言选择器位于顶部工具栏右侧，登录卡片上也有一个。
 - 选择结果保存在 `localStorage`，键名为 `opencode2api.ui.lang`。
 - 切换语言会同时重绘静态文案（`data-i18n`、`data-i18n-attr`）和 JavaScript 生成的文案，无需刷新页面。
 - 日期时间格式跟随所选语言。
 
-新增语言时，在 `webui/js/i18n.js` 的 `DICTIONARY` 中增加一个语言块，并在 `SUPPORTED`、`LABELS` 和 `DATE_LOCALES` 中登记其代码。
+新增语言时，在 `webui/js/i18n.js` 的 `DICTIONARY` 中增加一个语言块，并在 `SUPPORTED`、`LABELS`、`FLAGS` 和 `DATE_LOCALES` 中登记其代码，同时加入 `browserLocale` 检测链。
 
 ### 保存与重载
 
@@ -502,7 +501,7 @@ Node.js 仅用于 WebUI 的 JavaScript 语法检查：
 for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
 ```
 
-项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含中英越三份 README。
+项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含四份 README。
 
 ## 常见问题
 

@@ -612,7 +612,7 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
 			wire.ForcedEffort(protocol, upstreamPayload, effort)
 		}
-		encoded, err := json.Marshal(upstreamPayload)
+		encoded, err := jsonutil.Marshal(upstreamPayload)
 		if err != nil {
 			return nil, errors.New("request contains unsupported JSON values")
 		}

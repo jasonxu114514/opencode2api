@@ -532,8 +532,18 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	}
 	var head strings.Builder
 	head.WriteString(method + " " + req.URL.RequestURI() + " HTTP/1.1\r\n")
+	// fetch computes Content-Length itself when it has a body, so it appears in
+	// the common-header block instead of trailing the request. Header order is
+	// part of what a fingerprint sees, so it belongs where the runtime puts it.
+	wroteLength := false
 	for _, name := range bunCommonHeaders {
 		lower := strings.ToLower(name)
+		if lower == "content-length" && body != nil {
+			head.WriteString(name + ": " + strconv.Itoa(len(body)) + "\r\n")
+			delete(values, lower)
+			wroteLength = true
+			continue
+		}
 		if value, ok := values[lower]; ok {
 			head.WriteString(name + ": " + value + "\r\n")
 			delete(values, lower)
@@ -563,7 +573,7 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	if !hasEncoding {
 		head.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
 	}
-	if body != nil {
+	if body != nil && !wroteLength {
 		head.WriteString("Content-Length: " + strconv.Itoa(len(body)) + "\r\n")
 	}
 	head.WriteString("\r\n")

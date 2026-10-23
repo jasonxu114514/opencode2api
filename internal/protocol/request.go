@@ -48,6 +48,9 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 	if body == nil {
 		return
 	}
+	if requestDisablesReasoning(protocol, body) {
+		return
+	}
 	effort = strings.ToLower(strings.TrimSpace(effort))
 	if !validForcedEffort(effort) {
 		return
@@ -82,6 +85,24 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 			body["reasoning"] = reasoning
 		}
 		reasoning["effort"] = effort
+	}
+}
+
+func requestDisablesReasoning(protocol Protocol, body map[string]any) bool {
+	switch protocol {
+	case Chat:
+		return reasoningDisabled(body["reasoning_effort"]) ||
+			reasoningDisabled(body["reasoning"]) ||
+			reasoningDisabled(body["thinking"])
+	case Responses:
+		return reasoningDisabled(jsonutil.AnyAt(body, "reasoning", "effort")) ||
+			reasoningDisabled(body["reasoning_effort"])
+	case Anthropic:
+		return reasoningDisabled(body["thinking"]) ||
+			reasoningDisabled(jsonutil.AnyAt(body, "output_config", "effort")) ||
+			reasoningDisabled(body["effort"])
+	default:
+		return false
 	}
 }
 
@@ -355,12 +376,13 @@ func anthropicContentHasType(content []any, kind string) bool {
 // "none"/"disabled" decodes as no reasoning at all, even next to a thinking
 // block.
 func anthropicReasoning(input map[string]any) any {
+	if reasoningDisabled(input["thinking"]) {
+		return "none"
+	}
 	stated := jsonutil.FirstAny(jsonutil.AnyAt(input, "output_config", "effort"), input["effort"])
 	if effort, ok := normalizeEffortValue(stated); ok {
-		// The explicit effort survives next to the thinking block's budget so
-		// nothing the client said is lost on the way to the bridge.
-		if effort == nil {
-			return nil
+		if effort == "none" {
+			return "none"
 		}
 		if thinking, ok := input["thinking"].(map[string]any); ok {
 			merged := make(map[string]any, len(thinking)+1)
@@ -396,6 +418,9 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		request.MaxTokens = jsonutil.FirstAny(input["max_completion_tokens"], input["max_tokens"])
 		request.Stop = input["stop"]
 		request.Reasoning = jsonutil.FirstAny(input["reasoning_effort"], input["reasoning"])
+		if reasoningDisabled(input["thinking"]) {
+			request.Reasoning = "none"
+		}
 		for i, raw := range jsonutil.SliceAt(input, "messages") {
 			message, ok := raw.(map[string]any)
 			if !ok {
@@ -612,6 +637,9 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	default:
 		return request, fmt.Errorf("unsupported input protocol %q", protocol)
 	}
+	if reasoningDisabled(request.Reasoning) {
+		request.Reasoning = "none"
+	}
 	for i := range request.Messages {
 		for j := range request.Messages[i].Blocks {
 			block := &request.Messages[i].Blocks[j]
@@ -722,7 +750,11 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	jsonutil.Put(output, "max_tokens", request.MaxTokens)
 	jsonutil.Put(output, "stop", request.Stop)
 	if effort := reasoningEffort(request.Reasoning); effort != nil {
-		output["reasoning_effort"] = effort
+		if effort == "none" {
+			output["reasoning_effort"] = "none"
+		} else {
+			output["reasoning_effort"] = effort
+		}
 	}
 	jsonutil.Put(output, "response_format", chatResponseFormat(request.ResponseFormat))
 	jsonutil.Put(output, "parallel_tool_calls", request.ParallelToolCalls)
@@ -961,8 +993,8 @@ func missingToolIDs(order []string, pending map[string]bool) []string {
 // level is forwarded unchanged, and a bare "none"/"disabled" string yields nil.
 func responsesReasoning(value any) any {
 	if object, ok := value.(map[string]any); ok {
-		if jsonutil.StringAt(object, "type") == "disabled" {
-			return nil
+		if reasoningDisabled(object) {
+			return map[string]any{"effort": "none"}
 		}
 		// The object is reduced to the level reasoningEffort reads from it:
 		// an "effort" or "reasoning_effort" the client stated, else the rung

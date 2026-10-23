@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -200,7 +201,7 @@ func stripStaleReasoningInputs(route models.Route, bodies map[config.Tier][]byte
 			out[tier] = body
 			continue
 		}
-		encoded, err := json.Marshal(payload)
+		encoded, err := jsonutil.Marshal(payload)
 		if err != nil {
 			out[tier] = body
 			continue
@@ -688,10 +689,13 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte,
 			changed = true
 		}
 	}
+	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload) {
+		changed = true
+	}
 	if !changed {
 		return body, alias
 	}
-	encoded, err := json.Marshal(payload)
+	encoded, err := encodeAnonymousBody(payload, protocol, v1)
 	if err != nil {
 		// The alias is dropped with the failed re-encode: the body never left
 		// the gateway, so there is nothing downstream to restore.
@@ -758,6 +762,94 @@ func messageText(content any) string {
 	default:
 		return ""
 	}
+}
+
+// v2CompletionLimit is the max_completion_tokens a 2.x client puts on every
+// chat body, so the free tier always sees the same ceiling.
+const v2CompletionLimit = 32000
+
+// ensureV2CompletionLimit adds the client's own max_completion_tokens when the
+// caller did not ask for a ceiling. A caller-supplied max_tokens or
+// max_completion_tokens wins, so an explicit limit is still honoured. It
+// reports whether the payload changed.
+func ensureV2CompletionLimit(payload map[string]any) bool {
+	if _, ok := payload["max_completion_tokens"]; ok {
+		return false
+	}
+	if _, ok := payload["max_tokens"]; ok {
+		return false
+	}
+	payload["max_completion_tokens"] = v2CompletionLimit
+	return true
+}
+
+// v2ChatKeyOrder is the order the 2.x client's JSON.stringify emits the keys of
+// a chat body in. Go serialises a map alphabetically, which puts
+// max_completion_tokens first where a real client starts with model; the bytes
+// parse the same either way, but the gateway exists to be indistinguishable, so
+// the skeleton is written in the client's order.
+var v2ChatKeyOrder = []string{"model", "messages", "tools", "stream", "stream_options", "max_completion_tokens"}
+
+// marshalV2ChatBody encodes a chat payload with v2ChatKeyOrder first and any
+// remaining keys sorted after it. Values still go through encoding/json, so
+// only the key order differs from a plain marshal.
+func marshalV2ChatBody(payload map[string]any) ([]byte, error) {
+	var buffer bytes.Buffer
+	buffer.WriteByte('{')
+	written := make(map[string]bool, len(payload))
+	first := true
+	write := func(key string) error {
+		value, ok := payload[key]
+		if !ok {
+			return nil
+		}
+		keyJSON, err := jsonutil.Marshal(key)
+		if err != nil {
+			return err
+		}
+		valueJSON, err := jsonutil.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if !first {
+			buffer.WriteByte(',')
+		}
+		first = false
+		buffer.Write(keyJSON)
+		buffer.WriteByte(':')
+		buffer.Write(valueJSON)
+		written[key] = true
+		return nil
+	}
+	for _, key := range v2ChatKeyOrder {
+		if err := write(key); err != nil {
+			return nil, err
+		}
+	}
+	rest := make([]string, 0, len(payload))
+	for key := range payload {
+		if !written[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		if err := write(key); err != nil {
+			return nil, err
+		}
+	}
+	buffer.WriteByte('}')
+	return buffer.Bytes(), nil
+}
+
+// encodeAnonymousBody renders a shaped anonymous payload in the byte layout the
+// lane's client produces: 2.x chat bodies keep the client's key order, every
+// other lane keeps plain encoding/json.
+func encodeAnonymousBody(payload map[string]any, protocol wire.Protocol, v1 bool) ([]byte, error) {
+	if !v1 && protocol == wire.Chat {
+		return marshalV2ChatBody(payload)
+	}
+	return jsonutil.Marshal(payload)
 }
 
 // ensureAnonymousChatUsage keeps token usage available when a non-streaming
@@ -1017,6 +1109,17 @@ func anonymousToolName(protocol wire.Protocol, item any) string {
 	return jsonutil.StringAt(entry, "name")
 }
 
+// v2ShellDescription renders the shell tool description for the host platform.
+// The 2.x client describes the shell it actually has, so a Windows host says
+// powershell where a Unix host says bash. The captured definition ships the
+// Unix wording, which would advertise a shell a Windows gateway does not have.
+func v2ShellDescription(base string) string {
+	if runtime.GOOS != "windows" {
+		return base
+	}
+	return strings.Replace(base, "on Linux using bash", "on Windows using powershell", 1)
+}
+
 // v2Toolset returns the wire-shaped genuine CLI 2.x definitions for the given
 // tool names on a v2 gate. A nil names selects every v2CoreTools entry.
 func v2Toolset(protocol wire.Protocol, names []string) []any {
@@ -1046,6 +1149,9 @@ func v2Tool(protocol wire.Protocol, name string) map[string]any {
 			parameters = definition.Parameters
 		}
 	}
+	if name == "shell" {
+		description = v2ShellDescription(description)
+	}
 	switch protocol {
 	case wire.Chat:
 		return map[string]any{
@@ -1054,6 +1160,10 @@ func v2Tool(protocol wire.Protocol, name string) map[string]any {
 				"name":        name,
 				"description": description,
 				"parameters":  parameters,
+				// The 2.x client marks every tool strict:false, so a tool that
+				// omits the field is byte-different from the client's on every
+				// request that carries tools.
+				"strict": false,
 			},
 		}
 	case wire.Anthropic:
@@ -1438,6 +1548,9 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 // lane passes anonymousZenKey.
 func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
+	if !models.IsV1Upstream(baseURL) {
+		endpoint = strings.TrimRight(baseURL, "/") + v2EndpointPath(baseURL, protocol)
+	}
 	if protocol == wire.Anthropic && !models.IsV1Upstream(baseURL) {
 		endpoint = withAnthropicBeta(endpoint)
 	}
@@ -1461,6 +1574,24 @@ func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return req, nil
+}
+
+// v2EndpointPath returns the route a 2.1 client posts to on a v2 origin. The
+// 2.1 client groups /inference routes by provider family, so the family
+// segment sits between the origin and the protocol path (a 2.0.32 client
+// posted the protocol path directly, and that route still answers). Origins
+// that are not the /inference gateway — a custom base, or /zen/go — keep the
+// flat route, because the family grouping is specific to /inference.
+func v2EndpointPath(baseURL string, protocol wire.Protocol) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/inference") {
+		return wire.Path(protocol)
+	}
+	family := "openai"
+	if protocol == wire.Anthropic {
+		family = "anthropic"
+	}
+	return "/" + family + wire.Path(protocol)
 }
 
 // withAnthropicBeta marks an Anthropic endpoint as beta the way the OpenCode
@@ -1521,7 +1652,6 @@ func setV1Headers(header http.Header, protocol wire.Protocol, body []byte, ids i
 // requests carry a fixed anthropic-beta set; upstreamRequest adds
 // anthropic-version and the beta query.
 func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.RequestIDs) {
-	header.Set("Accept", "application/json, text/event-stream")
 	header.Set("x-opencode-client", "cli")
 	rootSession := ids.Session
 	if ids.ParentSession != "" {

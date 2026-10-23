@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/css/pages.css" />
   </head>
   <body>
-    <a class="skip-link" href="#main">跳到主要内容</a>
+    <a class="skip-link" href="#main" data-i18n="a11y.skip">跳到主要内容</a>
 
     <section id="login" class="login-view">
       <form id="login-form" class="login-card">
@@ -490,8 +490,8 @@
             <section class="section">
               <div class="section-head">
                 <div>
-                  <h2 class="section-title">为调用方创建 API Key</h2>
-                  <p class="section-caption">
+                  <h2 class="section-title" data-i18n="apikeys.create.title">为调用方创建 API Key</h2>
+                  <p class="section-caption" data-i18n="apikeys.create.caption">
                     用于访问本机 Gateway。每个应用可使用独立密钥；创建、启停和删除立即生效。
                   </p>
                 </div>
@@ -499,7 +499,7 @@
               <form id="api-key-form">
                 <div class="form-grid">
                   <div class="field">
-                    <label for="api-key-name">名称</label>
+                    <label for="api-key-name" data-i18n="apikeys.create.name">名称</label>
                     <input
                       id="api-key-name"
                       placeholder="例如：我的笔记助手"
