@@ -228,6 +228,35 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 免费模型不需要 Zen Key：启用 `anonymous: true` 后由匿名通道提供，已配置的 Key 只作为回退。如果想保留 Key 但只暴露免费模型，设置 `models.free_only: true`：付费模型不再出现在 `/v1/models`，直接请求会被拒绝，轮转别名只保留免费成员；免费模型仍可回退到已配置的 Key。
 
+### 模型命名
+
+两个互相独立的选项控制客户端看到的模型名。
+
+`models.strip_free_suffix` 把以 `-free` 结尾的 id 去掉后缀对外提供，并且两种写法都能用。它不需要维护：上游以后新增的模型会在下次刷新时自动改名。
+
+```json
+{ "models": { "strip_free_suffix": true } }
+```
+
+`deepseek-v4.1-flash-free` 因此显示为 `deepseek-v4.1-flash`，两种名称都可请求。
+
+`models.aliases` 手工指定名称：键是客户端看到的名称，值是实际提供服务的上游 id。
+
+```json
+{
+  "models": {
+    "strip_free_suffix": true,
+    "aliases": { "beam-pro": "beam-free" }
+  }
+}
+```
+
+手动别名优先于自动名称，因此两者可以组合：全局打开去后缀，再对个别模型覆盖成需要的名字。
+
+改名只改名字：`/v1/models` 用公开名列出，能力与上限仍取自真实模型；请求按上游 id 路由；chat、responses 和 Anthropic 响应（流式与非流式）都回显公开名。上游 id 在任何情况下仍然可用，因此加改名不会让已有客户端失效。
+
+如果去掉后缀后的名称与另一个可服务模型重名，该模型保留上游 id，因此 `x` 和 `x-free` 仍然作为两个模型对外提供。不要通过改能力目录或计价元数据来改名：两者都以上游 id 为键，改掉会连带破坏免费档的请求整形。
+
 ### 免费模型 WARP 出口
 
 启用 `warp.enabled` 后，免费通道上的所有免费模型请求——匿名通道、通过 Zen Key 的免费模型回退、免费模型可用性探测，以及匿名模型目录刷新——都改走用户态 Cloudflare WARP 隧道，不再使用任何代理，因此上游看到的是 WARP 出口地址，而不是配置的节点。Go 套餐 Key 与付费模型仍使用原有代理绑定。
@@ -299,6 +328,8 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
 | `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
 | `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
+| `models.strip_free_suffix`  | `false`；把 `-free` 模型去掉后缀对外提供，两种名称都可用。                            |
+| `models.aliases`            | `{}`；用固定名称对外提供模型（公开名 → 上游 id）。                                    |
 | `models.anonymous_backoff`  | 缺省关闭；`{threshold, base_hours, max_hours}`，默认 6、1、24。                       |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |

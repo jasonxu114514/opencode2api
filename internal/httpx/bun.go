@@ -39,6 +39,10 @@ type BunOptions struct {
 	IdleConnTimeout       time.Duration
 	MaxIdleConnsPerHost   int
 	DisableKeepAlives     bool
+	// NoteExit receives the exit address a rotating proxy reports per tunnel
+	// (X-V6-Exit on the CONNECT response), so a caller can attribute an
+	// upstream verdict to the address that carried it. Nil ignores the label.
+	NoteExit func(string)
 }
 
 // BunTransport is an http.RoundTripper that puts requests on the wire the way
@@ -63,9 +67,48 @@ type BunTransport struct {
 	idleTimeout           time.Duration
 	maxIdlePerHost        int
 	keepAlive             bool
+	// noteExit, when set, receives the exit address a rotating proxy reports
+	// for a fresh tunnel (X-V6-Exit on the CONNECT response). It is called
+	// synchronously during dial, before the request is written.
+	noteExit func(string)
 
 	mu   sync.Mutex
 	idle map[string][]*bunConn
+}
+
+// SetNoteExit sets the callback that receives the exit address a rotating
+// proxy reports per tunnel. It exists so the owner of the transport can be
+// wired after construction.
+func (t *BunTransport) SetNoteExit(note func(string)) {
+	t.noteExit = note
+}
+
+// exitNoteKey marks a per-request capture cell for the exit address a
+// rotating proxy reports while dialing this request's tunnel.
+type exitNoteKey struct{}
+
+// ExitNote returns a fresh exit-address cell and a context carrying it. A
+// transport wired with SetNoteExit stores the address of each tunnel it dials
+// for that request; the caller reads it back after the response arrives, so
+// concurrent requests over one shared pool transport never attribute an
+// upstream verdict to another request's exit.
+func ExitNote() (*string, context.Context) {
+	cell := new(string)
+	return cell, context.WithValue(context.Background(), exitNoteKey{}, cell)
+}
+
+// noteExitFrom delivers the labeled exit address to the cell in ctx, if any,
+// and also to the transport-level callback.
+func (t *BunTransport) noteExitFrom(ctx context.Context, addr string) {
+	if addr == "" {
+		return
+	}
+	if cell, ok := ctx.Value(exitNoteKey{}).(*string); ok && cell != nil {
+		*cell = addr
+	}
+	if t.noteExit != nil {
+		t.noteExit(addr)
+	}
 }
 
 // NewBunTransport builds a BunTransport from options. A MaxIdleConnsPerHost
@@ -90,6 +133,7 @@ func NewBunTransport(options BunOptions) (*BunTransport, error) {
 		idleTimeout:           options.IdleConnTimeout,
 		maxIdlePerHost:        maxIdle,
 		keepAlive:             !options.DisableKeepAlives,
+		noteExit:              options.NoteExit,
 		idle:                  map[string][]*bunConn{},
 	}, nil
 }

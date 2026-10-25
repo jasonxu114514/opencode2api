@@ -245,12 +245,18 @@ func RenameStreamReader(reader io.Reader, protocol Protocol, renames *ToolRename
 	}
 }
 
+// frameRewriter rewrites one SSE data frame. Returning the input unchanged
+// makes the reader emit the original line bytes untouched.
+type frameRewriter interface {
+	rewriteFrame(raw string) []byte
+}
+
 // renameStreamReader is the io.Reader RenameStreamReader returns: it reads the
 // upstream stream line by line, rewrites the data lines that need it, and
 // serves the rewritten bytes, carrying an error over to the next Read.
 type renameStreamReader struct {
 	buffer  *bufio.Reader
-	renamer *streamToolRenamer
+	renamer frameRewriter
 	pending []byte
 	err     error
 }
@@ -597,4 +603,43 @@ func readSSE(reader io.Reader, handler func(eventName, data string) error) error
 		return errSSEUnexpectedEOF
 	}
 	return nil
+}
+
+// RenameStreamModel wraps an SSE stream reader and replaces the model field of
+// every data frame with toModel, so a client that asked for an alias sees that
+// alias in the chunks instead of the upstream id. Without this the stream would
+// disagree with /v1/models even though routing used the right model.
+func RenameStreamModel(reader io.Reader, fromModel, toModel string) io.Reader {
+	if fromModel == "" || toModel == "" || fromModel == toModel {
+		return reader
+	}
+	return &renameStreamReader{
+		buffer:  bufio.NewReaderSize(reader, 64<<10),
+		renamer: &streamModelRenamer{fromModel: fromModel, toModel: toModel},
+	}
+}
+
+// streamModelRenamer rewrites only the top-level "model" of a frame. Every other
+// byte is preserved by rewriting the decoded object rather than by matching
+// substrings, which would also hit prompt text or tool arguments.
+type streamModelRenamer struct {
+	fromModel string
+	toModel   string
+}
+
+func (renamer *streamModelRenamer) rewriteFrame(raw string) []byte {
+	var frame map[string]any
+	if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+		return []byte(raw)
+	}
+	model, ok := frame["model"].(string)
+	if !ok || model != renamer.fromModel {
+		return []byte(raw)
+	}
+	frame["model"] = renamer.toModel
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		return []byte(raw)
+	}
+	return encoded
 }

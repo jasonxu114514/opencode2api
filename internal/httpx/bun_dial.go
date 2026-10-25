@@ -138,7 +138,7 @@ func (t *BunTransport) dialProxy(ctx context.Context, addr string) (net.Conn, er
 		if socks {
 			err = socks5Connect(conn, t.proxy.User, addr)
 		} else {
-			conn, err = httpConnect(conn, t.proxy.User, addr)
+			conn, err = httpConnect(conn, t.proxy.User, addr, func(addr string) { t.noteExitFrom(ctx, addr) })
 		}
 	}
 	if !stop() && err == nil {
@@ -173,8 +173,10 @@ func proxyAddr(proxy *url.URL) string {
 
 // httpConnect asks an HTTP proxy on conn for a tunnel to addr, with Basic
 // Proxy-Authorization when user is set. Bytes the proxy sent past its 2xx
-// answer are kept in front of the returned connection.
-func httpConnect(conn net.Conn, user *url.Userinfo, addr string) (net.Conn, error) {
+// answer are kept in front of the returned connection. When the proxy labels
+// the exit it chose (X-V6-Exit, as a rotating IPv6 pool does), note receives
+// that address so the caller can attribute upstream verdicts to it.
+func httpConnect(conn net.Conn, user *url.Userinfo, addr string, note func(string)) (net.Conn, error) {
 	request := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n"
 	if user != nil {
 		password, _ := user.Password()
@@ -190,6 +192,11 @@ func httpConnect(conn net.Conn, user *url.Userinfo, addr string) (net.Conn, erro
 	}
 	if resp.StatusCode/100 != 2 {
 		return conn, fmt.Errorf("proxy refused CONNECT: %s", resp.Status)
+	}
+	if note != nil {
+		if exit := resp.Header.Get("X-V6-Exit"); exit != "" {
+			note(exit)
+		}
 	}
 	if reader.Buffered() > 0 {
 		return &bufferedConn{Conn: conn, reader: reader}, nil

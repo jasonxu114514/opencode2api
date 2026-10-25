@@ -257,9 +257,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			return
 		}
 		model := jsonutil.StringAt(payload, "model")
+		// Clients address a model by its public name. The catalog, pricing and
+		// free-tier shaping are keyed by the upstream id, so resolve the name
+		// once here and keep the public spelling for the response echo.
+		publicModel := model
+		if real, public := g.resolveModel(model); real != model {
+			publicModel = public
+			model = real
+			payload["model"] = real
+		}
 		meta := telemetry.MetaFromRequest(r)
 		if meta != nil {
-			meta.Model = model
+			meta.Model = publicModel
 		}
 		if model == "" {
 			wire.WriteError(w, external, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
@@ -397,12 +406,13 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
 			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, toolRenames)
+			streamBody = wire.RenameStreamModel(streamBody, model, publicModel)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				usage, usageReported, err = wire.ForwardStream(r.Context(), w, streamBody, upstreamRoute.Protocol, model)
+				usage, usageReported, err = wire.ForwardStream(r.Context(), w, streamBody, upstreamRoute.Protocol, publicModel)
 			} else {
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, model)
+				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, publicModel)
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -428,7 +438,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			// force-streamed upstream (see prepareAnonymousBody); collapse
 			// the events back into the single document this non-streaming
 			// client asked for.
-			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
+			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, publicModel)
 			if err != nil {
 				g.logger.Warn("forced stream collapse failed", "component", "conversion", "event", "stream_collapse_failed", "request_id", ids.Request, "model", model, "anonymous", upstreamRoute.Anonymous, "source_protocol", upstreamRoute.Protocol, "error", err)
 				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
@@ -437,6 +447,9 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			responseBody = collapsed
 		}
 		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, toolRenames)
+		// A key-tier reply carries the upstream id; echo the public alias so the
+		// response matches what the client asked for and what discovery lists.
+		responseBody = wire.RenameResponseModel(responseBody, model, publicModel)
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
@@ -476,6 +489,12 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
 		return
+	}
+	// System One payloads carry state, not a model field to rewrite, so the
+	// name is resolved for routing and telemetry only.
+	if real, _ := g.resolveModel(model); real != model {
+		model = real
+		payload["model"] = real
 	}
 	if !g.catalog.Supported(model) {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")

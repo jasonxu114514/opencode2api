@@ -38,6 +38,27 @@ type proxyTransport struct {
 	healthy      atomic.Bool
 	checking     atomic.Bool
 	blockedUntil atomic.Int64
+	// lastExit is the exit address a rotating pool reported for the most
+	// recent tunnel (X-V6-Exit). It is advisory: it lets the anonymous walk
+	// tell its pool to stop using the /64 that just drew a quota verdict.
+	lastExit atomic.Value
+}
+
+// rememberExit records the exit address reported for the latest tunnel.
+func (t *proxyTransport) rememberExit(addr string) {
+	if t == nil || addr == "" {
+		return
+	}
+	t.lastExit.Store(addr)
+}
+
+// exitSnapshot returns the latest reported exit address, if any.
+func (t *proxyTransport) exitSnapshot() string {
+	if t == nil {
+		return ""
+	}
+	v, _ := t.lastExit.Load().(string)
+	return v
 }
 
 // proxyTransports holds every configured proxy route, indexed by
@@ -48,7 +69,10 @@ type proxyTransports struct {
 
 // blocked reports whether this exit is under the free tier's IP abuse block.
 func (t *proxyTransport) blocked(now time.Time) bool {
-	if t == nil {
+	if t == nil || t.pool {
+		// A #pool transport dials a different upstream exit on every attempt,
+		// so an IP-scoped block cannot be attributed to the transport itself:
+		// the next dial leaves from another address and may well succeed.
 		return false
 	}
 	return t.blockedUntil.Load() > now.UnixNano()
@@ -58,7 +82,9 @@ func (t *proxyTransport) blocked(now time.Time) bool {
 // block is a property of the egress IP, so it is never cleared by a response
 // from the same exit: only another exit can serve traffic in the meantime.
 func (t *proxyTransport) markBlocked(until time.Time) {
-	if t == nil {
+	if t == nil || t.pool {
+		// See blocked(): a rotating pool is not one exit, and parking it would
+		// take every exit down with the one address that was flagged.
 		return
 	}
 	t.blockedUntil.Store(until.UnixNano())
@@ -491,6 +517,12 @@ func transportPool(proxies []string, cfg config.PerformanceConfig, responseHeade
 			return nil, fmt.Errorf("proxy %s: %w", config.RedactURL(raw), err)
 		}
 		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, client: &http.Client{Transport: transport}, bun: &http.Client{Transport: bun}}
+		if isPool {
+			// A rotating pool labels each tunnel with the exit address it
+			// drew; remember the latest on the transport so an upstream
+			// verdict (e.g. a 429 quota) can be attributed to it.
+			bun.SetNoteExit(proxy.rememberExit)
+		}
 		proxy.healthy.Store(true)
 		p.items = append(p.items, proxy)
 	}

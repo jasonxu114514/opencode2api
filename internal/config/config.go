@@ -154,12 +154,69 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
+	// Aliases renames models for clients: key = the public name, value = the
+	// upstream model id that serves it. Discovery lists the public name and
+	// responses echo it back, while requests are routed by the real id, so an
+	// operator can present "deepseek-v4.1-flash" for
+	// "deepseek-v4.1-flash-free" without touching the catalog or pricing
+	// metadata (both keyed by the upstream id). Requests that still use the
+	// upstream id keep working.
+	Aliases map[string]string `json:"aliases,omitempty"`
+	// StripFreeSuffix publishes every model whose id ends in "-free" without
+	// that suffix, and accepts both spellings on input. Unlike Aliases it needs
+	// no maintenance: a model the upstream adds later is renamed automatically
+	// on the next refresh. A stripped name is skipped when it would collide
+	// with another routable model, so two distinct models never share a name.
+	StripFreeSuffix bool `json:"strip_free_suffix,omitempty"`
 	// AnonymousBackoff configures a circuit breaker for the keyless lane:
 	// after Threshold consecutive failed attempts, or when every exit is under
 	// the free tier's IP block, the lane pauses for BaseHours, doubling on
 	// every further trip up to MaxHours. An absent block leaves the lane
 	// unpaused, which is the previous behavior.
 	AnonymousBackoff *AnonymousBackoffConfig `json:"anonymous_backoff,omitempty"`
+}
+
+// FreeSuffix is the vendor marker removed by ModelsConfig.StripFreeSuffix.
+const FreeSuffix = "-free"
+
+// StripFreeSuffix returns the model id without its free-tier suffix. The
+// boolean reports whether the suffix was present.
+func StripFreeSuffix(model string) (string, bool) {
+	base, found := strings.CutSuffix(model, FreeSuffix)
+	if !found || base == "" {
+		return model, false
+	}
+	return base, true
+}
+
+// RealModel resolves a public alias to the upstream model id. The boolean
+// reports whether the name was an alias; an unknown name passes through
+// unchanged so unaliased models behave exactly as before.
+func (c Config) RealModel(model string) (string, bool) {
+	real, ok := c.Models.Aliases[model]
+	if !ok || real == "" || real == model {
+		return model, false
+	}
+	return real, true
+}
+
+// PublicModel resolves an upstream model id to the name clients know it by.
+// When several aliases point at one id the lexicographically first wins, so the
+// published name is stable across restarts and map iteration order.
+func (c Config) PublicModel(model string) (string, bool) {
+	best := ""
+	for public, real := range c.Models.Aliases {
+		if real != model || public == "" {
+			continue
+		}
+		if best == "" || public < best {
+			best = public
+		}
+	}
+	if best == "" {
+		return model, false
+	}
+	return best, true
 }
 
 // AnonymousBackoffConfig tunes the keyless lane's circuit breaker. Zero fields
