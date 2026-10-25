@@ -19,6 +19,7 @@ type healthResponse struct {
 	Models  healthModels  `json:"models"`
 	Keys    healthKeys    `json:"keys"`
 	Proxies healthProxies `json:"proxies"`
+	Warp    *healthWarp   `json:"warp,omitempty"`
 	Issues  []string      `json:"issues,omitempty"`
 }
 
@@ -47,15 +48,45 @@ type healthProxies struct {
 	Unhealthy int `json:"unhealthy"`
 }
 
+// healthWarp reports the state of the userspace WARP pool. It is omitted when
+// the switch is off so existing readiness consumers see the same document.
+type healthWarp struct {
+	Status  string `json:"status"`
+	Stack   string `json:"stack"`
+	Size    int    `json:"size"`
+	Active  int    `json:"active"`
+	Standby int    `json:"standby"`
+	Cooling int    `json:"cooling"`
+}
+
 // handleHealth reports readiness. It answers 503 while the model catalog is
-// pending or empty or no proxy is healthy, and 200 otherwise. Any issue,
-// including a stale catalog or no upstream credentials, marks the status
-// degraded, except that a pending catalog reports starting.
+// pending or empty, while WARP is enabled but no exit is active, or while no
+// proxy is healthy when free traffic cannot leave through WARP (WARP off, or Go
+// keys configured). Any issue, including a stale catalog or no upstream
+// credentials, marks the status degraded, except that a pending catalog reports
+// starting.
 func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, models := g.availableModels()
 	proxyTotal, proxyHealthy := g.transports.healthCounts()
 	zenKeys, goKeys := g.zenNodes.Len(), g.goNodes.Len()
 	staleAfter := max(2*time.Duration(g.cfg.Models.RefreshSeconds)*time.Second, time.Minute)
+	var warpStatus *healthWarp
+	warpActive := 0
+	if g.warp != nil {
+		snapshot := g.warp.Snapshot()
+		warpActive = snapshot.Active
+		warpStatus = &healthWarp{
+			Status:  "unavailable",
+			Stack:   snapshot.Stack,
+			Size:    snapshot.Size,
+			Active:  snapshot.Active,
+			Standby: snapshot.Standby,
+			Cooling: snapshot.Cooling,
+		}
+		if snapshot.Active > 0 {
+			warpStatus.Status = "ready"
+		}
+	}
 
 	modelStatus := "ready"
 	var lastRefresh *time.Time
@@ -77,6 +108,13 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if zenKeys+goKeys == 0 && !g.cfg.Anonymous {
 		issues = append(issues, "no_upstream_keys")
 	}
+	warpBlocking := g.warp != nil && warpActive == 0
+	if warpBlocking {
+		issues = append(issues, "warp_unavailable")
+	}
+	// Proxies carry Go-tier traffic whenever Go keys exist, and every lane
+	// while WARP is off; free-model traffic alone does not need them.
+	proxyBlocking := proxyHealthy == 0 && (g.warp == nil || goKeys > 0)
 	if proxyHealthy == 0 {
 		issues = append(issues, "no_healthy_proxies")
 	}
@@ -85,7 +123,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if len(issues) > 0 {
 		status = "degraded"
 	}
-	blocking := modelStatus == "pending" || modelStatus == "empty" || proxyHealthy == 0
+	blocking := modelStatus == "pending" || modelStatus == "empty" || warpBlocking || proxyBlocking
 	httpStatus := http.StatusOK
 	ready := !blocking
 	if blocking {
@@ -115,6 +153,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			Healthy:   proxyHealthy,
 			Unhealthy: proxyTotal - proxyHealthy,
 		},
+		Warp:   warpStatus,
 		Issues: issues,
 	})
 }

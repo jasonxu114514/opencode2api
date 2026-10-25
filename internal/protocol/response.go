@@ -503,29 +503,26 @@ func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 	return decodeOpenAIUsage(usage), true
 }
 
-// RenameResponseTool rewrites tool call names matching fromName to toName inside
-// a serialized JSON response or SSE event data object for the given protocol.
-// It is used to restore a client's original read-related tool name (e.g.
-// "reAd" or "read_file") after the v1 lane's shaper aliased it to "read" on the
-// outbound wire.
+// RenameResponseTool rewrites tool call names that carry a client alias back to
+// the name the client declared, inside a serialized JSON response or SSE event
+// data object for the given protocol. It is the counterpart of the outbound
+// clint_ renaming applied to shaped free-tier requests.
 //
 // The bytes.Contains check is only a fast path that skips the unmarshal for
-// frames that cannot contain the name; correctness does not depend on it,
-// because every name that is rewritten is compared exactly after decoding.
-// Names that do not match fromName, including ones already equal to toName,
-// are left alone.
-func RenameResponseTool(body []byte, protocol Protocol, fromName, toName string) []byte {
-	if fromName == "" || toName == "" || fromName == toName || len(body) == 0 {
+// frames that cannot contain an alias; every rewrite is an exact map lookup
+// after decoding. Names without a mapping are left alone.
+func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []byte {
+	if renames.Empty() || len(body) == 0 {
 		return body
 	}
-	if !bytes.Contains(body, []byte(fromName)) {
+	if !bytes.Contains(body, []byte(ClientToolPrefix)) {
 		return body
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
 	}
-	if !renameToolInMap(payload, protocol, fromName, toName) {
+	if !renameToolInMap(payload, protocol, renames) {
 		return body
 	}
 	encoded, err := json.Marshal(payload)
@@ -535,12 +532,33 @@ func RenameResponseTool(body []byte, protocol Protocol, fromName, toName string)
 	return encoded
 }
 
-// renameToolInMap rewrites matching tool names in a decoded response or stream
+// renameToolInMap rewrites aliased tool names in a decoded response or stream
 // event and reports whether anything changed. Every place a protocol reports a
-// tool call is visited: Chat message and delta tool_calls, Responses
-// function_call items under "item", "output" and a "response" envelope, and
-// Anthropic tool_use blocks under "content_block" or "content".
-func renameToolInMap(payload map[string]any, protocol Protocol, fromName, toName string) bool {
+// tool call is visited: Chat message, delta and legacy function_call tool
+// calls, Responses function_call and custom_tool_call items under "item",
+// "output" and a "response" envelope, and Anthropic tool_use blocks under
+// "content_block" or "content".
+func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRenames) bool {
+	rename := func(container map[string]any) bool {
+		name, ok := container["name"].(string)
+		if !ok {
+			return false
+		}
+		client, ok := renames.Client(name)
+		if !ok {
+			return false
+		}
+		container["name"] = client
+		return true
+	}
+	renameItem := func(item map[string]any) bool {
+		switch jsonutil.StringAt(item, "type") {
+		case "function_call", "custom_tool_call":
+			return rename(item)
+		default:
+			return false
+		}
+	}
 	changed := false
 	switch protocol {
 	case Chat:
@@ -550,47 +568,42 @@ func renameToolInMap(payload map[string]any, protocol Protocol, fromName, toName
 				container := jsonutil.MapAt(choice, key)
 				for _, rawCall := range jsonutil.SliceAt(container, "tool_calls") {
 					call, _ := rawCall.(map[string]any)
-					if function, ok := call["function"].(map[string]any); ok && jsonutil.StringAt(function, "name") == fromName {
-						function["name"] = toName
+					if function, ok := call["function"].(map[string]any); ok && rename(function) {
 						changed = true
 					}
+				}
+				if function, ok := container["function_call"].(map[string]any); ok && rename(function) {
+					changed = true
 				}
 			}
 		}
 	case Responses:
-		if item, ok := payload["item"].(map[string]any); ok {
-			if jsonutil.StringAt(item, "type") == "function_call" && jsonutil.StringAt(item, "name") == fromName {
-				item["name"] = toName
-				changed = true
-			}
+		if item, ok := payload["item"].(map[string]any); ok && renameItem(item) {
+			changed = true
 		}
 		for _, rawItem := range jsonutil.SliceAt(payload, "output") {
 			item, _ := rawItem.(map[string]any)
-			if jsonutil.StringAt(item, "type") == "function_call" && jsonutil.StringAt(item, "name") == fromName {
-				item["name"] = toName
+			if renameItem(item) {
 				changed = true
 			}
 		}
 		if resp, ok := payload["response"].(map[string]any); ok {
 			for _, rawItem := range jsonutil.SliceAt(resp, "output") {
 				item, _ := rawItem.(map[string]any)
-				if jsonutil.StringAt(item, "type") == "function_call" && jsonutil.StringAt(item, "name") == fromName {
-					item["name"] = toName
+				if renameItem(item) {
 					changed = true
 				}
 			}
 		}
 	case Anthropic:
 		if block, ok := payload["content_block"].(map[string]any); ok {
-			if jsonutil.StringAt(block, "type") == "tool_use" && jsonutil.StringAt(block, "name") == fromName {
-				block["name"] = toName
+			if jsonutil.StringAt(block, "type") == "tool_use" && rename(block) {
 				changed = true
 			}
 		}
 		for _, rawBlock := range jsonutil.SliceAt(payload, "content") {
 			block, _ := rawBlock.(map[string]any)
-			if jsonutil.StringAt(block, "type") == "tool_use" && jsonutil.StringAt(block, "name") == fromName {
-				block["name"] = toName
+			if jsonutil.StringAt(block, "type") == "tool_use" && rename(block) {
 				changed = true
 			}
 		}

@@ -29,8 +29,9 @@ function renderChecklist() {
     ],
     [
       t("检查 Proxy", "guide.step.proxy"),
-      t("至少一个代理节点健康。", "guide.step.proxy.desc"),
-      (resources.proxies || []).some((proxy) => proxy.healthy),
+      t("至少一个代理节点健康，或 WARP 正在承载免费流量。", "guide.step.proxy.desc"),
+      (resources.warp?.active || 0) > 0 ||
+        (resources.proxies || []).some((proxy) => proxy.healthy),
     ],
     [
       t("等待模型目录", "guide.step.models"),
@@ -77,6 +78,23 @@ function renderResources(resources) {
       ]),
     );
   });
+  const warp = resources.warp;
+  if (warp?.enabled) {
+    // WARP is not a proxy: show it beside them so the egress that carries
+    // free-model traffic is visible without pretending it is a bound node.
+    proxies.append(
+      el("tr", {}, [
+        el("td", { text: `WARP · ${warp.stack}` }),
+        el("td", {
+          class: `status ${warp.active > 0 ? "ok" : "bad"}`,
+          text: warp.active > 0 ? t("正常", "state.healthy") : t("不可用", "state.unavailable"),
+        }),
+        el("td", {
+          text: `${warp.active}/${warp.size} · ${(warp.egress || []).join(", ") || "-"}`,
+        }),
+      ]),
+    );
+  }
   if (!proxies.children.length) emptyRow(proxies, 3);
   const keys = $("#key-table");
   keys.replaceChildren();

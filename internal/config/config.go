@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"opencode2api/internal/jsonutil"
 	wire "opencode2api/internal/protocol"
+	"opencode2api/internal/warp"
 )
 
 // Config is the service configuration stored in config.json.
@@ -31,6 +33,7 @@ type Config struct {
 	ZenKeys           []string                     `json:"zen_keys"`
 	GoKeys            []string                     `json:"go_keys"`
 	Anonymous         bool                         `json:"anonymous"`
+	Warp              WarpConfig                   `json:"warp"`
 	Proxies           []string                     `json:"proxies"`
 	ProxyFile         string                       `json:"proxyfile"`
 	Upstream          UpstreamConfig               `json:"upstream"`
@@ -60,6 +63,57 @@ type ReasoningConfig struct {
 	// never set, matching how the rest of the optional surface is persisted.
 	Effort        string            `json:"effort,omitempty"`
 	EffortByModel map[string]string `json:"effort_by_model,omitempty"`
+}
+
+// WarpConfig controls the optional Cloudflare WARP egress. While enabled,
+// free-model traffic on the anonymous lane and the free Zen-key fallback is
+// sent through a userspace WireGuard tunnel instead of any configured proxy.
+// PoolSize is the number of registered WARP exits kept warm (the last one is
+// held as hot standby); Stack selects the tunnel's address family. Initialization
+// is fail-closed: a configuration that enables WARP is rejected when no exit
+// can be established.
+type WarpConfig struct {
+	Enabled  bool   `json:"enabled"`
+	PoolSize int    `json:"pool_size,omitempty"`
+	Stack    string `json:"stack,omitempty"`
+	// SourceIPv6 is an outer IPv6 prefix (usually a routed /64) each WARP exit
+	// binds its WireGuard socket to. Rotating the source is what gives a
+	// replacement exit a new public egress; without it, exits share one
+	// address and an egress-scoped free quota stays exhausted.
+	SourceIPv6 string `json:"source_ipv6,omitempty"`
+}
+
+// Normalize fills the defaults and canonicalizes the stack name.
+func (w *WarpConfig) Normalize() error {
+	if w.PoolSize == 0 {
+		w.PoolSize = 2
+	}
+	if strings.TrimSpace(w.Stack) == "" {
+		w.Stack = string(warp.DefaultStack)
+	}
+	stack, err := warp.ParseStack(w.Stack)
+	if err != nil {
+		return fmt.Errorf("warp.stack: %w", err)
+	}
+	w.Stack = string(stack)
+	if w.PoolSize < 1 || w.PoolSize > 32 {
+		return errors.New("warp.pool_size must be between 1 and 32")
+	}
+	w.SourceIPv6 = strings.TrimSpace(w.SourceIPv6)
+	if w.SourceIPv6 != "" {
+		prefix, err := netip.ParsePrefix(w.SourceIPv6)
+		if err != nil || !prefix.Addr().Is6() || prefix.Addr().Is4In6() {
+			return fmt.Errorf("warp.source_ipv6: %q is not an IPv6 prefix", w.SourceIPv6)
+		}
+		if prefix.Bits() > 64 {
+			return fmt.Errorf("warp.source_ipv6: %s must be /64 or shorter", prefix)
+		}
+		if stack != warp.StackIPv6 {
+			return errors.New("warp.source_ipv6 requires warp.stack to be \"ipv6\"; an IPv4 stack cannot present an IPv6 egress")
+		}
+		w.SourceIPv6 = prefix.Masked().String()
+	}
+	return nil
 }
 
 // UpstreamConfig holds the base URLs of the OpenCode origins. The gateway
@@ -237,6 +291,7 @@ func Load(path string) (Config, error) {
 	}
 	cfg := Config{
 		Listen:      "127.0.0.1:8080",
+		Warp:        WarpConfig{PoolSize: 2, Stack: string(warp.DefaultStack)},
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
@@ -262,6 +317,9 @@ func Load(path string) (Config, error) {
 func Normalize(path string, cfg Config) (Config, error) {
 	cfg.Rotation.Defaults()
 	if err := cfg.Rotation.Validate(nil); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Warp.Normalize(); err != nil {
 		return Config{}, err
 	}
 	trimList(&cfg.ServerKeys)

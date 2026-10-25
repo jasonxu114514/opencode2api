@@ -259,6 +259,9 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		return nil
 	}
 	defer g.anonymous.ReleaseProbe()
+	if g.warp != nil {
+		return g.refreshAnonymousWARP(ctx, base)
+	}
 	cursor := g.anonymous.CursorFor("")
 	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
@@ -290,6 +293,53 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		}
 		g.anonymous.MarkFailure(node, nil, err)
 		g.logger.Debug("anonymous model catalog refresh attempt failed", "component", "models", "event", "anonymous_refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt, "proxy", config.RedactURL(node.proxy.name), "error", err)
+	}
+	g.logger.Warn("anonymous model catalog refresh failed", "component", "models", "event", "anonymous_refresh_failed", "upstream", config.RedactURL(base))
+	return nil
+}
+
+// refreshAnonymousWARP lists models through WARP instead of an anonymous
+// proxy. The catalog is what makes free models discoverable at all, so with
+// the WARP switch on it must not depend on a working proxy pool. One lease per
+// attempt; the pool learns about a blocked exit through Report.
+func (g *Gateway) refreshAnonymousWARP(ctx context.Context, base string) []string {
+	limit := max(g.cfg.Retry.MaxAttempts, 1)
+	for attempt := 1; attempt <= limit; attempt++ {
+		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		lease, err := g.warp.Acquire(refreshCtx)
+		if err != nil {
+			cancel()
+			if ctx.Err() != nil {
+				return nil
+			}
+			continue
+		}
+		owned, err := g.newWarpLease(lease, false)
+		if err != nil {
+			lease.Release()
+			cancel()
+			g.logger.Warn("anonymous model catalog refresh could not use WARP", "component", "models", "event", "anonymous_refresh_failed", "upstream", config.RedactURL(base), "error", err)
+			return nil
+		}
+		egress := "warp:" + lease.EgressKey()
+		var listed []string
+		var status int
+		for _, upstream := range g.anonymousUpstreams() {
+			listed, status, err = modelcatalog.FetchModels(refreshCtx, owned.regular, upstream, anonymousZenKey)
+			if err == nil || isProxyFailure(err) {
+				break
+			}
+		}
+		if status > 0 {
+			g.warp.Report(lease, status, nil)
+		}
+		owned.close()
+		cancel()
+		if err == nil {
+			g.anonymous.NoteSuccess()
+			return listed
+		}
+		g.logger.Debug("anonymous model catalog refresh attempt failed", "component", "models", "event", "anonymous_refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt, "proxy", egress, "error", err)
 	}
 	g.logger.Warn("anonymous model catalog refresh failed", "component", "models", "event", "anonymous_refresh_failed", "upstream", config.RedactURL(base))
 	return nil

@@ -861,6 +861,46 @@
                     </div>
                   </div>
                 </section>
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="config.warp.title">WARP 出口</h2>
+                      <p class="section-caption" data-i18n="config.warp.caption">
+                        开启后，免费模型流量（匿名通道、免费模型 Zen Key、免费模型探测）改走用户态 WARP，不再使用任何 Proxy；Go 套餐与付费模型保持不变。出口收到 429/403 立即淘汰并在后台重新注册，免费模型请求持续轮换出口，用完 retry.max_attempts 次后才把最后一个 429 返回客户端。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field full">
+                      <label class="check">
+                        <input id="c-warp-enabled" type="checkbox" />
+                        <span data-i18n="config.warp.enabled">免费模型流量通过 WARP 出口</span>
+                      </label>
+                    </div>
+                    <div class="field">
+                      <label for="c-warp-pool" data-i18n="config.warp.pool">WARP 出口上限</label>
+                      <input id="c-warp-pool" type="number" min="1" max="32" step="1" />
+                      <p class="section-caption" data-i18n="config.warp.pool.hint">
+                        上限而非固定值：活跃出口随并发调整（每个在途请求一个，另留一个备用），空闲 60 秒后自动回收。
+                      </p>
+                    </div>
+                    <div class="field">
+                      <label for="c-warp-stack" data-i18n="config.warp.stack">网络栈</label>
+                      <select id="c-warp-stack">
+                        <option value="ipv6">IPv6</option>
+                        <option value="ipv4">IPv4</option>
+                        <option value="dual" data-i18n="config.warp.stack.dual">双栈</option>
+                      </select>
+                    </div>
+                    <div class="field full">
+                      <label for="c-warp-source" data-i18n="config.warp.source">外层 IPv6 源前缀（/64）</label>
+                      <input id="c-warp-source" placeholder="2001:db8:1::/64" />
+                      <p class="section-caption" data-i18n="config.warp.source.hint">
+                        仅在使用 IPv6 网络栈时生效。每个 WARP 出口从该前缀取一个源地址出网，换出口即换公网地址；留空则共用本机默认源地址。
+                      </p>
+                    </div>
+                  </div>
+                </section>
               </div>
 
               <div data-panel="upstream" class="stack hidden" role="tabpanel">

@@ -29,7 +29,11 @@ import (
 // BunOptions configures a BunTransport. The fields mirror their namesakes on
 // http.Transport; a nil Proxy dials the upstream directly.
 type BunOptions struct {
-	Proxy                 *url.URL
+	Proxy *url.URL
+	// DialContext, when set, replaces the direct or proxied TCP dial. The
+	// caller owns the transport (for example a userspace WARP netstack); Bun
+	// still performs the uTLS handshake over the returned connection.
+	DialContext           func(ctx context.Context, network, address string) (net.Conn, error)
 	ConnectTimeout        time.Duration
 	ResponseHeaderTimeout time.Duration
 	IdleConnTimeout       time.Duration
@@ -53,6 +57,7 @@ type BunOptions struct {
 // connections per host.
 type BunTransport struct {
 	proxy                 *url.URL
+	dialContext           func(context.Context, string, string) (net.Conn, error)
 	dialer                *net.Dialer
 	responseHeaderTimeout time.Duration
 	idleTimeout           time.Duration
@@ -79,6 +84,7 @@ func NewBunTransport(options BunOptions) (*BunTransport, error) {
 	}
 	return &BunTransport{
 		proxy:                 options.Proxy,
+		dialContext:           options.DialContext,
 		dialer:                &net.Dialer{Timeout: options.ConnectTimeout, KeepAlive: 30 * time.Second},
 		responseHeaderTimeout: options.ResponseHeaderTimeout,
 		idleTimeout:           options.IdleConnTimeout,

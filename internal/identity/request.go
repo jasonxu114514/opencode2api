@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"time"
 
 	"opencode2api/internal/jsonutil"
 )
@@ -210,12 +211,23 @@ const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 // ffe — while keeping the same stable session per conversation. A re-encoded
 // session passes the free tier's encoding check where the raw hash shape was
 // rejected with 403 FreeTierError.
+//
+// The timestamp must also stay plausible. The free tier derives a risk window
+// from it: a session dated more than about a year from now, in either
+// direction, is answered with HTTP 429 "Free usage limit reached" — the same
+// message a genuinely exhausted IP receives — so a hash-derived timestamp
+// (which landed in 1970) made every free request fail however many WARP exits
+// were rotated. The encoding below therefore draws the timestamp from a slow
+// clock instead of the hash: today's UTC midnight minus a hash-derived offset
+// of at most sessionTimestampWindow. The id stays stable for a whole day, which
+// is all the affinity a live conversation needs, and its date never leaves the
+// window the upstream accepts.
 func CanonicalSessionID(signal string) string {
 	if isOfficialSessionID(signal) {
 		return signal
 	}
 	sum := sha256.Sum256([]byte("ses\x00" + signal))
-	timePart := descendingTimePart(sum[:6])
+	timePart := descendingTimePart(time.Now(), sum[:6])
 	randomPart := base62Fixed(new(big.Int).SetBytes(sum[6:16]), 14)
 	return "ses_" + timePart + randomPart
 }
@@ -227,14 +239,22 @@ func isOfficialSessionID(signal string) bool {
 	return canonicalSessionPattern.MatchString(signal) && descendingTimePartPattern.MatchString(signal[4:16])
 }
 
-// descendingTimePart renders six hash bytes as the official client's
-// Identifier.descending() layout: a 36-bit timestamp shifted into the top of
-// a 48-bit word, ORed with counter 1, then bitwise-NOT-ed so the low 12 hex
-// digits read ffe.
-func descendingTimePart(hash []byte) string {
-	current := (uint64(hash[0])<<28 | uint64(hash[1])<<20 | uint64(hash[2])<<12 |
-		uint64(hash[3])<<4 | uint64(hash[4])>>4) << 12
-	current |= 1
+// sessionTimestampWindow bounds how far before today a synthesized session's
+// timestamp may fall. The upstream accepts a date roughly a year away in either
+// direction and rejects anything beyond with HTTP 429, so a month leaves room
+// for clock skew and long-lived processes while never approaching the edge.
+const sessionTimestampWindow = 30 * 24 * time.Hour
+
+// descendingTimePart renders a plausible recent timestamp in the official
+// client's Identifier.descending() layout: a 36-bit timestamp shifted into the
+// top of a 48-bit word, ORed with counter 1, then bitwise-NOT-ed so the low 12
+// hex digits read ffe. The hash only picks the offset within
+// sessionTimestampWindow; it never supplies the date itself.
+func descendingTimePart(now time.Time, hash []byte) string {
+	window := uint64(sessionTimestampWindow / time.Millisecond)
+	offset := (uint64(hash[0])<<24 | uint64(hash[1])<<16 | uint64(hash[2])<<8 | uint64(hash[3])) % window
+	base := now.UTC().Truncate(24 * time.Hour).Add(-time.Duration(offset) * time.Millisecond)
+	current := uint64(base.UnixMilli())<<12 | 1
 	inverted := ^current & 0xFFFFFFFFFFFF
 	return hex.EncodeToString([]byte{
 		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),

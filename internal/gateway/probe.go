@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,8 +55,8 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 // question, or a minimal streaming "Reply with OK." Chat prompt converted to
 // protocol, with effort forced when non-empty and the result shaped for the
 // free tier by prepareAnonymousBody. v1 reports whether the probe targets the
-// v1 lane (models.IsV1Upstream), which selects the single "read" tool shaping
-// instead of the v2 toolset.
+// v1 lane (models.IsV1Upstream), which selects the 1.x toolset instead of the
+// 2.x one.
 func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
@@ -100,18 +101,28 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	type lane struct {
 		key, name, baseURL string
 		client             *http.Client
+		warp               bool
 	}
 	var lanes []lane
 	anonymousPaused := false
 	if g.cfg.Anonymous {
 		if g.anonymous.AllowAttempt() {
 			defer g.anonymous.ReleaseProbe()
-			cursor := g.anonymous.CursorFor(ids.Session)
-			if node := cursor.Next(); node != nil {
-				// Try the anonymous upstreams in preference order: the v2
-				// /inference origin before the v1 fallback.
+			if g.warp != nil {
+				// WARP replaces the anonymous proxy: try the anonymous
+				// upstreams in preference order without consulting the proxy
+				// cursor or a proxy binding.
 				for _, baseURL := range g.anonymousUpstreams() {
-					lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, g.inferenceClient(node.proxy, baseURL, model)})
+					lanes = append(lanes, lane{key: anonymousZenKey, name: "anonymous", baseURL: baseURL, warp: true})
+				}
+			} else {
+				cursor := g.anonymous.CursorFor(ids.Session)
+				if node := cursor.Next(); node != nil {
+					// Try the anonymous upstreams in preference order: the v2
+					// /inference origin before the v1 fallback.
+					for _, baseURL := range g.anonymousUpstreams() {
+						lanes = append(lanes, lane{key: anonymousZenKey, name: "anonymous", baseURL: baseURL, client: g.inferenceClient(node.proxy, baseURL, model)})
+					}
 				}
 			}
 		} else {
@@ -123,8 +134,10 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	}
 	cursor := g.zenNodes.CursorFor(ids.Session)
 	if node := cursor.Next(); node != nil {
-		if proxy := g.zenNodes.Proxy(node); proxy != nil {
-			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, g.inferenceClient(proxy, g.cfg.Upstream.Zen, model)})
+		if g.usesWARP(model, config.TierZen, false) {
+			lanes = append(lanes, lane{key: node.key, name: "zen", baseURL: g.cfg.Upstream.Zen, warp: true})
+		} else if proxy := g.zenNodes.Proxy(node); proxy != nil {
+			lanes = append(lanes, lane{key: node.key, name: "zen", baseURL: g.cfg.Upstream.Zen, client: g.inferenceClient(proxy, g.cfg.Upstream.Zen, model)})
 		}
 	}
 	result := probeResult{reason: "no_probe_channel"}
@@ -137,7 +150,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 			return probeResult{reason: "canceled"}
 		}
 		run := func(effort string) probeResult {
-			return g.probeAttempt(ctx, lane.client, lane.baseURL, lane.key, model, protocol, ids, effort)
+			return g.probeAttempt(ctx, lane.client, lane.baseURL, lane.key, model, protocol, ids, effort, lane.warp)
 		}
 		result = run("")
 		result.channel = lane.name
@@ -188,12 +201,14 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 
 // probeAttempt sends one probe request through client with a 60-second budget
 // and classifies the result. Unlike live traffic it bypasses
-// doInferenceAttempt and records nothing against keys or proxies. Success
-// requires a 2xx whose SSE stream collapses cleanly or whose JSON document has
-// the protocol's result field; a failure carries a reason code (http_<status>,
-// model_unavailable, probe_timeout, ...) and whether the upstream rejected the
-// reasoning effort.
-func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string) probeResult {
+// doInferenceAttempt and records nothing against keys or proxies. When overWARP
+// is set the probe leaves through an acquired WARP exit instead of client, and
+// the pool sees the outcome (Report on a response, Fail on a transport error).
+// Success requires a 2xx whose SSE stream collapses cleanly or whose JSON
+// document has the protocol's result field; a failure carries a reason code
+// (http_<status>, model_unavailable, probe_timeout, warp_unavailable, ...) and
+// whether the upstream rejected the reasoning effort.
+func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string, overWARP bool) probeResult {
 	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL))
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
@@ -206,9 +221,22 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 		return probeResult{reason: "request_creation_error"}
 	}
 	result := probeResult{attempted: true}
-	resp, err := client.Do(req)
+	var resp *http.Response
+	if overWARP {
+		// The probe context already bounds the attempt; no first-event or
+		// attempt deadline applies on top of it.
+		resp, _, err = g.doWARPAttempt(ctx, req, baseURL, model, 0)
+	} else {
+		resp, err = client.Do(req)
+	}
 	if err != nil {
 		result.reason = "transport_error"
+		if overWARP && errors.Is(err, errWARPUnavailable) {
+			// No exit could be acquired, so no request reached the upstream.
+			result.attempted = false
+			result.reason = "warp_unavailable"
+			return result
+		}
 		if ctx.Err() != nil {
 			result.reason = "probe_timeout"
 		}

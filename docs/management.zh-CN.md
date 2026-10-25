@@ -27,6 +27,15 @@
 - 元数据以 `server_key_metadata` 保存在原配置中，按 Key 指纹关联；已有 `server_keys` 自动兼容。
 - 当前未实现按 Key 单独分配模型权限、用量配额或过期时间。
 
+## WARP 免费模型出口
+
+WebUI「Proxy 节点」页底部新增 WARP 开关，对应配置 `warp.enabled`（默认关闭）、`warp.pool_size`（1–32，默认 2；出口数量上限，活跃出口按并发动态调整）、`warp.stack`（默认 `ipv6`，可选 `ipv4` 或 `dual`）和 `warp.source_ipv6`（外层 IPv6 源前缀，需配合 `stack = "ipv6"`）。开启后，匿名通道、免费模型的 Zen Key 回退、免费模型可用性探测和匿名模型目录刷新都通过用户态 Cloudflare WARP 出网，不再使用任何代理；Go 套餐 Key 与付费模型保持原有代理绑定。
+
+- 主机或容器必须能向 Cloudflare 端点发送 UDP（端口 `2408`）；不需要 TUN 设备、root、`NET_ADMIN` 或修改路由表。
+- 出口第一次收到上游 429/403 即被淘汰并立刻在后台重新注册；免费模型请求会持续切换到其他出口，用完 `retry.max_attempts` 次后才把最后一个 429 返回客户端。活跃出口数按并发动态调整（每个在途请求一个，另留一个备用，上限为 `warp.pool_size`），空闲 60 秒的多余出口自动回收。免费额度按出口网段计算：IPv6 出口按 `/64`、IPv4 出口按 `/32` 去重并冷却 30 分钟。Cloudflare WARP 的共享 IPv4 出口通常已被用尽，`warp.stack` 默认 `ipv6`，配合 `warp.source_ipv6`（路由到本机的 `/64`，Linux 下通过 `IPV6_FREEBIND` 绑定）让每个出口使用独立源地址时，替换出口才会获得新的公网地址。
+- WARP 无法初始化时启动直接失败；通过 WebUI 启用时参数错误会返回错误，旧运行时继续服务，不会静默回退到代理。
+- `/healthz` 的 `warp` 块与 `/api/monitor` 的 `resources.warp` 显示堆栈、出口数量、活跃/备用/冷却数量和出口地址；启用 WARP 但无活跃出口时健康检查返回 503，此时若没有 Go Key，`no_healthy_proxies` 不再阻塞就绪。
+
 ## 验证和构建
 
 ```bash

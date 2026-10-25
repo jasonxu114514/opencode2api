@@ -88,7 +88,9 @@ func bunClientHello() *utls.ClientHelloSpec {
 func (t *BunTransport) dial(ctx context.Context, scheme, addr, serverName string) (net.Conn, error) {
 	var conn net.Conn
 	var err error
-	if t.proxy == nil {
+	if t.dialContext != nil {
+		conn, err = t.dialContext(ctx, "tcp", addr)
+	} else if t.proxy == nil {
 		conn, err = t.dialer.DialContext(ctx, "tcp", addr)
 	} else {
 		conn, err = t.dialProxy(ctx, addr)

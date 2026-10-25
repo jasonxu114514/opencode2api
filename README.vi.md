@@ -12,6 +12,7 @@ File thực thi đã bao gồm WebUI. Việc chạy dịch vụ không cần Nod
 - Văn bản, hình ảnh, suy luận, function tool, tool call và tool result; nội dung tệp ở nơi giao thức đích có thể biểu diễn.
 - Hai nhóm key Zen và Go riêng biệt, tier ưu tiên có thể cấu hình, retry và session affinity.
 - Truy cập Zen ẩn danh tuỳ chọn bằng credential `public` của OpenCode.
+- Đầu ra Cloudflare WARP chạy trong tiến trình cho lưu lượng mô hình miễn phí, không cần TUN hay root.
 - Kết nối direct, HTTP, HTTPS, SOCKS5 và SOCKS5H, bao gồm cả file proxy.
 - Tự động phát hiện mô hình, metadata giao thức gốc và cache trên đĩa.
 - Cổng quản trị riêng với chỉnh sửa cấu hình, Playground, chẩn đoán, thống kê token và log trực tiếp.
@@ -78,6 +79,8 @@ docker compose restart
 ```
 
 Container chạy dịch vụ bằng user không có đặc quyền. Compose dùng hệ thống file gốc chỉ đọc, volume trạng thái ghi được và hệ thống file tạm `/tmp`.
+
+WARP chỉ cần UDP ra ngoài (endpoint Cloudflare, cổng `2408`), nên thiết lập user thường, không `NET_ADMIN` của image vẫn dùng được; không cần chuyển sang host networking hay thêm `--cap-add`. Nếu mạng container chặn UDP, việc bật WARP sẽ thất bại lúc khởi động.
 
 | Biến Compose                     | Mặc định  | Tác dụng                                                    |
 | -------------------------------- | --------- | ----------------------------------------------------------- |
@@ -229,9 +232,31 @@ Khi chỉ cấu hình truy cập ẩn danh, `/v1/models` chỉ công khai các m
 
 Mô hình miễn phí không bao giờ cần key Zen: với `anonymous: true` chúng được phục vụ bởi làn public, và key được cấu hình chỉ là phương án dự phòng. Muốn giữ key nhưng chỉ công khai mô hình miễn phí, hãy đặt `models.free_only: true`. Khi đó mô hình trả phí biến mất khỏi `/v1/models`, request trực tiếp tới chúng bị từ chối, và bí danh luân chuyển chỉ giữ lại thành viên miễn phí; mô hình miễn phí vẫn có thể dự phòng về các key đã cấu hình.
 
+### Đầu ra WARP cho mô hình miễn phí
+
+`warp.enabled` đưa mọi request mô hình miễn phí trên làn miễn phí — làn ẩn danh, dự phòng mô hình miễn phí qua Zen Key, dò tính khả dụng mô hình miễn phí, và làm mới danh mục mô hình ẩn danh — sang đường hầm Cloudflare WARP chạy trong tiến trình. Các request này không dùng proxy nào, nên upstream thấy địa chỉ đầu ra WARP thay vì nút đã cấu hình. Key gói Go và mô hình trả phí vẫn giữ proxy.
+
+Đường hầm chạy bên trong tiến trình gateway: đăng ký thiết bị WARP, nói WireGuard qua UDP với Cloudflare và kết thúc trong một ngăn xếp mạng userspace. Nó không cần thiết bị TUN, root, `NET_ADMIN` hay thay đổi bảng định tuyến, nhưng máy chủ hoặc container phải gửi được UDP tới endpoint của Cloudflare (cổng `2408`). Đăng ký và probe trace `warp=on` chạy lúc khởi động; nếu WARP không khởi tạo được, quá trình khởi động thất bại thay vì âm thầm quay về proxy. Bật qua WebUI cũng đóng khi lỗi: giá trị sai trả về lỗi và runtime cũ tiếp tục phục vụ.
+
+`warp.pool_size` (1–32, mặc định `2`) là **giới hạn trên**, không phải số cố định. Vòng đầu ra hoạt động thay đổi theo mức đồng thời: một đầu ra cho mỗi request đang chạy cộng một đầu ra dự phòng, ít nhất một và không vượt quá giới hạn; các đầu ra thừa rảnh rỗi 60 giây sẽ bị thu hồi, nên lưu lượng đột biến làm vòng phình ra và lúc rảnh thì thu lại. Đầu ra nhận 429 hoặc 403 lần đầu sẽ bị loại ngay và được đăng ký lại ở nền (việc đăng ký vẫn theo nhịp API 12 giây của Cloudflare, nên giới hạn càng lớn càng lâu khởi động: hãy đặt theo mức đồng thời cao nhất của model miễn phí); request model miễn phí tiếp tục đổi đầu ra và chỉ trả 429 cuối cùng cho client sau khi dùng hết `retry.max_attempts`. `warp.stack` chọn `ipv6` (mặc định), `ipv4` hoặc `dual`.
+
+Hạn mức miễn phí của upstream tính theo **dải đầu ra**, nên luân chuyển chỉ có tác dụng khi đầu ra thay thế đến từ dải khác: đầu ra IPv6 được nhận diện và làm nguội theo `/64` trong 30 phút, đầu ra IPv4 theo `/32`. Đầu ra IPv4 của Cloudflare WARP thường là một địa chỉ NAT dùng chung và đã bị người dùng khác dùng hết; ngăn xếp IPv6 lấy đầu ra từ địa chỉ nguồn WireGuard bên ngoài. Đặt `warp.source_ipv6` thành tiền tố IPv6 được định tuyến tới máy chủ (thường là `/64`, stack mặc định đã là `ipv6`) để mỗi đầu ra tự bind một địa chỉ nguồn trong tiền tố đó. Trên Linux địa chỉ này được bind qua `IPV6_FREEBIND` (gateway tự đặt), hoặc phải được gán sẵn cho giao diện. Không dò trước họ địa chỉ: handshake thử các endpoint IPv6 trước và tự quay về endpoint IPv4 khi tất cả đều lỗi (khi đó đầu ra là địa chỉ dùng chung). Để trống thì dùng địa chỉ nguồn mặc định của máy chủ. Trên mạng có pool đầu ra WARP đã cạn, đầu ra mới cũng có thể trả 429: gateway vẫn tiếp tục luân chuyển và chỉ trả 429 khi hết ngân sách thử. `/healthz` trả về khối `warp` và 503 khi WARP bật nhưng không có đầu ra nào hoạt động; `no_healthy_proxies` chỉ chặn readiness khi WARP tắt hoặc có key Go cần proxy. Request chẩn đoán có lấy đầu ra nhưng không bao giờ luân chuyển hay phạt nó. Tắt WARP sẽ khôi phục định tuyến qua proxy cho các làn miễn phí.
+
+### System prompt chính thức
+
+Mỗi request mô hình miễn phí đã được định hình đều mang system prompt của chính OpenCode CLI — hướng dẫn gốc, khối `<env>` và danh sách skill tích hợp — vì làn miễn phí kiểm tra request có dạng agent. Làn v1 `/zen` dùng tên công cụ 1.x; `/inference` và `/zen/go` dùng tên 2.x. Khối môi trường nêu mô hình được yêu cầu, thư mục làm việc của gateway, nền tảng và ngày theo UTC.
+
+Việc chèn phụ thuộc giao thức: các message system và developer của Chat được gộp thành một message `system` duy nhất ở đầu; Anthropic nhận giá trị `system` (chuỗi, hoặc một text block ở đầu khi bên gọi gửi danh sách block); Responses nhận `instructions`. Nếu nội dung system đã chứa dấu hiệu `You are opencode, an interactive CLI tool`, request được giữ nguyên, nên client đã gửi prompt chính thức sẽ không bị chèn lần hai. Mô hình miễn phí phục vụ qua Zen hoặc Go Key cũng được định hình như vậy nhưng vẫn ra ngoài qua proxy của tier đó.
+
+### Định hình công cụ
+
+Trên mỗi request mô hình miễn phí đã được định hình, gateway đổi tên từng công cụ có tên của client thành `clint_<name>` — ký tự ngoài `A-Za-z0-9_-` thành `_`, tên tối đa 64 byte, trùng tên thì thêm hậu tố `_2`, `_3`, … — rồi thêm toàn bộ bộ công cụ chính thức của làn: định nghĩa 1.x (`bash`, `edit`, `glob`, `grep`, `read`, `skill`, `task`, `todowrite`, `webfetch`, `websearch`, `write`) trên `/zen`, và bộ 13 công cụ 2.x trên `/inference` và `/zen/go`. Request không có `tools`, có mảng rỗng, hoặc dùng mảng `functions` kiểu cũ cũng nhận bộ chính thức; `tool_choice`, `function_call` kiểu cũ và lịch sử tool call được viết lại tương ứng. Công cụ tích hợp của Responses và công cụ máy chủ của Anthropic được giữ nguyên.
+
+Phản hồi được khôi phục về tên client đã khai báo, cho cả luồng và không luồng, kể cả tên công cụ Chat bị chia qua nhiều chunk. Nếu upstream gọi một công cụ chính thức mà client chưa khai báo, tên đó được truyền nguyên: gateway không phát lại hay che các lời gọi công cụ chính thức.
+
 ### Tính khả dụng của mô hình miễn phí
 
-Gateway dò các mô hình có ID chứa `free` (không phân biệt hoa thường), hoặc có metadata báo chi phí input/output bằng 0 mà không bị ngừng cấp, bằng một request ngắn dùng giao thức gốc của mô hình. Nó thử làn ẩn danh đang bật trước, rồi tới một Zen Key đã cấu hình. Một phản hồi hợp lệ và hoàn tất trên bất kỳ làn nào sẽ giữ mô hình ở trạng thái bật; mô hình chỉ bị tắt trong phát hiện và định tuyến khi mọi làn được thử đều báo rõ ràng rằng mô hình không tồn tại hoặc đã bị thu hồi. Lỗi xác thực, giới hạn tần suất, timeout, lỗi truyền tải, phản hồi 5xx và câu trả lời sai định dạng đều không kết luận: chúng không tạo ra lần tắt mới và sẽ được kiểm tra lại sau một giờ. Lưu lượng dò không làm thay đổi cooldown key/proxy sản xuất hay thống kê request. Nó vẫn đi tới upstream và có thể tiêu tốn hạn mức miễn phí của họ.
+Gateway dò các mô hình có ID chứa `free` (không phân biệt hoa thường), hoặc có metadata báo chi phí input/output bằng 0 mà không bị ngừng cấp, bằng một request ngắn dùng giao thức gốc của mô hình. Nó thử làn ẩn danh đang bật trước, rồi tới một Zen Key đã cấu hình. Khi bật `warp.enabled`, mọi làn dò đi qua WARP thay vì proxy; nếu không lấy được đầu ra, kết quả là `warp_unavailable` và được coi là không kết luận. Một phản hồi hợp lệ và hoàn tất trên bất kỳ làn nào sẽ giữ mô hình ở trạng thái bật; mô hình chỉ bị tắt trong phát hiện và định tuyến khi mọi làn được thử đều báo rõ ràng rằng mô hình không tồn tại hoặc đã bị thu hồi. Lỗi xác thực, giới hạn tần suất, timeout, lỗi truyền tải, phản hồi 5xx và câu trả lời sai định dạng đều không kết luận: chúng không tạo ra lần tắt mới và sẽ được kiểm tra lại sau một giờ. Lưu lượng dò không làm thay đổi cooldown key/proxy sản xuất hay thống kê request. Nó vẫn đi tới upstream và có thể tiêu tốn hạn mức miễn phí của họ.
 
 Mô hình System One dùng câu hỏi `noul` gốc hỏi rằng 1 + 1 có bằng 2 không; chúng không bao giờ được gửi payload chat/tool. Việc phát hiện mô hình gồm `native_protocol` và `supported_endpoints`; bí danh luân chuyển chỉ được liệt kê khi có key Go và mô hình đủ điều kiện. Lần tắt còn sót từ bản v1.3.6 sẽ được xoá khi nạp và lên lịch kiểm tra lại ngay, vì các lần dó đó dùng session ID không hợp lệ.
 
@@ -265,6 +290,10 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 | `server_keys`              | Cần ít nhất một key cục bộ.                                       |
 | `zen_keys`, `go_keys`      | Cần ít nhất một key upstream trừ khi bật truy cập ẩn danh.       |
 | `anonymous`                | `false`.                                                         |
+| `warp.enabled`             | `false`; lưu lượng làn miễn phí đi qua Cloudflare WARP, không dùng proxy. |
+| `warp.pool_size`           | `2`; giới hạn trên số đầu ra WARP (vòng hoạt động theo mức đồng thời), 1–32. |
+| `warp.stack`               | `ipv6`; `ipv6`, `ipv4` hoặc `dual`.                              |
+| `warp.source_ipv6`         | rỗng; tiền tố IPv6 (`/64`) mỗi đầu ra bind nguồn bên ngoài; cần `stack = "ipv6"`. |
 | `prefer`                   | `go`; nhận `go` hoặc `zen`.                                      |
 | `upstream.zen`             | `https://opencode.ai/zen`.                                       |
 | `upstream.go`              | `https://opencode.ai/zen/go`.                                    |

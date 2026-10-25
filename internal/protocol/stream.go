@@ -227,22 +227,21 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	return usage, observer.Reported(), cause
 }
 
-// RenameStreamReader wraps an SSE stream reader and rewrites tool call names
-// matching fromName back to toName before downstream parsers or writers consume
-// the stream. When fromName or toName is empty (or identical), reader is
-// returned unchanged.
+// RenameStreamReader wraps an SSE stream reader and rewrites aliased tool call
+// names back to the names the client declared before downstream parsers or
+// writers consume the stream. An empty rename set returns reader unchanged.
 //
 // It is a pull-based transform instead of a goroutine plus io.Pipe so a client
 // that disconnects mid-stream cannot strand a blocked writer. Chat frames go
 // through the fragment-aware rewriter, while the other protocols use the
 // stateless RenameResponseTool rewrite on each frame.
-func RenameStreamReader(reader io.Reader, protocol Protocol, fromName, toName string) io.Reader {
-	if fromName == "" || toName == "" || fromName == toName {
+func RenameStreamReader(reader io.Reader, protocol Protocol, renames *ToolRenames) io.Reader {
+	if renames.Empty() {
 		return reader
 	}
 	return &renameStreamReader{
 		buffer:  bufio.NewReaderSize(reader, 64<<10),
-		renamer: &streamToolRenamer{protocol: protocol, fromName: fromName, toName: toName, tools: map[string]*streamToolRenameState{}},
+		renamer: &streamToolRenamer{protocol: protocol, renames: renames, tools: map[string]*streamToolRenameState{}},
 	}
 }
 
@@ -312,8 +311,8 @@ func (reader *renameStreamReader) rewriteLine(line string) []byte {
 
 // streamToolRenameState tracks how one tool call's name was resolved while a
 // stream is rewritten. Chat deltas may repeat a growing name prefix or append
-// fragments, so a value that is still a prefix of fromName is held back until
-// it either completes the match or diverges.
+// fragments, so a value that is still a prefix of a known wire name is held
+// back until it either completes the match or diverges.
 type streamToolRenameState struct {
 	decided bool
 	renamed bool
@@ -325,23 +324,22 @@ type streamToolRenameState struct {
 // chunks is reassembled before it is matched.
 type streamToolRenamer struct {
 	protocol Protocol
-	fromName string
-	toName   string
+	renames  *ToolRenames
 	tools    map[string]*streamToolRenameState
 }
 
 // rewriteFrame rewrites one SSE data payload, which is raw JSON text. Frames
 // that cannot carry a tool name are returned untouched, so only a payload that
-// mentions the source name (Anthropic and Responses) or "tool_calls" (Chat) is
+// mentions a client alias (Anthropic and Responses) or "tool_calls" (Chat) is
 // decoded.
 func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 	if renamer.protocol != Chat {
 		// Anthropic and Responses streams always carry a complete tool name in
 		// a single event, so the stateless object rewrite is exact.
-		if !strings.Contains(raw, renamer.fromName) {
+		if !strings.Contains(raw, ClientToolPrefix) {
 			return []byte(raw)
 		}
-		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.fromName, renamer.toName)
+		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.renames)
 	}
 	if !strings.Contains(raw, `"tool_calls"`) {
 		return []byte(raw)
@@ -401,11 +399,11 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 }
 
 // applyNameFragment folds one name fragment into a tool's rename state and
-// reports whether the frame changed. Once the accumulated name completes
-// fromName, it is replaced by toName; while it is still a prefix of fromName
-// the name is held back; on divergence the accumulated name is written out as
-// is. After a resolved rename, any further fragment is dropped, because it
-// belongs to a longer name the client never declared.
+// reports whether the frame changed. Once the accumulated name matches a wire
+// name exactly, it is replaced by the client name; while it is still a proper
+// prefix of one the name is held back; on divergence the accumulated name is
+// written out as is. After a resolved rename, any further fragment is dropped,
+// because it belongs to a longer name the client never declared.
 func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState, function map[string]any, fragment string) bool {
 	if state.decided {
 		if !state.renamed {
@@ -420,21 +418,20 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 		return false
 	}
 	state.pending = mergeToolName(state.pending, fragment)
-	switch {
-	case state.pending == renamer.fromName:
-		function["name"] = renamer.toName
+	if client, ok := renamer.renames.Client(state.pending); ok {
+		function["name"] = client
 		state.decided, state.renamed = true, true
 		return true
-	case strings.HasPrefix(renamer.fromName, state.pending):
-		// Still a prefix of the alias: hold the fragment until a later frame
-		// either completes the match or diverges.
+	}
+	if renamer.renames.HasLongerPrefix(state.pending) {
+		// Still a prefix of a known wire name: hold the fragment until a later
+		// frame either completes the match or diverges.
 		delete(function, "name")
 		return true
-	default:
-		function["name"] = state.pending
-		state.decided = true
-		return true
 	}
+	function["name"] = state.pending
+	state.decided = true
+	return true
 }
 
 // toolState returns the rename state for a tool key, creating it on first

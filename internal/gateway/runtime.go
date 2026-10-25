@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
 	"opencode2api/internal/telemetry"
+	"opencode2api/internal/warp"
 )
 
 // gatewayRuntime is one applied configuration: the Gateway built from it, that
@@ -26,6 +28,13 @@ type gatewayRuntime struct {
 	gateway      *Gateway
 	handler      http.Handler
 	cancel       context.CancelFunc
+	// warpPool is the userspace WARP pool this runtime uses, if any. warpKey
+	// identifies its size and stack; an unchanged key is reused across
+	// configuration reloads. warpCreated marks a pool this build owns and
+	// must close if the build is discarded.
+	warpPool    *warp.Pool
+	warpKey     string
+	warpCreated bool
 }
 
 // ApplyResult reports whether a configuration was applied and which listener
@@ -55,6 +64,10 @@ type RuntimeController struct {
 	effective          EffectiveListeners
 	metadata           *modelcatalog.PricingRegistry
 	availabilityCancel context.CancelFunc
+	// warpPool is the pool shared by successive runtimes when the WARP size
+	// and stack are unchanged. warpKey is the identity used for that reuse.
+	warpPool *warp.Pool
+	warpKey  string
 }
 
 // EffectiveListeners are the listener settings the running process actually
@@ -123,10 +136,14 @@ func RuntimeManager(root context.Context, configPath string, cfg config.Config, 
 		}
 	}
 	if err := cfg.Rotation.Validate(runtime.gateway.catalog.List()); err != nil {
+		if runtime.warpCreated && runtime.warpPool != nil {
+			runtime.warpPool.Close()
+		}
 		return nil, err
 	}
 	runtime.gateway.syncRotation()
 	manager.current.Store(runtime)
+	manager.warpPool, manager.warpKey = runtime.warpPool, runtime.warpKey
 	manager.redactor.Replace(cfg)
 	telemetry.SetLogLevel(manager.level, cfg.Logging.Level)
 	manager.start(runtime)
@@ -161,8 +178,18 @@ func migrateAvailabilityPath(legacyPath, currentPath string) error {
 // current runtime's availability registry while the Zen upstream is
 // unchanged; otherwise it uses the registry persisted for the new upstream.
 func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
-	gateway, err := New(cfg, m.logger, m.monitor)
+	warpPool, warpKey, warpCreated, err := m.selectWARP(cfg)
 	if err != nil {
+		return nil, err
+	}
+	discardWARP := func() {
+		if warpCreated && warpPool != nil {
+			warpPool.Close()
+		}
+	}
+	gateway, err := New(cfg, m.logger, m.monitor, warpPool)
+	if err != nil {
+		discardWARP()
 		return nil, err
 	}
 	gateway.rotation = m.rotation
@@ -170,11 +197,13 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 	if m.configPath != "" {
 		availabilityPath = m.configPath + "." + config.Fingerprint(cfg.Upstream.Zen) + ".availability.json"
 		if err := migrateAvailabilityPath(m.configPath+"."+config.Fingerprint(cfg.Upstream.Zen)[:10]+".availability.json", availabilityPath); err != nil {
+			discardWARP()
 			return nil, fmt.Errorf("migrate model availability: %w", err)
 		}
 	}
 	availability, err := modelcatalog.AvailabilityStore(availabilityPath)
 	if err != nil {
+		discardWARP()
 		return nil, fmt.Errorf("load model availability: %w", err)
 	}
 	if current := m.current.Load(); current != nil && current.config.Upstream.Zen == cfg.Upstream.Zen {
@@ -184,7 +213,41 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 	gateway.catalog.SetAvailabilityStore(availability)
 	gateway.availability = availability
 	gateway.catalog.SetCachePath(modelcatalog.CatalogCachePath(m.configPath))
-	return &gatewayRuntime{config: cfg, gateway: gateway, availability: availability, handler: gateway.Handler(), cancel: func() {}}, nil
+	return &gatewayRuntime{config: cfg, gateway: gateway, availability: availability, handler: gateway.Handler(), cancel: func() {}, warpPool: warpPool, warpKey: warpKey, warpCreated: warpCreated}, nil
+}
+
+// selectWARP returns the WARP pool a runtime built for cfg must use. A pool
+// with the same size, stack and outer source prefix is shared across runtimes;
+// creating a new one registers its first exit synchronously, so enabling WARP
+// fails closed when Cloudflare cannot be reached. A disabled configuration
+// returns no pool.
+func (m *RuntimeController) selectWARP(cfg config.Config) (*warp.Pool, string, bool, error) {
+	if !cfg.Warp.Enabled {
+		return nil, "", false, nil
+	}
+	key := fmt.Sprintf("%d|%s|%s", cfg.Warp.PoolSize, cfg.Warp.Stack, cfg.Warp.SourceIPv6)
+	if m.warpPool != nil && m.warpKey == key {
+		return m.warpPool, key, false, nil
+	}
+	var source netip.Prefix
+	if cfg.Warp.SourceIPv6 != "" {
+		prefix, err := netip.ParsePrefix(cfg.Warp.SourceIPv6)
+		if err != nil {
+			return nil, "", false, fmt.Errorf("initialize WARP egress: warp.source_ipv6: %w", err)
+		}
+		source = prefix.Masked()
+	}
+	timeout := time.Duration(cfg.Retry.TimeoutSeconds) * time.Second
+	if timeout <= 0 || timeout > 2*time.Minute {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(m.root, timeout)
+	defer cancel()
+	pool, err := warp.NewWithOptions(ctx, m.logger, warp.Options{Size: cfg.Warp.PoolSize, Stack: warp.Stack(cfg.Warp.Stack), SourceIPv6: source})
+	if err != nil {
+		return nil, "", false, fmt.Errorf("initialize WARP egress: %w", err)
+	}
+	return pool, key, true, nil
 }
 
 // start launches runtime's proxy health checks and model refresh, and stores
@@ -298,11 +361,17 @@ func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (
 		next.gateway.catalog.CopyState(current.gateway.catalog)
 	}
 	if err := normalized.Rotation.Validate(next.gateway.catalog.List()); err != nil {
+		if next.warpCreated && next.warpPool != nil {
+			next.warpPool.Close()
+		}
 		return ApplyResult{}, err
 	}
 	if persist || hadPlaintextPassword {
 		if err := config.SaveAtomic(m.configPath, normalized); err != nil {
 			next.cancel()
+			if next.warpCreated && next.warpPool != nil {
+				next.warpPool.Close()
+			}
 			return ApplyResult{}, err
 		}
 	}
@@ -327,8 +396,20 @@ func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (
 	next.gateway.syncRotation()
 	m.start(next)
 	previous := m.current.Swap(next)
+	m.warpPool, m.warpKey = next.warpPool, next.warpKey
 	if previous != nil {
 		previous.cancel()
+		if previous.warpPool != nil && previous.warpPool != next.warpPool {
+			// Requests that loaded the previous runtime may still acquire a
+			// lease. Close the old pool only after the longest request budget
+			// has passed; leases already held keep their exits alive.
+			grace := time.Duration(normalized.Retry.TimeoutSeconds) * time.Second
+			if grace <= 0 || grace > 5*time.Minute {
+				grace = 5 * time.Minute
+			}
+			retired := previous.warpPool
+			time.AfterFunc(grace, retired.Close)
+		}
 	}
 	m.logger.Info("configuration applied", "component", "config", "event", "config_applied", "restart_required", result.RestartRequired, "restart_fields", result.RestartFields)
 	return result, nil
@@ -359,6 +440,11 @@ func (m *RuntimeController) Shutdown() {
 	if current := m.current.Load(); current != nil {
 		current.cancel()
 	}
+	if m.warpPool != nil {
+		m.warpPool.Close()
+		m.warpPool = nil
+		m.warpKey = ""
+	}
 }
 
 // ResourceSnapshot is the operator view of the current runtime's models, keys,
@@ -368,7 +454,19 @@ type ResourceSnapshot struct {
 	Keys      []KeyStatus                   `json:"keys"`
 	Proxies   []ProxyStatus                 `json:"proxies"`
 	Anonymous bool                          `json:"anonymous"`
+	Warp      *WarpStatus                   `json:"warp,omitempty"`
 	Metadata  modelcatalog.MetadataSnapshot `json:"metadata"`
+}
+
+// WarpStatus is the operator view of the WARP egress pool.
+type WarpStatus struct {
+	Enabled bool     `json:"enabled"`
+	Stack   string   `json:"stack"`
+	Size    int      `json:"size"`
+	Active  int      `json:"active"`
+	Standby int      `json:"standby"`
+	Cooling int      `json:"cooling"`
+	Egress  []string `json:"egress,omitempty"`
 }
 
 // KeyStatus describes one upstream key by its display ID (its last five
@@ -426,6 +524,14 @@ func (m *RuntimeController) Resources() ResourceSnapshot {
 			status.GoKeys = goBindings[proxy.index]
 		}
 		result.Proxies = append(result.Proxies, status)
+	}
+	if gateway.warp != nil {
+		snapshot := gateway.warp.Snapshot()
+		result.Warp = &WarpStatus{
+			Enabled: true, Stack: snapshot.Stack, Size: snapshot.Size,
+			Active: snapshot.Active, Standby: snapshot.Standby, Cooling: snapshot.Cooling,
+			Egress: snapshot.Egress,
+		}
 	}
 	return result
 }

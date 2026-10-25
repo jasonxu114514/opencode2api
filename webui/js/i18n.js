@@ -150,7 +150,7 @@ const DICTIONARY = {
       "guide.step.upstream": "Pick an upstream channel",
       "guide.step.upstream.desc": "At least one Zen / Go Key, or the anonymous channel enabled.",
       "guide.step.proxy": "Check the proxies",
-      "guide.step.proxy.desc": "At least one proxy node is still healthy.",
+      "guide.step.proxy.desc": "At least one proxy node is still healthy, or WARP is carrying free-model traffic.",
       "guide.step.models": "Wait for the model catalog",
       "guide.step.access": "Copy an integration example",
       "guide.step.access.desc": "Open the Integration handbook and replace the model and YOUR_API_KEY.",
@@ -260,6 +260,18 @@ const DICTIONARY = {
       "config.proxy.caption":
         "Supports direct, HTTP(S), and SOCKS URLs. Suffix an entry with #pool to mark it as a rotating proxy pool: the gateway then opens a fresh connection per attempt, skips its cooldown and health eviction, and retries it up to retry.max_attempts times.",
       "config.proxy.add": "Add proxies (one per line)",
+      "config.warp.title": "WARP egress",
+      "config.warp.caption":
+        "While enabled, free-model traffic (anonymous channel, free-model Zen keys, free-model probes) leaves through a userspace Cloudflare WARP tunnel and never through a proxy; Go-plan and paid models keep their proxy bindings. An exit answered with 429/403 is retired and re-registered in the background, and a free-model request keeps rotating exits until retry.max_attempts is spent before the last 429 reaches the client.",
+      "config.warp.enabled": "Send free-model traffic through WARP",
+      "config.warp.pool": "Maximum WARP exits",
+      "config.warp.pool.hint":
+        "An upper bound, not a fixed count: the active ring follows concurrency (one exit per in-flight request plus a spare) and shrinks after 60 idle seconds.",
+      "config.warp.stack": "Network stack",
+      "config.warp.stack.dual": "Dual stack",
+      "config.warp.source": "Outer IPv6 source prefix (/64)",
+      "config.warp.source.hint":
+        "Used only with the IPv6 network stack. Every WARP exit binds one source address from this prefix, so replacing an exit also replaces its public egress; leave empty to share this host's default source address.",
       "config.upstream.title": "Upstream and protocol routing",
       "config.upstream.caption":
         "anonymous will use every available proxy; an explicit protocol mapping wins over inferring the protocol from the model name.",
@@ -697,7 +709,7 @@ const DICTIONARY = {
       "guide.step.upstream": "Chọn kênh upstream",
       "guide.step.upstream.desc": "Có ít nhất một Zen / Go Key, hoặc đã bật kênh ẩn danh.",
       "guide.step.proxy": "Kiểm tra Proxy",
-      "guide.step.proxy.desc": "Có ít nhất một nút proxy còn khỏe.",
+      "guide.step.proxy.desc": "Có ít nhất một nút proxy còn khỏe, hoặc WARP đang tải lưu lượng model miễn phí.",
       "guide.step.models": "Chờ danh mục mô hình",
       "guide.step.access": "Sao chép ví dụ tích hợp",
       "guide.step.access.desc": "Vào Sổ tay tích hợp, thay mô hình và YOUR_API_KEY.",
@@ -807,6 +819,18 @@ const DICTIONARY = {
       "config.proxy.caption":
         "Hỗ trợ direct, HTTP(S) và URL SOCKS. Thêm hậu tố #pool để đánh dấu mục đó là proxy pool luân chuyển: gateway sẽ mở kết nối mới cho mỗi lần thử, bỏ qua cooldown và loại bỏ theo sức khoẻ, và thử lại tối đa retry.max_attempts lần.",
       "config.proxy.add": "Thêm Proxy (mỗi dòng một cái)",
+      "config.warp.title": "Đầu ra WARP",
+      "config.warp.caption":
+        "Khi bật, lưu lượng model miễn phí (kênh ẩn danh, Zen Key cho model miễn phí, kiểm tra model miễn phí) đi qua đường hầm Cloudflare WARP chạy trong tiến trình và không dùng proxy nào; gói Go và model trả phí vẫn giữ proxy. Đầu ra trả 429/403 bị loại và đăng ký lại ở nền; yêu cầu model miễn phí tiếp tục đổi đầu ra cho đến khi hết retry.max_attempts rồi mới trả 429 cuối cùng cho client.",
+      "config.warp.enabled": "Đưa lưu lượng model miễn phí qua WARP",
+      "config.warp.pool": "Số đầu ra WARP tối đa",
+      "config.warp.pool.hint":
+        "Là giới hạn trên, không phải số cố định: vòng đầu ra đang hoạt động thay đổi theo mức đồng thời (mỗi yêu cầu đang chạy một đầu ra, cộng một đầu ra dự phòng) và thu gọn sau 60 giây nhàn rỗi.",
+      "config.warp.stack": "Ngăn xếp mạng",
+      "config.warp.stack.dual": "Hai ngăn xếp",
+      "config.warp.source": "Tiền tố nguồn IPv6 bên ngoài (/64)",
+      "config.warp.source.hint":
+        "Chỉ dùng với ngăn xếp mạng IPv6. Mỗi đầu ra WARP gắn một địa chỉ nguồn trong tiền tố này, nên khi thay đầu ra là thay luôn địa chỉ công cộng; để trống sẽ dùng địa chỉ nguồn mặc định của máy chủ.",
       "config.upstream.title": "Upstream và định tuyến giao thức",
       "config.upstream.caption":
         "anonymous sẽ dùng hết các Proxy khả dụng; ánh xạ protocol tường minh được ưu tiên hơn việc suy luận từ tên mô hình.",
@@ -1251,7 +1275,7 @@ const DICTIONARY = {
       "guide.step.upstream": "Scegli un canale upstream",
       "guide.step.upstream.desc": "Almeno una Zen / Go Key, oppure il canale anonimo abilitato.",
       "guide.step.proxy": "Controlla i proxy",
-      "guide.step.proxy.desc": "Almeno un nodo proxy è ancora integro.",
+      "guide.step.proxy.desc": "Almeno un nodo proxy è ancora integro, oppure WARP trasporta il traffico dei modelli gratuiti.",
       "guide.step.models": "Attendi il catalogo modelli",
       "guide.step.access": "Copia un esempio di integrazione",
       "guide.step.access.desc":
@@ -1365,6 +1389,18 @@ const DICTIONARY = {
       "config.proxy.caption":
         "Supporta URL direct, HTTP(S) e SOCKS. Aggiungi il suffisso #pool a una voce per contrassegnarla come pool proxy rotante: il gateway apre allora una nuova connessione per ogni tentativo, salta il cooldown e l'eviction dei nodi non integri, e la ritenta fino a retry.max_attempts volte.",
       "config.proxy.add": "Aggiungi proxy (uno per riga)",
+      "config.warp.title": "Uscita WARP",
+      "config.warp.caption":
+        "Quando è attivo, il traffico dei modelli gratuiti (canale anonimo, Zen Key per modelli gratuiti, probe dei modelli gratuiti) esce attraverso un tunnel Cloudflare WARP in userspace e non usa alcun proxy; piano Go e modelli a pagamento mantengono i loro proxy. Un'uscita che risponde 429/403 viene ritirata e registrata di nuovo in background; una richiesta per modelli gratuiti continua a cambiare uscita finché non esaurisce retry.max_attempts, e solo allora l'ultimo 429 raggiunge il client.",
+      "config.warp.enabled": "Instrada il traffico dei modelli gratuiti tramite WARP",
+      "config.warp.pool": "Numero massimo di uscite WARP",
+      "config.warp.pool.hint":
+        "È un limite massimo, non un numero fisso: il ring attivo segue la concorrenza (un'uscita per richiesta in corso più una di riserva) e si riduce dopo 60 secondi di inattività.",
+      "config.warp.stack": "Stack di rete",
+      "config.warp.stack.dual": "Doppio stack",
+      "config.warp.source": "Prefisso sorgente IPv6 esterno (/64)",
+      "config.warp.source.hint":
+        "Usato solo con lo stack IPv6. Ogni uscita WARP associa un indirizzo sorgente da questo prefisso, quindi sostituire un'uscita sostituisce anche l'indirizzo pubblico; lascia vuoto per usare l'indirizzo sorgente predefinito dell'host.",
       "config.upstream.title": "Upstream e instradamento protocolli",
       "config.upstream.caption":
         "anonymous userà ogni proxy disponibile; una mappatura esplicita di protocollo prevale sull'inferenza del protocollo dal nome del modello.",
