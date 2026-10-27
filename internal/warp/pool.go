@@ -19,9 +19,23 @@ const DefaultPoolSize = 2
 // that block, so a new tunnel inside it would only repeat the same answer.
 const egressCooldown = 30 * time.Minute
 
-// refillRetryDelay spaces out a failed registration attempt. A successful
-// attempt is only limited by the registrar's own 12-second pacing.
+// refillRetryDelay spaces out a failed registration attempt. Successful
+// registrations run back to back in the background.
 const refillRetryDelay = 5 * time.Second
+
+// A pool can only hold as many exits as Cloudflare hands out distinct egress
+// blocks. When preload is larger than that supply, every extra registration is
+// a duplicate; after a few in a row the pool stops trying for a while instead
+// of hammering the registration API forever.
+const (
+	refillFailureThreshold = 3
+	refillBackoffBase      = time.Minute
+	refillBackoffMax       = 5 * time.Minute
+)
+
+// errDuplicateEgress reports a registration whose public egress block is
+// already active or cooling down.
+var errDuplicateEgress = errors.New("WARP egress is already active or cooling down")
 
 // scaleDownDelay keeps exits created for a burst hot for a while after the
 // burst, so a following burst reuses them instead of paying for new
@@ -73,6 +87,7 @@ type Pool struct {
 	cancel  context.CancelFunc
 	logger  logger
 	size    int
+	preload int
 	stack   Stack
 	newExit func(context.Context) (*exit, error)
 
@@ -87,8 +102,12 @@ type Pool struct {
 	closed    bool
 	refilling bool
 	scaling   bool
-	wait      sync.WaitGroup
-	createMu  sync.Mutex
+	// refillFailures counts consecutive failed preload registrations;
+	// refillPaused keeps every refill trigger quiet until it expires.
+	refillFailures int
+	refillPaused   time.Time
+	wait           sync.WaitGroup
+	createMu       sync.Mutex
 }
 
 type Lease struct {
@@ -101,6 +120,10 @@ type Lease struct {
 type Snapshot struct {
 	Stack string
 	Size  int
+	// Preload is the number of exits kept hot even when the pool is idle:
+	// half of Size (at least one), registered in the background after the
+	// first exit so a burst does not wait for a registration.
+	Preload int
 	// Active is the number of exits currently in the ring. Standby counts the
 	// idle part of it: exits not held by a lease and ready to replace a
 	// penalized one immediately.
@@ -112,9 +135,9 @@ type Snapshot struct {
 
 // Options configure a WARP pool.
 type Options struct {
-	// Size is the upper bound on exits. The pool keeps as many exits hot as
-	// the current concurrency needs (leases in flight plus queued requests,
-	// plus a spare) and never exceeds Size.
+	// Size is the upper bound on exits. Half of it (at least one) is kept hot
+	// as a preload even while the pool is idle; beyond that the pool keeps as
+	// many exits hot as the current concurrency needs and never exceeds Size.
 	Size int
 	// Stack selects the address family inside the tunnel. An IPv6 stack makes
 	// the public egress an IPv6 address.
@@ -189,6 +212,14 @@ func newPool(ctx context.Context, log logger, size int, create func(context.Cont
 	if size <= 0 {
 		size = DefaultPoolSize
 	}
+	// Keep half of the ceiling warm (at least one) so a burst finds ready
+	// exits instead of paying for registrations while requests queue. The
+	// first exit is synchronous and gates readiness; the rest register in the
+	// background.
+	preload := size / 2
+	if preload < 1 {
+		preload = 1
+	}
 	// The caller's context bounds the synchronous first registration, not the
 	// pool: it is typically an initialization deadline that expires moments
 	// after NewWithOptions returns. Deriving the pool lifetime from it would
@@ -200,19 +231,40 @@ func newPool(ctx context.Context, log logger, size int, create func(context.Cont
 		cancel:   cancel,
 		logger:   log,
 		size:     size,
+		preload:  preload,
 		newExit:  create,
 		reserved: make(map[string]bool),
 		cooling:  make(map[string]time.Time),
 		changed:  make(chan struct{}),
 	}
+	// The first registration gates readiness. Cloudflare can answer it with a
+	// rate limit even when this process has just started (the limit follows the
+	// source address), so wait out that window inside the caller's deadline
+	// instead of failing startup over a pause that is about to end. Any other
+	// failure still fails closed.
 	first, err := p.createExit(ctx)
-	if err != nil {
-		cancel()
-		return nil, err
+	for err != nil {
+		pause := registrationPause(err)
+		if pause <= 0 {
+			cancel()
+			return nil, err
+		}
+		if log != nil {
+			log.Infof("OpenCode WARP first registration paused for %s", pause.Round(time.Second))
+		}
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			cancel()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		first, err = p.createExit(ctx)
 	}
 	p.active = []*exit{first}
 	if log != nil {
-		log.Infof("OpenCode WARP/%s pool ready (max %d exits, one spare)", first.stack, size)
+		log.Infof("OpenCode WARP/%s pool ready (max %d exits, preloading %d)", first.stack, size, preload)
 	}
 	p.startRefill()
 	return p, nil
@@ -220,10 +272,14 @@ func newPool(ctx context.Context, log logger, size int, create func(context.Cont
 
 // desiredLocked is the number of exits the pool should keep hot: one per
 // in-flight lease, one for every request waiting for an exit, plus a spare, so
-// a 429 can switch to a ready exit instead of waiting for a registration. Size
-// is the upper bound; at idle a pool of two or more keeps one spare.
+// a 429 can switch to a ready exit instead of waiting for a registration. The
+// preload floor keeps half the ceiling registered while the pool is idle.
+// Size is the upper bound; at idle a pool of two or more keeps one spare.
 func (p *Pool) desiredLocked() int {
 	want := p.inflight + p.waiting + 1
+	if want < p.preload {
+		want = p.preload
+	}
 	if want < 2 {
 		want = 2
 	}
@@ -305,7 +361,7 @@ func (p *Pool) Size() int { return p.size }
 func (p *Pool) Snapshot() Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	snapshot := Snapshot{Stack: string(p.stack), Size: p.size, Active: len(p.active), Cooling: len(p.cooling)}
+	snapshot := Snapshot{Stack: string(p.stack), Size: p.size, Preload: p.preload, Active: len(p.active), Cooling: len(p.cooling)}
 	for _, active := range p.active {
 		if active.idle() {
 			snapshot.Standby++
@@ -383,7 +439,11 @@ func (p *Pool) replace(old *exit, reason string) {
 			old.retire()
 		}
 		if p.logger != nil {
-			p.logger.Errorf("Cannot replace OpenCode WARP egress %s: %v", old.id, err)
+			if pause := registrationPause(err); pause > 0 {
+				p.logger.Infof("OpenCode WARP replacement paused for %s", pause.Round(time.Second))
+			} else {
+				p.logger.Errorf("Cannot replace OpenCode WARP egress %s: %v", old.id, err)
+			}
 		}
 		p.startRefill()
 		return
@@ -417,7 +477,7 @@ func (p *Pool) replace(old *exit, reason string) {
 
 func (p *Pool) refill() {
 	p.mu.Lock()
-	if p.closed || p.refilling || !p.needsRefillLocked() {
+	if p.closed || p.refilling || time.Now().Before(p.refillPaused) || !p.needsRefillLocked() {
 		p.mu.Unlock()
 		return
 	}
@@ -433,6 +493,10 @@ func (p *Pool) refill() {
 		replacement = nil
 		placed = true
 	}
+	if err == nil {
+		p.refillFailures = 0
+		p.refillPaused = time.Time{}
+	}
 	if placed || p.closed {
 		p.notifyLocked()
 	}
@@ -443,20 +507,69 @@ func (p *Pool) refill() {
 		replacement.close()
 	}
 	if err != nil && p.ctx.Err() == nil {
-		if p.logger != nil {
+		delay := refillRetryDelay
+		if pause := registrationPause(err); pause > 0 {
+			// Cloudflare's rate limit is the pacing: wait out the window it
+			// asked for instead of retrying into the same answer.
+			delay = pause
+			if delay < refillRetryDelay {
+				delay = refillRetryDelay
+			}
+			if delay > maxRateLimitPause {
+				delay = maxRateLimitPause
+			}
+			if p.logger != nil {
+				p.logger.Infof("OpenCode WARP registration paused for %s", delay.Round(time.Second))
+			}
+		} else if errors.Is(err, errDuplicateEgress) {
+			p.mu.Lock()
+			p.refillFailures++
+			failures := p.refillFailures
+			p.mu.Unlock()
+			if failures >= refillFailureThreshold {
+				// The egress supply is smaller than the target. Back off
+				// exponentially so a saturated colo is not registered into
+				// forever.
+				shift := failures - refillFailureThreshold
+				if shift > 3 {
+					shift = 3
+				}
+				delay = refillBackoffBase << shift
+				if delay > refillBackoffMax {
+					delay = refillBackoffMax
+				}
+				if p.logger != nil {
+					p.logger.Infof("OpenCode WARP preload paused for %s after %d duplicate egresses", delay.Round(time.Second), failures)
+				}
+			}
+		} else if p.logger != nil {
 			p.logger.Warnf("Cannot pre-register OpenCode WARP egress: %v", err)
 		}
-		// Every registration is already paced by the registrar; retry soon
-		// instead of leaving the pool under its target for a long window.
-		p.after(refillRetryDelay, p.startRefill)
+		p.mu.Lock()
+		if paused := time.Now().Add(delay); paused.After(p.refillPaused) {
+			p.refillPaused = paused
+		}
+		p.mu.Unlock()
+		p.after(delay, p.retryRefill)
 		return
 	}
 	p.startRefill()
 }
 
+// retryRefill is the timer half of a failed refill: it clears the pause that
+// kept ordinary triggers quiet and asks for another attempt. Going through
+// startRefill (rather than calling refill directly) keeps the single-flight
+// guard.
+func (p *Pool) retryRefill() {
+	p.mu.Lock()
+	p.refillPaused = time.Time{}
+	p.mu.Unlock()
+	p.startRefill()
+}
+
 func (p *Pool) startRefill() {
 	p.mu.Lock()
-	if p.closed || p.refilling || !p.needsRefillLocked() {
+	if p.closed || p.refilling || time.Now().Before(p.refillPaused) || !p.needsRefillLocked() {
 		p.mu.Unlock()
 		return
 	}
@@ -532,9 +645,18 @@ func (p *Pool) scaleDown() {
 	}
 }
 
-// after runs fn once delay has elapsed, unless the pool closes first.
+// after runs fn once delay has elapsed, unless the pool closes first. The wait
+// group is incremented under the pool lock so it cannot race with Close's
+// Wait: a timer scheduled after Close is not started at all, and one scheduled
+// before it is counted before Close can begin waiting.
 func (p *Pool) after(delay time.Duration, fn func()) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	p.wait.Add(1)
+	p.mu.Unlock()
 	go func() {
 		defer p.wait.Done()
 		timer := time.NewTimer(delay)
@@ -581,7 +703,7 @@ func (p *Pool) createExit(ctx context.Context) (*exit, error) {
 			}
 			return candidate, nil
 		}
-		lastErr = fmt.Errorf("WARP egress %s is already active or cooling down", key)
+		lastErr = fmt.Errorf("%w: %s", errDuplicateEgress, key)
 		if p.logger != nil {
 			p.logger.Warnf("Discarding duplicate WARP exit %s: %v", candidate.id, lastErr)
 		}

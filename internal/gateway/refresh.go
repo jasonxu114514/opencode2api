@@ -276,8 +276,8 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		var models []string
 		var status int
 		var err error
-		// List models on the configured v2 /inference origin first, then fall
-		// back to the v1 origin (see anonymousUpstreams).
+		// List models on the configured v2 /inference origin; the v1 fallback
+		// is retired (see anonymousUpstreams).
 		for _, upstream := range g.anonymousUpstreams() {
 			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, upstream, anonymousZenKey)
 			if err == nil || isProxyFailure(err) {

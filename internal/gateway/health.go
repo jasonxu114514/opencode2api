@@ -54,6 +54,7 @@ type healthWarp struct {
 	Status  string `json:"status"`
 	Stack   string `json:"stack"`
 	Size    int    `json:"size"`
+	Preload int    `json:"preload"`
 	Active  int    `json:"active"`
 	Standby int    `json:"standby"`
 	Cooling int    `json:"cooling"`
@@ -79,6 +80,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			Status:  "unavailable",
 			Stack:   snapshot.Stack,
 			Size:    snapshot.Size,
+			Preload: snapshot.Preload,
 			Active:  snapshot.Active,
 			Standby: snapshot.Standby,
 			Cooling: snapshot.Cooling,

@@ -266,7 +266,7 @@ const DICTIONARY = {
       "config.warp.enabled": "Send free-model traffic through WARP",
       "config.warp.pool": "Maximum WARP exits",
       "config.warp.pool.hint":
-        "An upper bound, not a fixed count: the active ring follows concurrency (one exit per in-flight request plus a spare) and shrinks after 60 idle seconds.",
+        "An upper bound, not a fixed count: after the first exit is ready, half of it (at least one) is pre-registered in the background as warm capacity; the active ring then follows concurrency (one exit per in-flight request plus a spare) and shrinks after 60 idle seconds.",
       "config.warp.stack": "Network stack",
       "config.warp.stack.dual": "Dual stack",
       "config.warp.source": "Outer IPv6 source prefix (/64)",
@@ -825,7 +825,7 @@ const DICTIONARY = {
       "config.warp.enabled": "Đưa lưu lượng model miễn phí qua WARP",
       "config.warp.pool": "Số đầu ra WARP tối đa",
       "config.warp.pool.hint":
-        "Là giới hạn trên, không phải số cố định: vòng đầu ra đang hoạt động thay đổi theo mức đồng thời (mỗi yêu cầu đang chạy một đầu ra, cộng một đầu ra dự phòng) và thu gọn sau 60 giây nhàn rỗi.",
+        "Là giới hạn trên, không phải số cố định: sau khi đầu ra đầu tiên sẵn sàng, một nửa (ít nhất một) được đăng ký trước ở nền; vòng hoạt động sau đó thay đổi theo mức đồng thời (mỗi yêu cầu đang chạy một đầu ra, cộng một đầu ra dự phòng) và thu gọn sau 60 giây nhàn rỗi.",
       "config.warp.stack": "Ngăn xếp mạng",
       "config.warp.stack.dual": "Hai ngăn xếp",
       "config.warp.source": "Tiền tố nguồn IPv6 bên ngoài (/64)",
@@ -1395,7 +1395,7 @@ const DICTIONARY = {
       "config.warp.enabled": "Instrada il traffico dei modelli gratuiti tramite WARP",
       "config.warp.pool": "Numero massimo di uscite WARP",
       "config.warp.pool.hint":
-        "È un limite massimo, non un numero fisso: il ring attivo segue la concorrenza (un'uscita per richiesta in corso più una di riserva) e si riduce dopo 60 secondi di inattività.",
+        "È un limite massimo, non un numero fisso: dopo la prima uscita, metà del valore (almeno una) viene pre-registrata in background; il ring attivo segue poi la concorrenza (un'uscita per richiesta in corso più una di riserva) e si riduce dopo 60 secondi di inattività.",
       "config.warp.stack": "Stack di rete",
       "config.warp.stack.dual": "Doppio stack",
       "config.warp.source": "Prefisso sorgente IPv6 esterno (/64)",

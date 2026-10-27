@@ -8,8 +8,9 @@
 // 1.x User-Agent, the x-opencode-request header, a git-commit-shaped project
 // and, on the free tier, the 1.x toolset. The v2 lane is the /inference
 // origin (upstream.anonymous) and the Go plan's /zen/go origin, which expect
-// the OpenCode 2.x CLI shape. The anonymous free tier tries the configured v2
-// /inference origin first and falls back to the v1 origin.
+// the OpenCode 2.x CLI shape. The anonymous free tier uses the configured v2
+// /inference origin only; the retired v1 fallback is kept in
+// anonymousUpstreams but commented out.
 package gateway
 
 import (

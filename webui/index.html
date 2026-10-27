@@ -881,7 +881,7 @@
                       <label for="c-warp-pool" data-i18n="config.warp.pool">WARP 出口上限</label>
                       <input id="c-warp-pool" type="number" min="1" max="32" step="1" />
                       <p class="section-caption" data-i18n="config.warp.pool.hint">
-                        上限而非固定值：活跃出口随并发调整（每个在途请求一个，另留一个备用），空闲 60 秒后自动回收。
+                        上限而非固定值：第一个出口就绪后，后台预注册一半（至少 1 个）作为暖池；活跃出口随并发调整（每个在途请求一个，另留一个备用），空闲 60 秒后回收多余出口。
                       </p>
                     </div>
                     <div class="field">

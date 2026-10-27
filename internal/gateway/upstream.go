@@ -347,13 +347,14 @@ func (g *Gateway) maxAnonymousExits() int {
 // proxy is tried at most once, up to performance.max_anonymous_exits proxies;
 // rotating #pool proxies may be drawn again until Retry.MaxAttempts proxies
 // were used. For each proxy it tries the upstreams in anonymousUpstreams
-// order: the configured v2 /inference upstream (Upstream.Anonymous) before the
-// v1 lane (models.V1Base). Any failure, including an HTTP error response,
-// advances to the next upstream or proxy; a proxy-route failure, or a proxy
-// marked unhealthy, skips that proxy's remaining upstreams. Only a successful
-// response ends the anonymous phase; exhausting the proxy cursor returns
-// control to the preferred authenticated tiers. It returns the last response
-// (body still open), else the last error, plus the number of attempts made.
+// order: the configured v2 /inference upstream (Upstream.Anonymous) only, since
+// the v1 lane fallback is retired and commented out there. Any failure,
+// including an HTTP error response, advances to the next upstream or proxy; a
+// proxy-route failure, or a proxy marked unhealthy, skips that proxy's
+// remaining upstreams. Only a successful response ends the anonymous phase;
+// exhausting the proxy cursor returns control to the preferred authenticated
+// tiers. It returns the last response (body still open), else the last error,
+// plus the number of attempts made.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	if g.usesWARP(route.ID, config.TierZen, true) {
 		return g.doWarpAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
@@ -550,17 +551,21 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	return nil, lastErr, attempts
 }
 
-// anonymousUpstreams returns the ordered base URLs for the keyless free tier:
-// the configured v2 /inference origin (Upstream.Anonymous) is tried first, and
-// the v1 origin (models.V1Base) is kept as a fallback. Only the v1 origin is
-// returned when Upstream.Anonymous is empty or names that same origin.
+// anonymousUpstreams returns the ordered base URLs for the keyless free tier.
+// Only the v2 /inference origin is used: the 1.x /zen lane was retired for free
+// models, so the v1 fallback is commented out rather than called. The code is
+// kept for a revert; uncommenting the two lines marked below restores the old
+// order (v2 first, v1 as fallback).
 func (g *Gateway) anonymousUpstreams() []string {
-	v1 := strings.TrimRight(models.V1Base, "/")
+	// v1 := strings.TrimRight(models.V1Base, "/")
 	primary := strings.TrimRight(g.cfg.Upstream.Anonymous, "/")
-	if primary == "" || strings.EqualFold(v1, primary) {
-		return []string{models.V1Base}
+	if primary == "" {
+		// Config normalization fills this; keep the v2 default for a zero-value
+		// config so this never falls through to the retired v1 lane.
+		primary = "https://opencode.ai/inference"
 	}
-	return []string{g.cfg.Upstream.Anonymous, models.V1Base}
+	return []string{primary}
+	// return []string{g.cfg.Upstream.Anonymous, models.V1Base}
 }
 
 // inferenceClient picks the client of proxy for a request for model to

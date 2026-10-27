@@ -79,12 +79,11 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 	}
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
-		// Without a client project every caller would otherwise share one
-		// constant upstream project.
-		projectSignal = "opencode2api:default-project"
-		if scope != "" {
-			projectSignal += ":" + scope
-		}
+		// A fresh project id per request. The free tier ledges its quota per
+		// project id and egress, so one shared id is one shared bucket: the old
+		// per-caller default arrived pre-burned on popular exits. A client that
+		// names its project keeps that name.
+		projectSignal = RandomProjectID()
 	}
 	parentSession := jsonutil.FirstString(
 		r.Header.Get("x-parent-session-id"),
@@ -283,4 +282,16 @@ func RandomID(prefix string, size int) string {
 		panic(fmt.Sprintf("crypto/rand failed: %v", err))
 	}
 	return prefix + "_" + hex.EncodeToString(buf)
+}
+
+// RandomProjectID returns a project id in the shape the official CLI sends: the
+// 40-character hex of a git root commit. It is minted per request when the
+// client names no project, because the free tier ledges quota per project id
+// and egress together. It panics when the system random source fails.
+func RandomProjectID() string {
+	buf := make([]byte, 20)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	return hex.EncodeToString(buf)
 }

@@ -20,9 +20,46 @@ import (
 )
 
 const (
+	// defaultRateLimitPause is used when Cloudflare answers a registration
+	// with 429 but omits Retry-After. It matches the historical registration
+	// cadence.
+	defaultRateLimitPause = 12 * time.Second
+	// maxRateLimitPause bounds how long a rate-limit answer can keep new
+	// registrations out. A larger server value is clamped so a bad header
+	// cannot freeze the pool for hours.
+	maxRateLimitPause = 5 * time.Minute
+)
+
+// RegistrationWindow is the longest pause Cloudflare's registration rate limit
+// can impose: a caller that needs a first exit before it can serve waits out one
+// full window rather than failing on a pause that is about to end.
+const RegistrationWindow = maxRateLimitPause
+
+// registrationPausedError reports that Cloudflare asked for a pause before
+// the next device registration. The pool schedules its retry from it instead
+// of sleeping inside the registration path.
+type registrationPausedError struct {
+	retryAfter time.Duration
+	reason     string
+}
+
+func (e *registrationPausedError) Error() string {
+	return fmt.Sprintf("Cloudflare registration paused for %s: %s", e.retryAfter.Round(time.Second), e.reason)
+}
+
+// registrationPause returns the delay a failed registration asked for, or 0
+// when the failure was not a rate limit.
+func registrationPause(err error) time.Duration {
+	var paused *registrationPausedError
+	if errors.As(err, &paused) {
+		return paused.retryAfter
+	}
+	return 0
+}
+
+const (
 	defaultAPIBase = "https://api.cloudflareclient.com/v0i1909051800"
 	defaultPeer    = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-	registerGap    = 12 * time.Second
 )
 
 var fallbackEndpoints = []string{
@@ -45,11 +82,11 @@ type registration struct {
 }
 
 type registrar struct {
-	base    string
-	client  *http.Client
-	minGap  time.Duration
-	mu      sync.Mutex
-	lastReg time.Time
+	base   string
+	client *http.Client
+
+	mu          sync.Mutex
+	blockedTill time.Time
 }
 
 func newRegistrar() *registrar {
@@ -65,25 +102,42 @@ func newRegistrar() *registrar {
 				TLSHandshakeTimeout: 10 * time.Second,
 			},
 		},
-		minGap: registerGap,
 	}
 }
 
-func (r *registrar) register(ctx context.Context) (registration, error) {
+// blocked reports how much longer Cloudflare's last rate-limit answer keeps
+// new registrations out.
+func (r *registrar) blocked() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if wait := r.minGap - time.Since(r.lastReg); wait > 0 {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return registration{}, ctx.Err()
-		case <-timer.C:
-		}
+	if wait := time.Until(r.blockedTill); wait > 0 {
+		return wait
 	}
-	r.lastReg = time.Now()
+	return 0
+}
 
+// pause records Cloudflare's rate-limit window. Existing windows only grow,
+// so overlapping answers cannot shorten one another.
+func (r *registrar) pause(wait time.Duration) {
+	if wait <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if until := time.Now().Add(wait); until.After(r.blockedTill) {
+		r.blockedTill = until
+	}
+}
+
+// register creates and enables one WARP device. Registrations are not paced by
+// a fixed gap: the pool registers in the background while traffic is served.
+// Cloudflare's own 429/Retry-After answer becomes the pacing instead — it is
+// recorded here and the caller retries when the window ends, so a rate limit
+// never blocks registration behind a long sleep.
+func (r *registrar) register(ctx context.Context) (registration, error) {
+	if wait := r.blocked(); wait > 0 {
+		return registration{}, &registrationPausedError{retryAfter: wait, reason: "Cloudflare rate limit"}
+	}
 	privateKey, publicKey, err := wireGuardKeypair()
 	if err != nil {
 		return registration{}, err
@@ -239,18 +293,24 @@ func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("Cloudflare API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
-			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
-				return lastErr
-			}
-			if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > 0 {
-				timer := time.NewTimer(retryAfter)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return ctx.Err()
-				case <-timer.C:
+			bodyText := strings.TrimSpace(string(data))
+			if resp.StatusCode == http.StatusTooManyRequests {
+				// Cloudflare's own limit becomes the pacing. Record it and fail
+				// fast: sleeping here would hold the pool's create mutex and
+				// stall replacements for the whole window.
+				pause := parseRetryAfter(resp.Header.Get("Retry-After"))
+				if pause <= 0 {
+					pause = defaultRateLimitPause
 				}
+				if pause > maxRateLimitPause {
+					pause = maxRateLimitPause
+				}
+				r.pause(pause)
+				return &registrationPausedError{retryAfter: pause, reason: bodyText}
+			}
+			lastErr = fmt.Errorf("Cloudflare API HTTP %d: %s", resp.StatusCode, bodyText)
+			if resp.StatusCode < 500 {
+				return lastErr
 			}
 			continue
 		}

@@ -241,6 +241,13 @@ func (m *RuntimeController) selectWARP(cfg config.Config) (*warp.Pool, string, b
 	if timeout <= 0 || timeout > 2*time.Minute {
 		timeout = 2 * time.Minute
 	}
+	// The first registration is synchronous: it decides whether the runtime can
+	// serve free traffic at all. Cloudflare can answer it with a rate limit even
+	// on a fresh process, so give initialization room for one full window
+	// instead of failing startup on a pause that is about to end.
+	if timeout < warp.RegistrationWindow+30*time.Second {
+		timeout = warp.RegistrationWindow + 30*time.Second
+	}
 	ctx, cancel := context.WithTimeout(m.root, timeout)
 	defer cancel()
 	pool, err := warp.NewWithOptions(ctx, m.logger, warp.Options{Size: cfg.Warp.PoolSize, Stack: warp.Stack(cfg.Warp.Stack), SourceIPv6: source})

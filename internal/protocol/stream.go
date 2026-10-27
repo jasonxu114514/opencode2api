@@ -336,7 +336,7 @@ func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 	if renamer.protocol != Chat {
 		// Anthropic and Responses streams always carry a complete tool name in
 		// a single event, so the stateless object rewrite is exact.
-		if !strings.Contains(raw, ClientToolPrefix) {
+		if !mayCarryToolName([]byte(raw)) {
 			return []byte(raw)
 		}
 		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.renames)
@@ -429,8 +429,12 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 		delete(function, "name")
 		return true
 	}
-	function["name"] = state.pending
-	state.decided = true
+	// The name is complete. Resolve folds a spelling that differs from exactly
+	// one declared client tool only in case or separators; a name nothing
+	// declared is written out as the model sent it.
+	client, renamed := renamer.renames.Resolve(state.pending)
+	function["name"] = client
+	state.decided, state.renamed = true, renamed
 	return true
 }
 

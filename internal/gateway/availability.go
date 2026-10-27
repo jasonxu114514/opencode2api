@@ -94,6 +94,18 @@ func (m *RuntimeController) checkFreeModels(ctx context.Context) {
 		if r == nil {
 			return
 		}
+		// A WARP probe is a real OpenCode request: an automatic sweep must not
+		// take the last exit and rotate it away on a 429. Wait until the pool
+		// has a spare, and stop the sweep entirely once one probe has retired
+		// an exit, so a burst of probes cannot drain the warm bench.
+		var warpCooling int
+		if r.gateway.warp != nil {
+			snapshot := r.gateway.warp.Snapshot()
+			if snapshot.Active <= 1 {
+				return
+			}
+			warpCooling = snapshot.Cooling
+		}
 		item = r.availability.Get(item.Model)
 		if item.Manual {
 			continue
@@ -114,5 +126,10 @@ func (m *RuntimeController) checkFreeModels(ctx context.Context) {
 			m.logger.Info("free model availability checked", "component", "models", "event", "availability_checked", "model", item.Model, "available", result.success, "reason", result.reason, "channel", result.channel)
 		}
 		m.updateMu.Unlock()
+		if r.gateway.warp != nil && r.gateway.warp.Snapshot().Cooling > warpCooling {
+			// The probe's 429 retired an exit. Leave the rest of the sweep for
+			// the next tick instead of spending the remaining warm exits.
+			return
+		}
 	}
 }
