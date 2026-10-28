@@ -10,6 +10,7 @@ import (
 	"opencode2api/internal/config"
 	"opencode2api/internal/gateway"
 	"opencode2api/internal/httpx"
+	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	modelcatalog "opencode2api/internal/models"
 	"opencode2api/internal/protocol"
@@ -142,6 +143,11 @@ func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
 	if selectedKey != nil {
 		request = request.WithContext(gateway.WithDebugKeyOverride(request.Context(), gateway.DebugKeyOverride{Tier: selectedKey.Tier, KeyID: selectedKey.ID}))
 	}
+	// A Playground request is not a conversation. Identity derived from the
+	// prompt alone would make every click reuse one session, and therefore one
+	// quota bucket, until that bucket is exhausted and the bench reports 429
+	// while live traffic still succeeds.
+	request.Header.Set("x-opencode-session", identity.RandomID("playground", 24))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	recorder := debugResponseRecorder()
