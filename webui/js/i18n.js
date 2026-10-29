@@ -209,6 +209,10 @@ const DICTIONARY = {
       "playground.key.auto": "Automatic routing (anonymous / Tier fallback / Key rotation)",
       "playground.key.caption":
         "When a specific key is chosen, only that key is tried: no switch to another key, another Tier, or the anonymous channel, and no change to the key's cooldown state or the proxy's health.",
+      "playground.relay": "Relay",
+      "playground.relay.auto": "Any relay (normal routing)",
+      "playground.relay.caption":
+        "Pinning a relay sends exactly one attempt through it, with real session minting, system prompt and tool shaping: no failover, and no change to cooldown or proxy health.",
       "playground.request": "Request JSON",
       "playground.reset": "Reset sample",
       "playground.run": "Send diagnostic request",
@@ -453,6 +457,7 @@ const DICTIONARY = {
       "play.mode.selected": "Specified {0} key",
       "play.mode.auto": "Automatic routing",
       "play.testedKey": "Key tested",
+      "play.testedRelay": "Relay tested",
       "play.keyVerdict": "Key verdict",
       "play.keyVerdict.none": "Automatic routing has no dedicated verdict",
       "play.key.usable": "Key usable",
@@ -780,6 +785,10 @@ const DICTIONARY = {
       "playground.key.auto": "Định tuyến tự động (ẩn danh / dự phòng Tier / luân phiên Key)",
       "playground.key.caption":
         "Khi chọn một Key cụ thể, chỉ Key đó được thử: không chuyển sang Key khác, Tier khác hay kênh ẩn danh, và không làm thay đổi trạng thái cooldown của Key hay sức khoẻ của proxy.",
+      "playground.relay": "Relay",
+      "playground.relay.auto": "Mọi relay (định tuyến thường)",
+      "playground.relay.caption":
+        "Ghim một relay sẽ gửi đúng một lần thử qua nó, với session, system prompt và tool shaping thật: không failover, không đổi cooldown hay sức khoẻ proxy.",
       "playground.request": "JSON của request",
       "playground.reset": "Đặt lại mẫu",
       "playground.run": "Gửi request chẩn đoán",
@@ -1025,6 +1034,7 @@ const DICTIONARY = {
       "play.mode.selected": "Chỉ định Key {0}",
       "play.mode.auto": "Định tuyến tự động",
       "play.testedKey": "Key được thử",
+      "play.testedRelay": "Relay được thử",
       "play.keyVerdict": "Kết luận về Key",
       "play.keyVerdict.none": "Định tuyến tự động không có kết luận riêng",
       "play.key.usable": "Key dùng được",
@@ -1362,6 +1372,10 @@ const DICTIONARY = {
         "Instradamento automatico (anonimo / fallback Tier / rotazione chiavi)",
       "playground.key.caption":
         "Quando viene scelta una chiave specifica, si prova solo quella: nessun passaggio a un'altra chiave, a un altro Tier o al canale anonimo, e nessuna modifica allo stato di cooldown della chiave o all'integrità del proxy.",
+      "playground.relay": "Relay",
+      "playground.relay.auto": "Qualsiasi relay (routing normale)",
+      "playground.relay.caption":
+        "Fissare un relay invia esattamente un tentativo attraverso di esso, con sessione, system prompt e tool shaping reali: nessun failover, nessuna modifica a cooldown o integrità del proxy.",
       "playground.request": "JSON della richiesta",
       "playground.reset": "Reimposta esempio",
       "playground.run": "Invia richiesta diagnostica",
@@ -1609,6 +1623,7 @@ const DICTIONARY = {
       "play.mode.selected": "Chiave {0} specificata",
       "play.mode.auto": "Instradamento automatico",
       "play.testedKey": "Chiave testata",
+      "play.testedRelay": "Relay testato",
       "play.keyVerdict": "Verdetto sulla chiave",
       "play.keyVerdict.none": "L'instradamento automatico non ha un verdetto dedicato",
       "play.key.usable": "Chiave utilizzabile",

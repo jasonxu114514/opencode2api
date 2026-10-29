@@ -104,6 +104,7 @@ type anonymousCursor struct {
 	start  int
 	offset int
 	used   []bool
+	single bool
 }
 
 // anonymousPool builds one anonymous node per proxy transport, or an empty
@@ -153,6 +154,24 @@ func (p *anonymousNodes) HasPool() bool {
 // CursorFor returns a cursor whose first node is stable for a non-empty
 // affinity key, keeping a conversation on one exit; an empty affinity rotates
 // the starting node round-robin.
+// CursorForProxy returns a cursor whose first Next hands back the node that
+// uses proxy and whose second returns nil, so a relay-pinned diagnostic
+// attempts exactly one exit. A proxy outside the pool yields the same
+// single-shot cursor over no node, which the caller reports as an error.
+func (p *anonymousNodes) CursorForProxy(proxy *proxyTransport) anonymousCursor {
+	c := anonymousCursor{pool: p, offset: len(p.nodes), single: true}
+	if p == nil || proxy == nil {
+		return c
+	}
+	for i, node := range p.nodes {
+		if node.proxy == proxy {
+			c.start = i
+			return c
+		}
+	}
+	return c
+}
+
 func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 	if p == nil || len(p.nodes) == 0 {
 		return anonymousCursor{pool: p}
@@ -289,6 +308,15 @@ func (c *anonymousCursor) Next() *anonymousNode {
 	n := len(c.pool.nodes)
 	if c.used == nil {
 		c.used = make([]bool, n)
+	}
+	if c.single {
+		idx := c.start
+		c.single = false
+		c.offset = n
+		if idx < 0 || idx >= n {
+			return nil
+		}
+		return c.pool.nodes[idx]
 	}
 	now := time.Now().UnixNano()
 	isBlocked := func(node *anonymousNode) bool {

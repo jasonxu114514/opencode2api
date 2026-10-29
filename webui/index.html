@@ -296,6 +296,17 @@
                         指定 Key 后只测试该 Key：不切换、不回退，也不改变冷却与代理健康。
                       </p>
                     </div>
+                    <div class="field full">
+                      <label for="play-relay" data-i18n="playground.relay">Relay</label>
+                      <select id="play-relay">
+                        <option value="auto" data-i18n="playground.relay.auto">
+                          任意 Relay（正常路由）
+                        </option>
+                      </select>
+                      <p class="section-caption" data-i18n="playground.relay.caption">
+                        指定 Relay 后只经它发送一次尝试：真实 session、system prompt 与 tool shaping，不切换、不回退，也不改变冷却与代理健康。
+                      </p>
+                    </div>
                   </div>
                   <div class="field">
                     <label for="play-request" data-i18n="playground.request">请求 JSON</label>

@@ -585,6 +585,15 @@ type DebugKeyView struct {
 	CooldownUntil *time.Time  `json:"cooldown_until,omitempty"`
 }
 
+// DebugRelays lists the anonymous relays in pool order for the Playground.
+func (m *RuntimeController) DebugRelays() []string {
+	rt := m.current.Load()
+	if rt == nil || rt.gateway == nil {
+		return nil
+	}
+	return rt.gateway.RelayNames()
+}
+
 // DebugKeys lists every configured upstream key per tier so the Playground can
 // offer an explicit per-key test target.
 func (m *RuntimeController) DebugKeys() map[string][]DebugKeyView {
