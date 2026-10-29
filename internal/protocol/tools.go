@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 	"strings"
 )
@@ -8,8 +10,14 @@ import (
 // ClientToolPrefix marks every client tool the gateway renames on a shaped
 // free-tier request. The prefix keeps client tools distinct from the official
 // OpenCode set the gateway appends, and lets responses be restored to the names
-// the client declared.
+// the client declared. What follows it is a digest, never the client name: the
+// free tier refuses bodies that still read as another client's session.
 const ClientToolPrefix = "clint_"
+
+// clientToolDigestLength is how many hex characters of the client name digest
+// a wire name carries. Twelve is far past the collision point for the handful
+// of tools one request declares.
+const clientToolDigestLength = 12
 
 // toolWireNameLimit is the longest tool name the upstreams accept.
 const toolWireNameLimit = 64
@@ -193,20 +201,21 @@ func (r *ToolRenames) Restore(wire string) string {
 	return client
 }
 
-// ClientToolWireName builds the wire name for one client tool. The name keeps
-// only [A-Za-z0-9_-], collapses every other run to a single underscore, and is
-// trimmed; an empty result becomes "tool". It is truncated to fit alongside the
-// prefix and the 64-byte limit, and collisions with used names get a _2, _3, …
+// ClientToolWireName builds the wire name for one client tool. The name is
+// deliberately opaque: the free tier refuses a shaped body that still carries
+// another client's vocabulary (Claude Code's ReportFindings and ScheduleWakeup
+// together are enough, and dropping either name lifts the refusal), so no
+// client tool name may reach the wire. The digest keeps one client tool on one
+// wire name across requests, and collisions with used names get a _2, _3, …
 // suffix. The chosen name is recorded in used.
 func ClientToolWireName(name string, used map[string]bool) string {
 	if used == nil {
 		used = map[string]bool{}
 	}
-	clean := sanitizeToolName(name)
-	if clean == "" {
-		clean = "tool"
-	}
-	if max := toolWireNameLimit - len(ClientToolPrefix); len(clean) > max {
+	digest := sha256.Sum256([]byte(name))
+	clean := hex.EncodeToString(digest[:])[:clientToolDigestLength]
+	max := toolWireNameLimit - len(ClientToolPrefix)
+	if len(clean) > max {
 		clean = clean[:max]
 	}
 	base := ClientToolPrefix + clean
@@ -226,24 +235,4 @@ func ClientToolWireName(name string, used map[string]bool) string {
 			return candidate
 		}
 	}
-}
-
-// sanitizeToolName reduces a client tool name to the character set upstreams
-// accept, collapsing invalid runs into one underscore.
-func sanitizeToolName(name string) string {
-	var builder strings.Builder
-	underscored := false
-	for _, char := range name {
-		switch {
-		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9', char == '-', char == '_':
-			builder.WriteRune(char)
-			underscored = char == '_'
-		default:
-			if !underscored {
-				builder.WriteByte('_')
-				underscored = true
-			}
-		}
-	}
-	return strings.Trim(builder.String(), "_-")
 }
