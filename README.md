@@ -365,6 +365,56 @@ direct
 
 Comment markers are `#`, `;`, and `//` at the start of a line or after whitespace.
 
+#### Pruning a proxy file
+
+A proxy file assembled from public lists accumulates entries that have stopped
+working. The gateway marks those unhealthy at runtime, but the file keeps them,
+so every start pays their connect timeouts again before reaching a working
+entry. `cmd/poolclean` is the offline counterpart:
+
+```sh
+go run ./cmd/poolclean -config config.json            # report only
+go run ./cmd/poolclean -config config.json -write     # rewrite without the dead entries
+```
+
+It probes every entry and removes only the ones whose route failed, using the
+same rule the gateway applies (`isProxyFailure` in `internal/gateway`): any HTTP
+response, including `403` and `429`, keeps the entry, because it proves the
+proxy reached opencode.ai and was merely rate limited. `direct` and `#pool`
+entries are never removed. A candidate must fail every round and then also fail
+when re-tested on its own before it is dropped, so a proxy that is merely busy
+survives. Comments and every other line are preserved, and the file is replaced
+atomically.
+
+The probe target is `https://opencode.ai/zen/v1/models`. It is a route check,
+not an availability check: that endpoint answers `200` even to an exit whose IP
+the free tier has already blocked, so a blocked-but-reachable proxy stays in the
+file. That is intentional — such an exit still carries traffic the moment the
+block lifts — but it means a clean run is not a promise that every remaining
+entry can serve a request right now. Point `-target` at
+`https://opencode.ai/zen/v1/chat/completions` if the stricter answer is wanted,
+with the caveat that a shared exit's `403` would then be read as "dead".
+
+A run that suddenly declares most of the pool dead is more likely to be a
+network or upstream problem than a genuine mass failure, and rewriting the file
+would be hard to undo. When the confirmed-dead share exceeds `-max-drop-ratio`
+(default `0.5`, i.e. half) the write is refused and the command exits `2`:
+
+```sh
+go run ./cmd/poolclean -config config.json -write                   # refuses above 50%
+go run ./cmd/poolclean -config config.json -write -max-drop-ratio 0 # no guard
+go run ./cmd/poolclean -config config.json -write -force            # override once
+```
+
+Exit codes: `0` ran (including a dry run and a run that found nothing to
+remove), `1` the run itself failed, `2` the write was refused by the ratio
+guard. The last line of every run is machine readable, so a wrapper can gate on
+the shape of the pool instead of scraping the per-entry listing:
+
+```text
+summary: entries=120 ok=89 dead=30 skipped=1 confirmed=30 ratio=25% remaining=90
+```
+
 #### Rotating proxy pools
 
 Suffix an entry with `#pool` (or prefix it with `pool+`) to declare that the endpoint is a rotating proxy pool such as [Resin](https://github.com/Resinat/Resin), where every new TCP connection exits from a different IP:
