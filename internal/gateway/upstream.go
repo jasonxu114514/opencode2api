@@ -593,7 +593,8 @@ func (g *Gateway) inferenceClient(proxy *proxyTransport, baseURL, model string) 
 // appended, so the request looks like an official CLI session on both the v1
 // (/zen) and v2 lanes. System One payloads are decision requests, not agent
 // traffic, so they are forwarded verbatim, as is a body that is not a JSON
-// object.
+// object. Title-generation requests are also not agent traffic and stay
+// tool-free on both gates.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte, *wire.ToolRenames) {
 	if protocol == wire.SystemOne {
 		return body, nil
@@ -613,9 +614,18 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte,
 	if injectOfficialPrompt(payload, protocol, v1) {
 		changed = true
 	}
-	renames, toolsChanged := renameAndCompleteTools(payload, protocol, v1)
-	if toolsChanged {
-		changed = true
+	var renames *wire.ToolRenames
+	// Title generation is not agent traffic. The free tier rejects a
+	// title-generation request that carries the agent tool list (403
+	// FreeTierError) even though the identical request without tools succeeds,
+	// and OpenCode's own title generator is sent tool-free. Leave such a
+	// request tool-free on both gates instead of injecting tools.
+	if !isTitleGenerationRequest(payload) {
+		var toolsChanged bool
+		renames, toolsChanged = renameAndCompleteTools(payload, protocol, v1)
+		if toolsChanged {
+			changed = true
+		}
 	}
 	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload) {
 		changed = true
@@ -630,6 +640,66 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte,
 		return body, nil
 	}
 	return encoded, renames
+}
+
+// isTitleGenerationRequest reports whether the payload is OpenCode's own
+// session-title generation call rather than agent traffic.
+//
+// OpenCode issues that call with an EMPTY tool list — its source builds it as
+// { small: true, tools: {}, messages: [{ role: "user", content: "Generate a
+// title for this conversation:\n" }, ...] }. The free-tier gate accepts the
+// tool-free form but returns 403 FreeTierError once an agent tool list is
+// attached, so the gateway must not inject tools here.
+//
+// The match is deliberately narrow: a user turn whose text BEGINS with the
+// verbatim title prompt. A false positive would strip the tool list from a real
+// agent request and turn it into the very 403 this avoids.
+func isTitleGenerationRequest(payload map[string]any) bool {
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if jsonutil.StringAt(message, "role") != "user" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(messageText(message["content"])), titleGenerationPrompt) {
+			return true
+		}
+	}
+	return false
+}
+
+// titleGenerationPrompt is the user-turn prefix OpenCode prepends to its title
+// call (packages/opencode/src/session/prompt.ts).
+const titleGenerationPrompt = "Generate a title for this conversation"
+
+// messageText flattens a message content value (a plain string or an array of
+// content blocks) into searchable text.
+func messageText(content any) string {
+	switch typed := content.(type) {
+	case string:
+		return typed
+	case []any:
+		var builder strings.Builder
+		for _, raw := range typed {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				builder.WriteString(text)
+				builder.WriteByte('\n')
+			}
+		}
+		return builder.String()
+	default:
+		return ""
+	}
 }
 
 // v2CompletionLimit is the max_completion_tokens a 2.x client puts on every
