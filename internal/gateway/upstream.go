@@ -587,12 +587,14 @@ func (g *Gateway) inferenceClient(proxy *proxyTransport, baseURL, model string) 
 // tools are renamed and completed for the lane v1 selects; an unchanged body is
 // returned as is.
 //
-// Every named client tool becomes clint_<name> (sanitized and collision-safe)
-// and the full official set for the lane is appended, so the request looks like
-// an official CLI session on both the v1 (/zen) and v2 lanes. System One
-// payloads are decision requests, not agent traffic, so they are forwarded
-// verbatim, as is a body that is not a JSON object. Title-generation requests
-// are also not agent traffic and stay tool-free on both gates.
+// Every named client tool becomes an opaque clint_<digest> (see
+// protocol.ClientToolWireName: a client tool name that survives on the wire is
+// what the free tier refuses) and the full official set for the lane is
+// appended, so the request looks like an official CLI session on both the v1
+// (/zen) and v2 lanes. System One payloads are decision requests, not agent
+// traffic, so they are forwarded verbatim, as is a body that is not a JSON
+// object. Title-generation requests are also not agent traffic and stay
+// tool-free on both gates.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte, *wire.ToolRenames) {
 	if protocol == wire.SystemOne {
 		return body, nil

@@ -150,6 +150,22 @@ func (s *AvailabilityRegistry) Restore(model string, now time.Time) error {
 	return s.SetManual(model, true, now)
 }
 
+// ScheduleSweep marks every automatically controlled model due for a probe,
+// so the next check pass re-probes them instead of waiting out their
+// scheduled backoff. Manually controlled records are left untouched.
+func (s *AvailabilityRegistry) ScheduleSweep() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for model, item := range s.items {
+		if item.Manual {
+			continue
+		}
+		item.NextCheck = time.Time{}
+		s.items[model] = item
+	}
+	return s.saveLocked()
+}
+
 // Record stores the result of an automatic probe that started when the record
 // was at generation. The result is dropped when Generation has moved on since
 // then or the model is under manual control. Only the reason

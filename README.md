@@ -23,6 +23,22 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 
 See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
+## Sponsors
+
+<table>
+  <tr>
+    <td width="190" align="center">
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">
+        <img src="assets/IPWO.png" width="163" alt="IPWO">
+      </a>
+    </td>
+    <td>
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">IPWO</a> residential proxies provide flexible network connectivity for AI development and API workflows, covering 195+ countries and regions with HTTP(S) and SOCKS5 support.<br>
+      Suitable for cross-region network testing, compliant data collection, and automated development. Dynamic, static, and unlimited proxy plans are available, with free testing and region selection. Discount code: <b>0200</b>.
+    </td>
+  </tr>
+</table>
+
 ## Quick start
 
 Download a binary from [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases), or build with **Go 1.24 or newer**:
@@ -246,7 +262,7 @@ Injection is protocol-aware: Chat system and developer messages are folded into 
 
 ### Tool shaping
 
-On every shaped free-model request the gateway renames each named client tool to `clint_<name>` — characters outside `A-Za-z0-9_-` become `_`, names are capped at 64 bytes, and collisions get a `_2`, `_3`, … suffix — and appends the complete official tool set for the lane: the 1.x definitions (`bash`, `edit`, `glob`, `grep`, `read`, `skill`, `task`, `todowrite`, `webfetch`, `websearch`, `write`) on `/zen`, and the 13-tool 2.x set on `/inference` and `/zen/go`. Requests without a `tools` array, with an empty one, or with a legacy `functions` array get the same official set; `tool_choice`, legacy `function_call`, and the tool-call history are rewritten to match. Responses built-in tools and Anthropic server tools are left untouched.
+On every shaped free-model request the gateway replaces each named client tool with an opaque wire name, `clint_` plus the first 12 hex characters of the client name's SHA-256 (collisions get a `_2`, `_3`, … suffix), and appends the complete official tool set for the lane: the 1.x definitions (`bash`, `edit`, `glob`, `grep`, `read`, `skill`, `task`, `todowrite`, `webfetch`, `websearch`, `write`) on `/zen`, and the 13-tool 2.x set on `/inference` and `/zen/go`. The digest is not cosmetic: the free tier refuses a shaped body that still carries another client's vocabulary — a Claude Code request that declares both `ReportFindings` and `ScheduleWakeup` is answered with `FreeUsageLimitError`, and removing either name lifts the refusal — so no client tool name reaches the wire. Requests without a `tools` array, with an empty one, or with a legacy `functions` array get the same official set; `tool_choice`, legacy `function_call`, and the tool-call history are rewritten to match. Responses built-in tools and Anthropic server tools are left untouched.
 
 Responses are restored to the names the client declared, for streaming and non-streaming replies, including a Chat tool name split across chunks. If the upstream calls an official tool the client never declared, that name passes through unchanged: the gateway does not replay or hide official tool calls.
 
@@ -262,7 +278,7 @@ Manual control also pauses effort discovery for `reasoning.effort=auto`; learned
 
 State survives restarts in `config.json.<upstream-fingerprint>.availability.json`, separated by the Zen upstream URL. The background scheduler checks for due models once per minute, skips manually controlled models, and probes the rest sequentially, with a 60-second timeout per lane. No channels available means no automatic disable.
 
-Administration endpoints (login required; writes also require CSRF): `GET /api/models/availability`, `POST /api/models/restore` with `{"model":"MODEL_ID"}` (restores and takes manual control), and `POST /api/models/manual` with `{"model":"MODEL_ID","manual":true|false}` to switch between manual and automatic control.
+Administration endpoints (login required; writes also require CSRF): `GET /api/models/availability`, `POST /api/models/probe` (marks every automatic free model due and starts a probe sweep right away, so the WebUI's refresh status button re-probes instead of only reloading the cached view), `POST /api/models/restore` with `{"model":"MODEL_ID"}` (restores and takes manual control), and `POST /api/models/manual` with `{"model":"MODEL_ID","manual":true|false}` to switch between manual and automatic control.
 
 ### Sessions and proxies
 
@@ -270,7 +286,7 @@ Keys are initially spread across proxies. Real traffic can trigger proxy checks,
 
 A stable session hash selects the preferred key or anonymous proxy. Send an explicit `x-session-id` to separate independent conversations. The gateway also accepts the `x-opencode-session`, `x-session-affinity`, `session_id`, `conversation-id`, and `conversation_id` headers, the `conversation_id` and `metadata.session_id` body fields, and the session ID inside Claude Code's `metadata.user_id`.
 
-Sessions and projects the gateway derives itself are scoped to the caller's server key, so different keys never share an upstream session, preferred key, or anonymous proxy. Official OpenCode sessions (`ses_…`) sent by the client are kept as-is. Without an explicit ID, the system prompt and the first user message are used as a seed. Conversations under the same key that begin with the same system prompt and content can therefore still share affinity; give users who must stay isolated their own server keys. Changing pool membership can change the selected node.
+Sessions and projects the gateway derives itself are scoped to the caller's server key, so different keys never share an upstream session, preferred key, or anonymous proxy. Official OpenCode sessions (`ses_…`) sent by the client are kept as-is. Derived session ids are salted per process, so restarting the gateway re-mints them instead of resuming the upstream session of the previous run. Without an explicit ID, the system prompt and the first user message are used as a seed. Conversations under the same key that begin with the same system prompt and content can therefore still share affinity; give users who must stay isolated their own server keys. Changing pool membership can change the selected node.
 
 Cooldowns grow exponentially up to eight times `performance.failure_cooldown_seconds`, and a longer `Retry-After` is honored. A configured `models.anonymous_backoff` breaker is a separate lane-level guard: it pauses the whole anonymous lane for hours, while these cooldowns stay per exit and short. If every authenticated key is cooling down, routing may try the key whose cooldown ends first. Anonymous nodes still in cooldown are skipped.
 
@@ -568,3 +584,4 @@ Observations are persisted by upstream URL, model and native protocol, displayed
 SPDX-License-Identifier: GPL-3.0-or-later
 
 This project is free software: you may redistribute and modify it under the GNU General Public License as published by the Free Software Foundation, either version 3 or (at your option) any later version. It is distributed without any warranty. See [LICENSE](LICENSE) for the full terms.
+

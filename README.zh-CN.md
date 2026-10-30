@@ -23,6 +23,22 @@ WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
 
 新增页面及调用示例见[管理控制台说明](docs/management.zh-CN.md)。
 
+## 赞助商
+
+<table>
+  <tr>
+    <td width="190" align="center">
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">
+        <img src="assets/IPWO.png" width="163" alt="IPWO">
+      </a>
+    </td>
+    <td>
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">IPWO</a> 住宅代理为 AI 开发与 API 工作流提供灵活的网络连接支持，覆盖 195+ 个国家和地区，支持 HTTP(S) 与 SOCKS5 协议。<br>
+      适用于跨地区网络测试、合规数据采集及自动化开发场景。提供动态代理、静态代理及不限量代理，支持免费测试和地区选择。优惠折扣码：<b>0200</b>。
+    </td>
+  </tr>
+</table>
+
 ## 快速开始
 
 从 [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases) 下载可执行文件，或使用 **Go 1.24 及以上版本**编译：
@@ -262,7 +278,7 @@ System One 使用原生 `noul` 类型询问“1+1 是否等于 2”，不注入�
 
 状态保存在 `config.json.<上游地址指纹>.availability.json`，重启后保留，按 Zen 上游 URL 隔离。后台每分钟检查到期项，跳过手动控制的模型，串行探测其余模型，每条通道最多等待 60 秒。
 
-管理接口：`GET /api/models/availability` 查看状态；`POST /api/models/restore` 携带 `{"model":"MODEL_ID"}` 恢复并进入手动控制；`POST /api/models/manual` 携带 `{"model":"MODEL_ID","manual":true|false}` 在手动与自动之间切换。均需管理登录，写入接口还需 CSRF 校验。
+管理接口：`GET /api/models/availability` 查看状态；`POST /api/models/probe` 将所有自动探测的免费模型标记为到期并立即开始一轮探测，WebUI「刷新状态」按钮即调用它（真正的重新探测，而不是只重载缓存视图）；`POST /api/models/restore` 携带 `{"model":"MODEL_ID"}` 恢复并进入手动控制；`POST /api/models/manual` 携带 `{"model":"MODEL_ID","manual":true|false}` 在手动与自动之间切换。均需管理登录，写入接口还需 CSRF 校验。
 
 ### 会话与代理
 
@@ -270,7 +286,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 
 服务使用稳定会话哈希选择首选 Key 或匿名代理。建议通过 `x-session-id` 区分独立会话，同时支持 `x-opencode-session`、`x-session-affinity`、`session_id`、`conversation-id`、`conversation_id` 请求头，请求体中的 `conversation_id`、`metadata.session_id`，以及 Claude Code `metadata.user_id` 中的会话 ID。
 
-网关自行生成的会话与项目标识按调用方的服务端 Key 隔离，不同 Key 不会共享上游会话、首选 Key 或匿名代理；客户端自带的官方 OpenCode 会话（`ses_…`）原样保留。没有显式会话 ID 时，使用系统提示词和第一条用户消息生成会话标识，因此同一 Key 下系统提示词和开场内容都相同的会话仍可能共享亲和性。需要互相隔离的用户应各自使用独立的服务端 Key。调整 Key 或代理池成员后，原有会话选择的节点可能变化。
+网关自行生成的会话与项目标识按调用方的服务端 Key 隔离，不同 Key 不会共享上游会话、首选 Key 或匿名代理；客户端自带的官方 OpenCode 会话（`ses_…`）原样保留；网关自行派生的会话标识按进程加盐，重启网关后会用新的标识，而不会沿用上一轮进程的上游会话。没有显式会话 ID 时，使用系统提示词和第一条用户消息生成会话标识，因此同一 Key 下系统提示词和开场内容都相同的会话仍可能共享亲和性。需要互相隔离的用户应各自使用独立的服务端 Key。调整 Key 或代理池成员后，原有会话选择的节点可能变化。
 
 失败冷却按指数增长，最高为 `performance.failure_cooldown_seconds` 的八倍；如果上游的 `Retry-After` 更长，则使用更长时间。所有认证 Key 都处于冷却时，路由仍可能尝试最早结束冷却的 Key；仍在冷却的匿名节点会被跳过。
 

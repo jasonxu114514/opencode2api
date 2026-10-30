@@ -68,6 +68,7 @@ func (m *RuntimeController) SetManualModel(model string, manual bool) error {
 func (m *RuntimeController) startAvailabilityChecks() {
 	ctx, cancel := context.WithCancel(m.root)
 	m.availabilityCancel = cancel
+	m.availabilitySweep = make(chan struct{}, 1)
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -76,10 +77,30 @@ func (m *RuntimeController) startAvailabilityChecks() {
 			select {
 			case <-ctx.Done():
 				return
+			case <-m.availabilitySweep:
 			case <-ticker.C:
 			}
 		}
 	}()
+}
+
+// RequestAvailabilitySweep marks every automatic free model due for a probe
+// and wakes the probe loop, so the availability page's refresh re-probes
+// instead of waiting out the minute ticker. A request while a sweep is
+// already queued is a no-op: the queued sweep reads the freshly marked
+// records as it iterates.
+func (m *RuntimeController) RequestAvailabilitySweep() {
+	r := m.current.Load()
+	if r == nil {
+		return
+	}
+	if err := r.availability.ScheduleSweep(); err != nil {
+		m.logger.Warn("model availability sweep could not be scheduled", "error", err)
+	}
+	select {
+	case m.availabilitySweep <- struct{}{}:
+	default:
+	}
 }
 
 // checkFreeModels probes, one at a time, every free model under automatic

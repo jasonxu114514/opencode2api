@@ -64,6 +64,9 @@ type RuntimeController struct {
 	effective          EffectiveListeners
 	metadata           *modelcatalog.PricingRegistry
 	availabilityCancel context.CancelFunc
+	// availabilitySweep wakes the probe loop ahead of its minute tick; the
+	// capacity-one buffer coalesces requests while a sweep is in flight.
+	availabilitySweep chan struct{}
 	// warpPool is the pool shared by successive runtimes when the WARP size
 	// and stack are unchanged. warpKey is the identity used for that reuse.
 	warpPool *warp.Pool

@@ -56,29 +56,29 @@
   --content-max: 1280px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+/* The theme module (webui/js/theme.js) resolves the stored choice and the
+   system preference before first paint and sets data-theme accordingly. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
 
-    --bg: #0a0a0a;
-    --bg-subtle: #171717;
-    --surface: #121212;
-    --surface-2: #0d0d0d;
-    --text-1: #ededed;
-    --text-2: #a0a0a0;
-    --text-3: #787878;
-    --border-1: #262626;
-    --border-2: #3a3a3a;
-    --inverse-bg: #ededed;
-    --inverse-text: #0a0a0a;
-    --inverse-hover: #cfcfcf;
-    --focus-ring: rgba(237, 237, 237, 0.18);
-    --overlay: rgba(0, 0, 0, 0.6);
+  --bg: #0a0a0a;
+  --bg-subtle: #171717;
+  --surface: #121212;
+  --surface-2: #0d0d0d;
+  --text-1: #ededed;
+  --text-2: #a0a0a0;
+  --text-3: #787878;
+  --border-1: #262626;
+  --border-2: #3a3a3a;
+  --inverse-bg: #ededed;
+  --inverse-text: #0a0a0a;
+  --inverse-hover: #cfcfcf;
+  --focus-ring: rgba(237, 237, 237, 0.18);
+  --overlay: rgba(0, 0, 0, 0.6);
 
-    --ok: #3fb950;
-    --warn: #d29922;
-    --warn-bg: rgba(210, 153, 34, 0.15);
-    --bad: #f85149;
-    --bad-bg: rgba(248, 81, 73, 0.15);
-  }
+  --ok: #3fb950;
+  --warn: #d29922;
+  --warn-bg: rgba(210, 153, 34, 0.15);
+  --bad: #f85149;
+  --bad-bg: rgba(248, 81, 73, 0.15);
 }

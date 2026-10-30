@@ -13,6 +13,16 @@
     <link rel="stylesheet" href="/css/base.css" />
     <link rel="stylesheet" href="/css/components.css" />
     <link rel="stylesheet" href="/css/pages.css" />
+    <script>
+      // Apply the stored theme before first paint; theme.js owns every change.
+      try {
+        var opencodeTheme = localStorage.getItem("opencode2api.ui.theme") || "auto";
+        var opencodeDark =
+          opencodeTheme === "dark" ||
+          (opencodeTheme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute("data-theme", opencodeDark ? "dark" : "light");
+      } catch (_) {}
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main" data-i18n="a11y.skip">跳到主要内容</a>
@@ -81,6 +91,7 @@
             <p id="page-sub" class="page-sub"></p>
           </div>
           <div class="topbar-actions">
+            <button id="theme-toggle" class="btn btn-sm"></button>
             <select class="lang-switch" data-lang-switch aria-label="语言"></select>
             <button id="refresh-now" class="btn btn-sm" data-i18n="topbar.refresh">刷新</button>
             <button id="logout" class="btn btn-sm btn-ghost" data-i18n="topbar.logout">退出</button>
@@ -326,7 +337,7 @@
                 <div class="section-head">
                   <div>
                     <h2 class="section-title" data-i18n="diagnostics.requests.title">请求路由</h2>
-                    <p class="section-caption" data-i18n="diagnostics.requests.caption">最多展示最近 100 条。</p>
+                    <p class="section-caption" data-i18n="diagnostics.requests.caption">最多展示最近 500 条，分页显示。</p>
                   </div>
                 </div>
                 <div class="table-wrap">
@@ -347,12 +358,28 @@
                     <tbody id="upstream-requests"></tbody>
                   </table>
                 </div>
+                <div class="pager">
+                  <button id="requests-pager-prev" class="btn btn-sm" data-i18n="diag.pager.prev">上一页</button>
+                  <span id="requests-pager-info" class="pager-info"></span>
+                  <button id="requests-pager-next" class="btn btn-sm" data-i18n="diag.pager.next">下一页</button>
+                  <select
+                    id="requests-pager-size"
+                    class="pager-size"
+                    aria-label="每页条数"
+                    data-i18n-attr="aria-label:diag.pager.size"
+                  >
+                    <option value="50">50</option>
+                    <option value="100" selected>100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                  </select>
+                </div>
               </section>
               <section class="section">
                 <div class="section-head">
                   <div>
                     <h2 class="section-title" data-i18n="diagnostics.attempts.title">上游尝试</h2>
-                    <p class="section-caption" data-i18n="diagnostics.attempts.caption">最多展示最近 100 条。</p>
+                    <p class="section-caption" data-i18n="diagnostics.attempts.caption">最多展示最近 500 条，分页显示。</p>
                   </div>
                 </div>
                 <div class="table-wrap">
@@ -371,6 +398,22 @@
                     </thead>
                     <tbody id="upstream-attempts"></tbody>
                   </table>
+                </div>
+                <div class="pager">
+                  <button id="attempts-pager-prev" class="btn btn-sm" data-i18n="diag.pager.prev">上一页</button>
+                  <span id="attempts-pager-info" class="pager-info"></span>
+                  <button id="attempts-pager-next" class="btn btn-sm" data-i18n="diag.pager.next">下一页</button>
+                  <select
+                    id="attempts-pager-size"
+                    class="pager-size"
+                    aria-label="每页条数"
+                    data-i18n-attr="aria-label:diag.pager.size"
+                  >
+                    <option value="50">50</option>
+                    <option value="100" selected>100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                  </select>
                 </div>
               </section>
             </div>

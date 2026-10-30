@@ -86,6 +86,54 @@ var errProxyUnavailable = errors.New("proxy unavailable")
 // proxyUnavailableError is an attempt error that asProxyUnavailable attributed
 // to the proxy route. It matches both errProxyUnavailable and the original
 // error under errors.Is and errors.As.
+// timeoutStatus classifies an exhausted request budget for the client.
+//
+// A write-phase failure means the upstream never finished reading the request
+// body: the payload is too large. 413 tells a client that can shrink the
+// request (a harness that strips oversized inline images) to shrink it, instead
+// of replaying the same oversized payload forever.
+//
+// Every other phase stays a 504: the upstream was slow to answer, or the model
+// was thinking, and neither is the client's fault.
+//
+// The phase is read from the innermost phasedError, so a wrapped error (the
+// key loop hands the attempt error back through its own wrapper) still
+// classifies correctly.
+func timeoutStatus(err error, budgetAlive bool) (int, string, string) {
+	if isPayloadTooLarge(err, budgetAlive) {
+		return http.StatusRequestEntityTooLarge, "request payload is too large for the upstream to accept", "payload_too_large"
+	}
+	return http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout"
+}
+
+// isPayloadTooLarge reports whether the failure was caused by the request
+// being too large for the upstream to accept.
+//
+// A write-phase attempt timeout means the upstream never finished reading the
+// request body: the connection was established, but the body did not fit
+// through it. A body that big is a payload-size problem, not a flaky network.
+//
+// Only the write phase counts. A header-phase timeout is the upstream being
+// slow to answer, which is not the client's fault, and a first-event timeout
+// is the model thinking, which is exactly what a long thinking turn does.
+//
+// The request budget must also still be alive (budgetAlive). The attempt
+// timeout is short (15s) and the request budget is long (900s), so a write
+// attempt that stalls for the whole attempt timeout while the request budget
+// still has time is the upstream refusing the body. When the request budget is
+// what expired, the whole request was too slow and the cause is not the
+// payload.
+func isPayloadTooLarge(err error, budgetAlive bool) bool {
+	if err == nil || !budgetAlive {
+		return false
+	}
+	var pe *phasedError
+	if !errors.As(err, &pe) || pe.phase != "write" {
+		return false
+	}
+	return errors.Is(err, errAttemptTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
 type proxyUnavailableError struct {
 	proxy string
 	err   error

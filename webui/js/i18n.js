@@ -77,6 +77,10 @@ const DICTIONARY = {
 
       "topbar.refresh": "Refresh now",
       "topbar.logout": "Sign out",
+      "theme.toggle": "Toggle theme",
+      "theme.auto": "System",
+      "theme.light": "Light",
+      "theme.dark": "Dark",
 
       "page.availability.title": "Free model availability",
       "page.availability.sub": "Probed hourly; user-controlled models are not affected.",
@@ -107,6 +111,7 @@ const DICTIONARY = {
 
       "availability.title": "Probe free models",
       "availability.refresh": "Refresh status",
+      "availability.probeScheduled": "A re-probe has been scheduled; results will update as models are checked.",
       "availability.desc":
         "Probes models whose metadata name contains free or whose price is 0 and that have not been excluded. The anonymous channel is tried first, and a Zen Key only after that; a model is disabled once it is genuinely broken and retried after 24 hours. Transient errors do not add extra disabled models: an enabled model is retried after 1 hour, and a disabled one keeps its old reason and is retried after 24 hours. When a model is re-enabled or switched to manual control it stays enabled and is no longer probed automatically; when it switches back to automatic, the next scheduler tick schedules the probe. System One uses its own dedicated 1+1 decision question set. With the effort set to auto, the highest probed and verified effort is shown.",
       "availability.col.model": "Model",
@@ -229,10 +234,14 @@ const DICTIONARY = {
       "diagnostics.models.col.cost": "Input / output cost",
       "diagnostics.requests.title": "Request routing",
       "diagnostics.requests.caption":
-        "The key tail or anonymous channel actually used per request; only the 100 most recent records are shown.",
+        "The key tail or anonymous channel actually used per request; the 500 most recent records, paged.",
       "diagnostics.attempts.title": "Upstream attempts",
       "diagnostics.attempts.caption":
-        "Key tail, anonymous channel, and proxy node are masked; only the 100 most recent records are shown.",
+        "Key tail, anonymous channel, and proxy node are masked; the 500 most recent records, paged.",
+      "diag.pager.prev": "Previous",
+      "diag.pager.next": "Next",
+      "diag.pager.info": "Page {0} of {1} · {2} entries",
+      "diag.pager.size": "Rows per page",
       "diagnostics.col.time": "Time",
       "diagnostics.col.model": "Model",
       "diagnostics.col.tier": "Tier",
@@ -402,6 +411,8 @@ const DICTIONARY = {
       "common.clipboard": "The browser does not allow clipboard access",
       "common.empty": "No data yet",
       "common.remove": "Remove",
+      "config.chips.expand": "Show all ({0})",
+      "config.chips.collapse": "Collapse",
       "common.duration": "Duration",
       "common.model": "Model",
       "common.action": "Action",
@@ -636,6 +647,10 @@ const DICTIONARY = {
 
       "topbar.refresh": "Làm mới ngay",
       "topbar.logout": "Đăng xuất",
+      "theme.toggle": "Đổi chủ đề",
+      "theme.auto": "Theo hệ thống",
+      "theme.light": "Sáng",
+      "theme.dark": "Tối",
 
       "page.availability.title": "Mô hình miễn phí",
       "page.availability.sub": "Dò mỗi giờ; mô hình do người dùng điều khiển không bị ảnh hưởng.",
@@ -666,6 +681,8 @@ const DICTIONARY = {
 
       "availability.title": "Dò mô hình miễn phí",
       "availability.refresh": "Làm mới trạng thái",
+      "availability.probeScheduled":
+        "Đã lên lịch dò lại; kết quả sẽ cập nhật sau khi các mô hình được kiểm tra.",
       "availability.desc":
         "Kiểm tra các mô hình có tên chứa free hoặc giá bằng 0 trong metadata và chưa bị loại bỏ. Ưu tiên kênh ẩn danh, sau đó mới thử Zen Key; chỉ vô hiệu hóa khi mô hình hẳn đã hỏng và thử lại sau 24 giờ. Lỗi tạm thời không tạo thêm mô hình bị vô hiệu hóa: mô hình đang bật thử lại sau 1 giờ, mô hình đã tắt giữ nguyên lý do cũ và thử lại sau 24 giờ. Khi khôi phục bật hoặc chuyển sang điều khiển thủ công, mô hình giữ nguyên bật và không còn được dò tự động; khi chuyển lại tự động, lượt định tuyến kế tiếp sẽ sắp xếp lần dò. System One dùng bộ câu hỏi quyết định riêng 1+1. Khi đặt cường độ auto, hiển thị bậc cao nhất đã được dò xác minh.",
       "availability.col.model": "Mô hình",
@@ -788,10 +805,14 @@ const DICTIONARY = {
       "diagnostics.models.col.cost": "Chi phí input / output",
       "diagnostics.requests.title": "Định tuyến request",
       "diagnostics.requests.caption":
-        "Đuôi Key hoặc anonymous thực sự được dùng cho từng request; hiển thị tối đa 100 bản ghi gần nhất.",
+        "Đuôi Key hoặc anonymous thực sự được dùng cho từng request; 500 bản ghi gần nhất, có phân trang.",
       "diagnostics.attempts.title": "Lần thử upstream",
       "diagnostics.attempts.caption":
-        "Đuôi Key, kênh ẩn danh và nút proxy đã che; hiển thị tối đa 100 bản ghi gần nhất.",
+        "Đuôi Key, kênh ẩn danh và nút proxy đã che; 500 bản ghi gần nhất, có phân trang.",
+      "diag.pager.prev": "Trang trước",
+      "diag.pager.next": "Trang sau",
+      "diag.pager.info": "Trang {0} / {1} · {2} mục",
+      "diag.pager.size": "Số dòng mỗi trang",
       "diagnostics.col.time": "Thời gian",
       "diagnostics.col.model": "Mô hình",
       "diagnostics.col.tier": "Tier",
@@ -962,6 +983,8 @@ const DICTIONARY = {
       "common.clipboard": "Trình duyệt không cho phép truy cập clipboard",
       "common.empty": "Chưa có dữ liệu",
       "common.remove": "Gỡ bỏ",
+      "config.chips.expand": "Hiện tất cả ({0})",
+      "config.chips.collapse": "Thu gọn",
       "common.duration": "Thời gian",
       "common.model": "Mô hình",
       "common.action": "Thao tác",
@@ -1196,6 +1219,10 @@ const DICTIONARY = {
 
       "topbar.refresh": "Aggiorna ora",
       "topbar.logout": "Esci",
+      "theme.toggle": "Cambia tema",
+      "theme.auto": "Sistema",
+      "theme.light": "Chiaro",
+      "theme.dark": "Scuro",
 
       "page.availability.title": "Disponibilità modelli gratuiti",
       "page.availability.sub":
@@ -1231,6 +1258,8 @@ const DICTIONARY = {
 
       "availability.title": "Verifica modelli gratuiti",
       "availability.refresh": "Aggiorna stato",
+      "availability.probeScheduled":
+        "Una riverifica è stata programmata; i risultati si aggiorneranno al termine dei controlli.",
       "availability.desc":
         "Verifica i modelli il cui nome nei metadati contiene free o il cui prezzo è 0 e che non sono stati esclusi. Si prova prima il canale anonimo e solo dopo una Zen Key; un modello viene disabilitato quando è realmente guasto e ritentato dopo 24 ore. Gli errori transitori non aggiungono altri modelli disabilitati: un modello abilitato viene ritentato dopo 1 ora, mentre uno disabilitato conserva il motivo precedente ed è ritentato dopo 24 ore. Quando un modello viene riabilitato o passato al controllo manuale resta abilitato e non viene più verificato automaticamente; tornando in automatico, il successivo tick dello scheduler pianifica la verifica. System One usa un proprio insieme di domande di verifica 1+1. Con il livello impostato su auto viene applicato il livello massimo di ragionamento verificato.",
       "availability.col.model": "Modello",
@@ -1358,10 +1387,14 @@ const DICTIONARY = {
       "diagnostics.models.col.cost": "Costo input / output",
       "diagnostics.requests.title": "Instradamento richieste",
       "diagnostics.requests.caption":
-        "La coda della chiave o il canale anonimo effettivamente usati per richiesta; sono mostrati solo i 100 record più recenti.",
+        "La coda della chiave o il canale anonimo effettivamente usati per richiesta; i 500 record più recenti, paginati.",
       "diagnostics.attempts.title": "Tentativi upstream",
       "diagnostics.attempts.caption":
-        "Ultimi caratteri della chiave, canale anonimo e nodo proxy sono mascherati; sono mostrati solo i 100 record più recenti.",
+        "Ultimi caratteri della chiave, canale anonimo e nodo proxy sono mascherati; i 500 record più recenti, paginati.",
+      "diag.pager.prev": "Precedente",
+      "diag.pager.next": "Successiva",
+      "diag.pager.info": "Pagina {0} di {1} · {2} voci",
+      "diag.pager.size": "Righe per pagina",
       "diagnostics.col.time": "Ora",
       "diagnostics.col.model": "Modello",
       "diagnostics.col.tier": "Tier",
@@ -1533,6 +1566,8 @@ const DICTIONARY = {
       "common.clipboard": "Il browser non consente l'accesso agli appunti",
       "common.empty": "Nessun dato",
       "common.remove": "Rimuovi",
+      "config.chips.expand": "Mostra tutti ({0})",
+      "config.chips.collapse": "Comprimi",
       "common.duration": "Durata",
       "common.model": "Modello",
       "common.action": "Azione",
