@@ -64,6 +64,7 @@
       "alias": "sweet",
       "order": []
     },
+    "custom": [],
     "first_output_seconds": 30
   }
 }
