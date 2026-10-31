@@ -12,7 +12,13 @@ import (
 )
 
 const (
-	proxyHealthCheckURL      = "https://cloudflare.com/cdn-cgi/trace"
+	// The probe answers "can this exit serve traffic?", so it targets the
+	// OpenCode origin itself. cloudflare.com is an unrelated third party that
+	// proxy providers routinely block or rate-limit on their egress, so exits
+	// that serve OpenCode fine were disabled and eventually retired by a probe
+	// that never touched OpenCode. checkClaimedProxy counts any HTTP response
+	// as success, so a 404 from the origin still proves the tunnel reaches it.
+	proxyHealthCheckURL      = "https://opencode.ai/"
 	proxyHealthCheckInterval = 15 * time.Minute
 	proxyHealthCheckTimeout  = 10 * time.Second
 )
