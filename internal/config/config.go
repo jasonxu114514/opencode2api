@@ -36,6 +36,7 @@ type Config struct {
 	Warp              WarpConfig                   `json:"warp"`
 	Proxies           []string                     `json:"proxies"`
 	ProxyFile         string                       `json:"proxyfile"`
+	ProxyBindings     map[string]string            `json:"proxy_bindings,omitempty"`
 	Upstream          UpstreamConfig               `json:"upstream"`
 	Retry             RetryConfig                  `json:"retry"`
 	Models            ModelsConfig                 `json:"models"`
@@ -436,6 +437,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if err := normalizeReasoning(&cfg); err != nil {
 		return Config{}, err
 	}
+	if err := normalizeProxyBindings(&cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -566,5 +570,64 @@ func Clone(cfg Config) Config {
 		}
 		cfg.Reasoning.EffortByModel = efforts
 	}
+	if cfg.ProxyBindings != nil {
+		bindings := make(map[string]string, len(cfg.ProxyBindings))
+		for k, v := range cfg.ProxyBindings {
+			bindings[k] = v
+		}
+		cfg.ProxyBindings = bindings
+	}
 	return cfg
+}
+
+// normalizeProxyBindings validates and canonicalizes explicit per-key proxy
+// bindings. Keys are mapped to their 16-hex fingerprint so secrets are never
+// stored twice, and target proxies must match a valid runtime proxy (or "direct").
+// Bound credentials fail closed: when their assigned proxy becomes unavailable,
+// they do not migrate to another route.
+//
+// NOTE: Binding to a proxy route with a #pool fragment or an external rotator
+// does not guarantee a static public egress IP; it pins traffic to that proxy transport.
+func normalizeProxyBindings(cfg *Config) error {
+	if len(cfg.ProxyBindings) == 0 {
+		return nil
+	}
+	keyMap := make(map[string]string, len(cfg.ZenKeys)+len(cfg.GoKeys))
+	for _, k := range cfg.ZenKeys {
+		fp := Fingerprint(k)
+		keyMap[k] = fp
+		keyMap[fp] = fp
+	}
+	for _, k := range cfg.GoKeys {
+		fp := Fingerprint(k)
+		keyMap[k] = fp
+		keyMap[fp] = fp
+	}
+
+	knownProxies := make(map[string]string)
+	for _, raw := range cfg.RuntimeProxies() {
+		clean, _ := ParseProxyEntry(raw)
+		knownProxies[raw] = raw
+		knownProxies[clean] = raw
+		if clean == "direct" {
+			knownProxies["direct"] = "direct"
+		}
+	}
+
+	normalized := make(map[string]string, len(cfg.ProxyBindings))
+	for keyRef, proxyRef := range cfg.ProxyBindings {
+		trimmedKey := strings.TrimSpace(keyRef)
+		trimmedProxy := strings.TrimSpace(proxyRef)
+		fp, ok := keyMap[trimmedKey]
+		if !ok {
+			return fmt.Errorf("proxy_bindings contains reference to unknown key %q", MaskValue(trimmedKey))
+		}
+		canonicalProxy, ok := knownProxies[trimmedProxy]
+		if !ok {
+			return fmt.Errorf("proxy_bindings references unknown proxy %q", RedactURL(trimmedProxy))
+		}
+		normalized[fp] = canonicalProxy
+	}
+	cfg.ProxyBindings = normalized
+	return nil
 }
