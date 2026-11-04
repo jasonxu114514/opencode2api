@@ -375,7 +375,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	// then reports errDeterministicClientRejection so the caller keeps this
 	// 4xx instead of replacing it with a later tier's answer.
 	halted := false
-	cursor := g.anonymous.CursorFor(ids.Session)
+	cursor := g.anonymous.CursorForOffset(ids.Session, attemptOffset)
 	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
 		limit = g.cfg.Retry.MaxAttempts
@@ -385,6 +385,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	rawBody := bodies[config.TierZen]
 	if len(rawBody) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
+	}
+	isTitle := isTitleGenerationBody(rawBody)
+	if isTitle {
+		limit = 1
 	}
 	// The anonymous free tier only serves agent-shaped streaming requests
 	// carrying the required tool definitions (anything else is rejected with 403
@@ -525,6 +529,19 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "reason", "all_exits_blocked", "request_id", ids.Request, "paused_for", pause.String())
 		}
 	}
+	if isTitle {
+		if upstreamStatus(lastResponse) == http.StatusTooManyRequests || (lastResponse == nil && lastErr != nil) {
+			var payload map[string]any
+			_ = json.Unmarshal(rawBody, &payload)
+			title := synthesizeTitle(payload)
+			stream, _ := payload["stream"].(bool)
+			if lastResponse != nil {
+				httpx.DrainAndClose(lastResponse.Body)
+			}
+			g.logger.Info("title generation request rejected by upstream; returning synthesized title fallback", "component", "upstream", "event", "title_fallback_synthesized", "model", route.ID, "title", title)
+			return synthesizeTitleResponse(route.ID, title, stream), nil, attempts
+		}
+	}
 	if lastResponse != nil {
 		// The caller keeps and forwards this response; a block or a
 		// deterministic rejection only changes the error so the keyed tiers
@@ -613,9 +630,13 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte,
 	if injectOfficialPrompt(payload, protocol, v1) {
 		changed = true
 	}
-	renames, toolsChanged := renameAndCompleteTools(payload, protocol, v1)
-	if toolsChanged {
-		changed = true
+	var renames *wire.ToolRenames
+	if !isTitleGenerationRequest(payload) {
+		var toolsChanged bool
+		renames, toolsChanged = renameAndCompleteTools(payload, protocol, v1)
+		if toolsChanged {
+			changed = true
+		}
 	}
 	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload) {
 		changed = true
