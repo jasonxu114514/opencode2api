@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -222,9 +223,11 @@ func (s *AvailabilityRegistry) Record(model string, generation uint64, success b
 
 // RecordPassiveObservation updates model availability based on real user traffic.
 // Unlike active synthetic probes, it never issues upstream requests.
-// 2xx marks model available; "model_unavailable" explicitly disables it.
-// Temporary network/rate errors (429, 5xx) never disable the model.
-func (s *AvailabilityRegistry) RecordPassiveObservation(model string, success bool, status int, channel string, now time.Time) error {
+// 2xx marks model available. Generic HTTP 400, 404, 429, 403, 5xx, timeouts
+// and transport errors never disable the model. Only an explicit, authoritative
+// model-unavailable response (isModelUnavailable: model_not_found, model_retired, etc.)
+// can mark a model as disabled.
+func (s *AvailabilityRegistry) RecordPassiveObservation(model string, success bool, status int, body string, channel string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item := s.items[model]
@@ -239,13 +242,32 @@ func (s *AvailabilityRegistry) RecordPassiveObservation(model string, success bo
 		item.Disabled = false
 		item.Reason = "passive_traffic_succeeded"
 		item.NextCheck = now.Add(FreeModelCheckInterval)
-	} else if status == 404 || status == 400 {
-		// Model genuinely does not exist or rejected by upstream catalog
-		// Mark disabled only on explicit model missing error
-		// 429/5xx are transient and left untouched
+	} else if IsModelUnavailableReason(status, body) {
+		item.Disabled = true
+		item.Reason = "model_unavailable"
+		item.NextCheck = now.Add(FailedModelCheckInterval)
 	}
 	s.items[model] = item
 	return s.saveLocked()
+}
+
+// IsModelUnavailableReason reports whether status and response body contain authoritative
+// evidence that the model is nonexistent or retired.
+func IsModelUnavailableReason(status int, body string) bool {
+	if status != 400 && status != 404 && status != 410 && status != 422 {
+		return false
+	}
+	text := strings.ToLower(body)
+	for _, marker := range []string{
+		"model_not_found", "model_not_available", "model_retired",
+		"model_deprecated", "unknown model", "model does not exist",
+		"model has been retired", "model is no longer available",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // It is a no-op without a path. The caller holds s.mu for writing.
