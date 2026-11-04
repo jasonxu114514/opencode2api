@@ -95,6 +95,7 @@ function fillConfig(value) {
   $("#c-refresh").value = value.models.refresh_seconds;
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
   $("#c-free-only").checked = !!value.models.free_only;
+  $("#c-active-probes").checked = !!value.models.active_probes;
   const reasoning = value.reasoning || {};
   $("#c-reasoning-effort").value = reasoning.effort || "";
   $("#c-reasoning-by-model").value = JSON.stringify(reasoning.effort_by_model || {}, null, 2);
@@ -139,6 +140,7 @@ async function save(event) {
         refresh_seconds: numberValue("#c-refresh"),
         protocols: JSON.parse($("#c-protocols").value || "{}"),
         free_only: $("#c-free-only").checked,
+        active_probes: $("#c-active-probes").checked,
       },
       reasoning: {
         effort: $("#c-reasoning-effort").value,

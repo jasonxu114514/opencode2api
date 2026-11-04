@@ -106,7 +106,13 @@ func (m *RuntimeController) RequestAvailabilitySweep() {
 // checkFreeModels probes, one at a time, every free model under automatic
 // control whose next check is due. A result is recorded only while the
 // runtime that ran the probe is still current.
+// When models.active_probes is false, automatic synthetic inference probes are skipped
+// to eliminate quota waste, relying entirely on passive telemetry from live requests.
 func (m *RuntimeController) checkFreeModels(ctx context.Context) {
+	r := m.current.Load()
+	if r == nil || !r.gateway.cfg.Models.ActiveProbes {
+		return
+	}
 	for _, item := range m.AvailabilitySnapshot() {
 		if ctx.Err() != nil {
 			return

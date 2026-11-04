@@ -163,8 +163,14 @@ func (g *Gateway) applyProxyHealthResult(result proxyHealthResult, source string
 // models, and fetches OpenCode's protocol capabilities. The catalog is
 // replaced only when at least one listing succeeded; the rotation groups are
 // then resynced and the catalog cache saved.
+// Concurrent refresh requests are coalesced via singleflight.
 func (g *Gateway) StartModelRefresh(ctx context.Context) {
+	var refreshMu sync.Mutex
 	refresh := func() {
+		if !refreshMu.TryLock() {
+			return
+		}
+		defer refreshMu.Unlock()
 		var zen, goModels []string
 		var capabilities modelcatalog.Capabilities
 		var capabilitiesErr error

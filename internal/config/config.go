@@ -154,6 +154,10 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
+	// ActiveProbes enables background active inference requests for free model
+	// health checks. When false (default), availability is learned passively
+	// from actual user requests, eliminating quota consumption from synthetic probes.
+	ActiveProbes bool `json:"active_probes,omitempty"`
 	// AnonymousBackoff configures a circuit breaker for the keyless lane:
 	// after Threshold consecutive failed attempts, or when every exit is under
 	// the free tier's IP block, the lane pauses for BaseHours, doubling on

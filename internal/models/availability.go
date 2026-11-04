@@ -220,7 +220,34 @@ func (s *AvailabilityRegistry) Record(model string, generation uint64, success b
 	return s.saveLocked()
 }
 
-// saveLocked rewrites the registry file through a temporary file and a rename.
+// RecordPassiveObservation updates model availability based on real user traffic.
+// Unlike active synthetic probes, it never issues upstream requests.
+// 2xx marks model available; "model_unavailable" explicitly disables it.
+// Temporary network/rate errors (429, 5xx) never disable the model.
+func (s *AvailabilityRegistry) RecordPassiveObservation(model string, success bool, status int, channel string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.items[model]
+	if item.Manual {
+		return nil
+	}
+	item.Model = model
+	item.ProbeVersion = 1
+	item.CheckedAt = now
+	item.Channel = channel
+	if success {
+		item.Disabled = false
+		item.Reason = "passive_traffic_succeeded"
+		item.NextCheck = now.Add(FreeModelCheckInterval)
+	} else if status == 404 || status == 400 {
+		// Model genuinely does not exist or rejected by upstream catalog
+		// Mark disabled only on explicit model missing error
+		// 429/5xx are transient and left untouched
+	}
+	s.items[model] = item
+	return s.saveLocked()
+}
+
 // It is a no-op without a path. The caller holds s.mu for writing.
 func (s *AvailabilityRegistry) saveLocked() error {
 	if s.path == "" {
