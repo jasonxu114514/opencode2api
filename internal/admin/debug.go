@@ -10,6 +10,7 @@ import (
 	"opencode2api/internal/config"
 	"opencode2api/internal/gateway"
 	"opencode2api/internal/httpx"
+	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	modelcatalog "opencode2api/internal/models"
 	"opencode2api/internal/protocol"
@@ -144,6 +145,11 @@ func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	// A Playground request is not a conversation: it replays the same prompt on
+	// every click, so a session derived from the prompt stays one bucket until
+	// it is charged and every later click answers 429 while live traffic
+	// succeeds. A fresh session per click keeps the bench on its own bucket.
+	request.Header.Set("x-opencode-session", benchSession())
 	recorder := debugResponseRecorder()
 	started := time.Now()
 	a.manager.Handler().ServeHTTP(recorder, request)
@@ -300,4 +306,10 @@ func sensitiveDebugKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// benchSession returns a fresh upstream session for one Playground request. It
+// is canonical so the gateway forwards it verbatim instead of re-encoding it.
+func benchSession() string {
+	return identity.CanonicalSessionID(identity.RandomID("playground", 16))
 }

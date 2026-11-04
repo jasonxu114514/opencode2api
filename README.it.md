@@ -23,6 +23,22 @@ L'eseguibile include la WebUI: per eseguire il servizio non servono Node.js né 
 
 Consulta la [guida della console di gestione (in cinese)](docs/management.zh-CN.md) per informazioni sulle nuove pagine e sulla configurazione.
 
+## Sponsor
+
+<table>
+  <tr>
+    <td width="190" align="center">
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">
+        <img src="assets/IPWO.png" width="163" alt="IPWO">
+      </a>
+    </td>
+    <td>
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">IPWO</a> offre proxy residenziali con connettività di rete flessibile per lo sviluppo di AI e workflow API, coprendo oltre 195 paesi e regioni con supporto HTTP(S) e SOCKS5.<br>
+      Adatti a test di rete cross-region, raccolta dati conforme e sviluppo automatizzato. Sono disponibili proxy dinamici, statici e illimitati, con test gratuito e selezione della regione. Codice sconto: <b>0200</b>.
+    </td>
+  </tr>
+</table>
+
 ## Avvio rapido
 
 Scarica un binario da [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases) oppure compila con **Go 1.24 o superiore**:
@@ -232,7 +248,7 @@ I modelli gratuiti non richiedono una chiave Zen: con `anonymous: true` usano il
 
 Il tunnel vive nel processo del gateway: registra un dispositivo WARP, parla WireGuard su UDP con Cloudflare e termina in uno stack di rete in userspace. Non richiede dispositivi TUN, root, `NET_ADMIN` né modifiche alla tabella di routing, ma l'host o il container deve poter inviare UDP verso l'endpoint di Cloudflare (porta `2408`). Registrazione e probe del trace `warp=on` avvengono all'avvio; se WARP non riesce a inizializzarsi, l'avvio fallisce invece di ripiegare silenziosamente sui proxy. Anche l'abilitazione dalla WebUI è fail-closed: un valore errato restituisce un errore e il runtime precedente continua a servire.
 
-`warp.pool_size` (1–32, predefinito `2`) è un **limite massimo**, non un numero fisso. Il ring attivo segue la concorrenza: un'uscita per ogni richiesta in corso più una di riserva, almeno una e mai oltre il massimo configurato; le uscite in eccesso rimaste inattive per 60 secondi vengono ritirate, quindi un picco amplia il ring e la quiete lo riduce. La prima risposta 429 o 403 dell'upstream ritira subito l'uscita e ne avvia la registrazione in background (le registrazioni restano cadenzate dal limite API di 12 secondi di Cloudflare, quindi un massimo più alto si scalda più lentamente: dimensiona il valore sulla concorrenza di picco); una richiesta per modelli gratuiti continua a cambiare uscita e restituisce l'ultimo 429 al client solo dopo aver esaurito `retry.max_attempts`. `warp.stack` seleziona `ipv6` (predefinito), `ipv4` o `dual`.
+`warp.pool_size` (1–32, predefinito `2`) è un **limite massimo**, non un numero fisso. La prima uscita viene registrata in modo sincrono e determina la readiness; poi il pool registra in background metà del massimo (almeno una), così un picco trova uscite già calde senza attendere. Il ring attivo segue la concorrenza: un'uscita per ogni richiesta in corso più una di riserva, mai oltre il massimo; le uscite in eccesso rimaste inattive per 60 secondi vengono ritirate. La prima risposta 429 o 403 ritira subito l'uscita e una uscita pre-registrata ne prende il posto; una richiesta per modelli gratuiti continua a cambiare uscita e restituisce l'ultimo 429 al client solo dopo aver esaurito `retry.max_attempts`, mentre l'uscita ritirata viene registrata di nuovo subito in background. Le registrazioni restano serializzate; il 429/Retry-After di Cloudflare detta il ritmo al posto di un intervallo fisso. Se il colo assegna meno blocchi di uscita distinti del preload, il pool arretra invece di registrare all'infinito; le probe automatiche dei modelli gratuiti saltano un pool senza uscita di riserva e fermano il ciclo dopo che una probe ha ritirato un'uscita. `warp.stack` seleziona `ipv6` (predefinito), `ipv4` o `dual`.
 
 La quota gratuita dell'upstream è legata al **blocco di uscita**, quindi la rotazione serve solo se la nuova uscita proviene da un blocco diverso: un'uscita IPv6 è identificata e raffreddata per 30 minuti dal suo `/64`, una IPv4 dal suo `/32`. L'uscita IPv4 di Cloudflare WARP è di solito un unico indirizzo NAT condiviso, spesso già esaurito da altri utenti; lo stack IPv6 ricava l'uscita dall'indirizzo sorgente WireGuard esterno. Imposta `warp.source_ipv6` su un prefisso IPv6 instradato verso l'host (di solito un `/64`, lo stack predefinito è già `ipv6`) perché ogni uscita associ il proprio indirizzo sorgente da quel prefisso. Su Linux l'indirizzo viene associato con `IPV6_FREEBIND` (impostato dal gateway) oppure deve essere già assegnato a un'interfaccia. La famiglia degli endpoint non viene verificata in anticipo: l'handshake prova prima gli endpoint IPv6 e ripiega su quelli IPv4 quando nessuno risponde (in quel caso l'uscita è l'indirizzo condiviso). Lasciando vuoto il campo si usa l'indirizzo sorgente predefinito dell'host. Su reti con il pool di uscite WARP già saturo anche una nuova uscita può rispondere 429: il gateway continua a ruotare e restituisce un 429 solo esaurito il budget di tentativi. `/healthz` restituisce un blocco `warp` e risponde 503 quando WARP è attivo ma nessuna uscita è operativa; `no_healthy_proxies` blocca la readiness solo con WARP disattivato o quando servono proxy per le chiavi Go. Le richieste diagnostiche acquisiscono un'uscita ma non la ruotano né la penalizzano. Disattivando WARP, i canali gratuiti tornano a usare i proxy.
 
@@ -285,7 +301,7 @@ Consulta [config.example.json](config.example.json) per una configurazione inizi
 | `zen_keys`, `go_keys`       | È richiesta una chiave upstream, salvo accesso anonimo abilitato.            |
 | `anonymous`                 | `false`.                                                                      |
 | `warp.enabled`              | `false`; il traffico dei canali gratuiti esce via Cloudflare WARP, senza proxy. |
-| `warp.pool_size`            | `2`; limite massimo di uscite WARP (il ring attivo segue la concorrenza), 1–32. |
+| `warp.pool_size`            | `2`; limite massimo di uscite WARP (metà pre-registrata in background; il ring attivo segue la concorrenza), 1–32. |
 | `warp.stack`                | `ipv6`; `ipv6`, `ipv4` o `dual`.                                              |
 | `warp.source_ipv6`          | vuoto; prefisso IPv6 (`/64`) da cui ogni uscita associa la sorgente esterna; richiede `stack = "ipv6"`. |
 | `prefer`                    | `go`; accetta `go` o `zen`.                                                   |

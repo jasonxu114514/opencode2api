@@ -559,6 +559,36 @@ func (c *ModelCatalog) Supported(model string) bool {
 	return c.supportedLocked(model)
 }
 
+// Known reports whether the catalog has ever heard of the model, regardless of
+// whether it can currently be served. A model that is known but not servable
+// (no tier advertises it, or the capability catalog marks it unsupported) is a
+// DIFFERENT failure from a model the upstream has never offered: the first is
+// a routing or capability problem, the second is a bad model name.
+//
+// The distinction matters for clients: a 404 "model not found" tells a harness
+// to pick a different model, while a 400 "unsupported protocol" makes it retry
+// the same impossible request forever.
+func (c *ModelCatalog) Known(model string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.protocols[model] != "" {
+		return true
+	}
+	if c.zen[model] || c.goModels[model] {
+		return true
+	}
+	if c.nativeProtocols[config.TierZen][model] != "" || c.nativeProtocols[config.TierGo][model] != "" {
+		return true
+	}
+	if c.unsupported[config.TierZen][model] || c.unsupported[config.TierGo][model] {
+		return true
+	}
+	if c.modelMeta[config.TierZen][model].ContextWindow > 0 || c.modelMeta[config.TierGo][model].ContextWindow > 0 {
+		return true
+	}
+	return false
+}
+
 // MetadataForTier returns the rich per-model metadata (context window,
 // reasoning, tool call, modalities) captured from the OpenCode capability
 // catalog for the tier that will actually serve the request. Same-named models

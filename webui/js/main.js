@@ -5,6 +5,7 @@ import * as i18n from "./i18n.js";
 import * as store from "./store.js";
 import { $, $$, toast } from "./ui.js";
 import * as logstream from "./logstream.js";
+import { init as initTheme } from "./theme.js";
 
 import overview from "./pages/overview.js";
 import diagnostics from "./pages/diagnostics.js";
@@ -92,6 +93,7 @@ store.on("monitor", (data) => {
 });
 
 for (const page of PAGES) page.init?.();
+initTheme();
 
 $$(".nav-item").forEach((button) => {
   button.addEventListener("click", () => openPage(button.dataset.page));

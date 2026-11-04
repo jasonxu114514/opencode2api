@@ -2,7 +2,7 @@
 import { api, hasSession } from "../api.js";
 import { loadDebugModels } from "../data.js";
 import { t, onChange } from "../i18n.js";
-import { $, bindTabs, copyText, el, emptyRow, localTime } from "../ui.js";
+import { $, bindTabs, copyText, el, emptyRow, localTime, toast } from "../ui.js";
 
 const windows = () => [
   ["rolling", t("5 小时窗口", "quotas.window.hour")],
@@ -224,6 +224,23 @@ async function loadAvailability() {
   }
 }
 
+async function refreshAvailability() {
+  const button = $("#availability-refresh");
+  button.disabled = true;
+  try {
+    await api("/api/models/probe", { method: "POST", body: "{}" });
+    toast(t("已安排重新探测，结果将在探测后陆续更新。", "availability.probeScheduled"));
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+  await loadAvailability();
+  // The sweep re-probes one model at a time; reload once more when the first
+  // fresh results have landed.
+  setTimeout(loadAvailability, 20000);
+}
+
 function startPolling() {
   clearInterval(timer);
   timer = setInterval(() => {
@@ -254,7 +271,7 @@ export default {
     $("#quota-refresh").addEventListener("click", load);
     $("#quota-account").addEventListener("change", render);
     $("#quota-model-search").addEventListener("input", render);
-    $("#availability-refresh").addEventListener("click", loadAvailability);
+    $("#availability-refresh").addEventListener("click", refreshAvailability);
     // Only the rows are rebuilt: a refresh button that is mid-request keeps its
     // disabled state and its "读取中…" label.
     onChange(() => {

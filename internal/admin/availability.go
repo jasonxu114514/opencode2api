@@ -12,6 +12,15 @@ func (a *Server) handleAvailability(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"models": a.manager.AvailabilitySnapshot()})
 }
 
+// handleProbeModels marks every automatic free model due and wakes the probe
+// loop, so the availability page's refresh triggers a real re-probe instead
+// of only reloading the cached snapshot. It answers with the current
+// availability list; the fresh results land as the sweep records them.
+func (a *Server) handleProbeModels(w http.ResponseWriter, r *http.Request) {
+	a.manager.RequestAvailabilitySweep()
+	a.handleAvailability(w, r)
+}
+
 // handleRestoreModel returns a disabled free model to manual control, which
 // re-enables it and keeps automatic probes from disabling it again. It answers
 // with the refreshed availability list.

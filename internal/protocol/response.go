@@ -503,19 +503,33 @@ func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 	return decodeOpenAIUsage(usage), true
 }
 
+// mayCarryToolName is the fast path for a response body or SSE frame: a body
+// that mentions neither a client alias nor a tool-call marker cannot name a
+// tool, so it is handed on without decoding. The markers are the protocol's
+// own spellings; folding an unprefixed official name (todowrite) needs the
+// frame decoded even when no clint_ alias is present.
+func mayCarryToolName(body []byte) bool {
+	return bytes.Contains(body, []byte(ClientToolPrefix)) ||
+		bytes.Contains(body, []byte(`"tool_calls"`)) ||
+		bytes.Contains(body, []byte(`"function_call"`)) ||
+		bytes.Contains(body, []byte(`"custom_tool_call"`)) ||
+		bytes.Contains(body, []byte(`"tool_use"`)) ||
+		bytes.Contains(body, []byte(`"server_tool_use"`))
+}
+
 // RenameResponseTool rewrites tool call names that carry a client alias back to
 // the name the client declared, inside a serialized JSON response or SSE event
 // data object for the given protocol. It is the counterpart of the outbound
 // clint_ renaming applied to shaped free-tier requests.
 //
-// The bytes.Contains check is only a fast path that skips the unmarshal for
-// frames that cannot contain an alias; every rewrite is an exact map lookup
-// after decoding. Names without a mapping are left alone.
+// mayCarryToolName is only a fast path that skips the unmarshal for frames that
+// cannot contain a tool name; every rewrite is a map lookup after decoding.
+// Names that map to nothing are left alone.
 func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []byte {
 	if renames.Empty() || len(body) == 0 {
 		return body
 	}
-	if !bytes.Contains(body, []byte(ClientToolPrefix)) {
+	if !mayCarryToolName(body) {
 		return body
 	}
 	var payload map[string]any
@@ -544,8 +558,8 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 		if !ok {
 			return false
 		}
-		client, ok := renames.Client(name)
-		if !ok {
+		client, changed := renames.Resolve(name)
+		if !changed {
 			return false
 		}
 		container["name"] = client

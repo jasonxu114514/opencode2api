@@ -290,6 +290,30 @@ textarea {
   color: var(--bad);
 }
 
+.chip.chip-toggle {
+  cursor: pointer;
+  color: var(--text-2);
+  border-style: dashed;
+  background: transparent;
+}
+
+.chip.chip-toggle:hover {
+  color: var(--text-1);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+
+.pager-info {
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
 .code-card {
   margin: var(--sp-3) 0;
   border: 1px solid var(--border-1);

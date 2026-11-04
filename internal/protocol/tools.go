@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 	"strings"
 )
@@ -8,8 +10,14 @@ import (
 // ClientToolPrefix marks every client tool the gateway renames on a shaped
 // free-tier request. The prefix keeps client tools distinct from the official
 // OpenCode set the gateway appends, and lets responses be restored to the names
-// the client declared.
+// the client declared. What follows it is a digest, never the client name: the
+// free tier refuses bodies that still read as another client's session.
 const ClientToolPrefix = "clint_"
+
+// clientToolDigestLength is how many hex characters of the client name digest
+// a wire name carries. Twelve is far past the collision point for the handful
+// of tools one request declares.
+const clientToolDigestLength = 12
 
 // toolWireNameLimit is the longest tool name the upstreams accept.
 const toolWireNameLimit = 64
@@ -19,11 +27,21 @@ const toolWireNameLimit = 64
 type ToolRenames struct {
 	toWire   map[string]string
 	toClient map[string]string
+	// byCase and byShape map a folded client name back to the one declared
+	// client tool it names. A value of "" marks a fold two tools share: that
+	// name is never guessed between.
+	byCase  map[string]string
+	byShape map[string]string
 }
 
 // NewToolRenames returns an empty rename set.
 func NewToolRenames() *ToolRenames {
-	return &ToolRenames{toWire: map[string]string{}, toClient: map[string]string{}}
+	return &ToolRenames{
+		toWire:   map[string]string{},
+		toClient: map[string]string{},
+		byCase:   map[string]string{},
+		byShape:  map[string]string{},
+	}
 }
 
 // Empty reports whether no tool was renamed.
@@ -74,6 +92,41 @@ func (r *ToolRenames) Add(client, wire string) {
 	}
 	r.toWire[client] = wire
 	r.toClient[wire] = client
+	r.bindFolded(r.byCase, strings.ToLower(client), client)
+	r.bindFolded(r.byShape, foldToolName(client), client)
+}
+
+// bindFolded records client under key in a folded map. An empty key names
+// nothing (a client tool spelled only with separators must not be handed every
+// other such name), and a key two clients share is marked ambiguous.
+func (r *ToolRenames) bindFolded(folded map[string]string, key, client string) {
+	if folded == nil || key == "" {
+		return
+	}
+	if existing, ok := folded[key]; ok {
+		if existing != client {
+			folded[key] = ""
+		}
+		return
+	}
+	folded[key] = client
+}
+
+// toolNameSeparators are the characters ignored when matching a tool name by
+// shape, after case: "todo_write", "todo-write", "todo.write" and "todowrite"
+// all fold to one key.
+const toolNameSeparators = "_.- \t\r\n"
+
+// foldToolName lowercases name and removes the separators agents spell tool
+// names with, so two spellings of one tool fold together.
+func foldToolName(name string) string {
+	var builder strings.Builder
+	for _, char := range strings.ToLower(name) {
+		if !strings.ContainsRune(toolNameSeparators, char) {
+			builder.WriteRune(char)
+		}
+	}
+	return builder.String()
 }
 
 // HasPrefix reports whether any wire name starts with prefix.
@@ -104,35 +157,65 @@ func (r *ToolRenames) HasLongerPrefix(prefix string) bool {
 	return false
 }
 
-// Restore maps a wire name back to the client name. When the exact mapping is
-// gone (for example after a configuration reload mid-stream), stripping the
-// prefix is the best available recovery; a name without it is returned as is.
-func (r *ToolRenames) Restore(wire string) string {
+// Resolve maps a tool name the upstream reported back to the name the client
+// declared. It is the response-side counterpart of the wire rename: an exact
+// wire name restores, a clint_ prefix is stripped as a best-effort recovery
+// (for example after a configuration reload mid-stream), and a name that
+// differs from exactly one declared client tool only in case, or else only in
+// case and separators (todowrite → todo_write), is folded onto that tool. A
+// name two tools fold to is never guessed between. It reports whether the
+// result differs from the name given.
+func (r *ToolRenames) Resolve(wire string) (string, bool) {
+	if r == nil || wire == "" {
+		return wire, false
+	}
 	if client, ok := r.Client(wire); ok {
-		return client
+		return client, client != wire
 	}
-	if strings.HasPrefix(wire, ClientToolPrefix) {
-		if rest := strings.TrimPrefix(wire, ClientToolPrefix); rest != "" {
-			return rest
+	client := wire
+	if rest, ok := strings.CutPrefix(wire, ClientToolPrefix); ok && rest != "" {
+		client = rest
+	}
+	if _, declared := r.toWire[client]; declared {
+		return client, client != wire
+	}
+	lower := strings.ToLower(client)
+	if match, ok := r.byCase[lower]; ok {
+		// A key present with an empty value is two client tools folded
+		// together; the name as written is the only safe answer.
+		if match != "" {
+			return match, match != wire
 		}
+		return client, client != wire
 	}
-	return wire
+	if match, ok := r.byShape[foldToolName(client)]; ok && match != "" {
+		return match, match != wire
+	}
+	return client, client != wire
 }
 
-// ClientToolWireName builds the wire name for one client tool. The name keeps
-// only [A-Za-z0-9_-], collapses every other run to a single underscore, and is
-// trimmed; an empty result becomes "tool". It is truncated to fit alongside the
-// prefix and the 64-byte limit, and collisions with used names get a _2, _3, …
+// Restore maps a wire name back to the client name. See Resolve for the rules;
+// a name it cannot map is returned as is.
+func (r *ToolRenames) Restore(wire string) string {
+	client, _ := r.Resolve(wire)
+	return client
+}
+
+// ClientToolWireName builds the wire name for one client tool. The name is
+// deliberately opaque: the free tier refuses a shaped body that still carries
+// another client's vocabulary (Claude Code's ReportFindings and ScheduleWakeup
+// together are enough, and dropping either name lifts the refusal), so no
+// client tool name may reach the wire. The digest keeps one client tool on one
+// wire name across requests, and collisions with used names get a _2, _3, …
 // suffix. The chosen name is recorded in used.
 func ClientToolWireName(name string, used map[string]bool) string {
 	if used == nil {
 		used = map[string]bool{}
 	}
-	clean := sanitizeToolName(name)
-	if clean == "" {
-		clean = "tool"
-	}
-	if max := toolWireNameLimit - len(ClientToolPrefix); len(clean) > max {
+	digest := sha256.Sum256([]byte(name))
+	clean := hex.EncodeToString(digest[:])[:clientToolDigestLength]
+	max := toolWireNameLimit - len(ClientToolPrefix)
+	if len(clean) > max {
 		clean = clean[:max]
 	}
 	base := ClientToolPrefix + clean
@@ -152,24 +235,4 @@ func ClientToolWireName(name string, used map[string]bool) string {
 			return candidate
 		}
 	}
-}
-
-// sanitizeToolName reduces a client tool name to the character set upstreams
-// accept, collapsing invalid runs into one underscore.
-func sanitizeToolName(name string) string {
-	var builder strings.Builder
-	underscored := false
-	for _, char := range name {
-		switch {
-		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9', char == '-', char == '_':
-			builder.WriteRune(char)
-			underscored = char == '_'
-		default:
-			if !underscored {
-				builder.WriteByte('_')
-				underscored = true
-			}
-		}
-	}
-	return strings.Trim(builder.String(), "_-")
 }

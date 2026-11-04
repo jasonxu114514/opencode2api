@@ -64,6 +64,9 @@ type RuntimeController struct {
 	effective          EffectiveListeners
 	metadata           *modelcatalog.PricingRegistry
 	availabilityCancel context.CancelFunc
+	// availabilitySweep wakes the probe loop ahead of its minute tick; the
+	// capacity-one buffer coalesces requests while a sweep is in flight.
+	availabilitySweep chan struct{}
 	// warpPool is the pool shared by successive runtimes when the WARP size
 	// and stack are unchanged. warpKey is the identity used for that reuse.
 	warpPool *warp.Pool
@@ -240,6 +243,13 @@ func (m *RuntimeController) selectWARP(cfg config.Config) (*warp.Pool, string, b
 	timeout := time.Duration(cfg.Retry.TimeoutSeconds) * time.Second
 	if timeout <= 0 || timeout > 2*time.Minute {
 		timeout = 2 * time.Minute
+	}
+	// The first registration is synchronous: it decides whether the runtime can
+	// serve free traffic at all. Cloudflare can answer it with a rate limit even
+	// on a fresh process, so give initialization room for one full window
+	// instead of failing startup on a pause that is about to end.
+	if timeout < warp.RegistrationWindow+30*time.Second {
+		timeout = warp.RegistrationWindow + 30*time.Second
 	}
 	ctx, cancel := context.WithTimeout(m.root, timeout)
 	defer cancel()

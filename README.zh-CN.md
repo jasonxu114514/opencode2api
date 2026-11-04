@@ -23,6 +23,22 @@ WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
 
 新增页面及调用示例见[管理控制台说明](docs/management.zh-CN.md)。
 
+## 赞助商
+
+<table>
+  <tr>
+    <td width="190" align="center">
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">
+        <img src="assets/IPWO.png" width="163" alt="IPWO">
+      </a>
+    </td>
+    <td>
+      <a href="https://www.ipwo.net/?ref=githubopencode2api">IPWO</a> 住宅代理为 AI 开发与 API 工作流提供灵活的网络连接支持，覆盖 195+ 个国家和地区，支持 HTTP(S) 与 SOCKS5 协议。<br>
+      适用于跨地区网络测试、合规数据采集及自动化开发场景。提供动态代理、静态代理及不限量代理，支持免费测试和地区选择。优惠折扣码：<b>0200</b>。
+    </td>
+  </tr>
+</table>
+
 ## 快速开始
 
 从 [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases) 下载可执行文件，或使用 **Go 1.24 及以上版本**编译：
@@ -263,7 +279,7 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 隧道运行在网关进程内：注册 WARP 设备，通过 UDP 与 Cloudflare 建立 WireGuard 连接，并在用户态网络栈中终结。它不需要 TUN 设备、root、`NET_ADMIN` 或修改路由表，但宿主机（或容器）必须能向 Cloudflare 端点发送 UDP（端口 `2408`）。注册与 `warp=on` 的 trace 探测在启动时完成；WARP 无法初始化时启动直接失败，不会静默回退到代理。通过 WebUI 启用同样采用失败即拒绝：参数错误会返回错误，旧运行时继续服务。
 
-`warp.pool_size`（1–32，默认 `2`）是**上限**而不是固定数量。活跃出口按并发动态调整：每个在途请求一个出口，另加一个备用，最少 1 个、最多不超过配置上限；空闲 60 秒的多余出口会被回收，因此突发流量会把出口环撑大，空闲后再缩回。出口第一次收到上游 429 或 403 即被淘汰并立刻在后台重新注册（注册仍受 Cloudflare 12 秒的 API 节奏限制，上限越大预热越慢，应按免费模型的并发峰值设置）；免费模型请求会持续切换到其他出口，直到用完 `retry.max_attempts` 次才把最后一个 429 返回客户端。`warp.stack` 默认 `ipv6`，可选 `ipv4` 或 `dual`。
+`warp.pool_size`（1–32，默认 `2`）是**上限**而不是固定数量。第一个出口同步注册、决定服务是否 ready；之后池子在后台预注册上限的一半（至少 1 个），突发流量可以直接拿到预热出口而不用等注册。活跃出口再按并发调整：每个在途请求一个出口，另加一个备用，最多不超过上限；空闲 60 秒的多余出口会被回收。出口第一次收到上游 429 或 403 即被淘汰，由预注册的出口立刻顶上——免费模型请求会持续切换到其他出口，直到用完 `retry.max_attempts` 次才把最后一个 429 返回客户端；被淘汰的出口马上在后台重新注册。注册仍然串行，节流改由 Cloudflare 的 429 / Retry-After 决定，而不是固定间隔。若机房能给出的不同出口网段少于预注册目标，池子会退避而不是无限注册；自动免费模型探测在没有备用出口时跳过，并在一轮探测淘汰出口后停止本轮。`warp.stack` 默认 `ipv6`，可选 `ipv4` 或 `dual`。
 
 上游的免费额度按**出口网段**计算，所以只有替换出口能拿到不同网段时轮换才有意义：IPv6 出口按 `/64` 去重并冷却 30 分钟，IPv4 出口按 `/32`。Cloudflare WARP 的 IPv4 出口通常是同一个共享 NAT 地址，常被其他用户用尽；IPv6 网络栈的出口则由外层 WireGuard 源地址决定。把 `warp.source_ipv6` 设为路由到本机的 IPv6 前缀（通常是 `/64`，`warp.stack` 默认已是 `ipv6`），每个出口就会从该前缀绑定自己的源地址。Linux 下该地址通过 `IPV6_FREEBIND` 绑定（网关已自动设置），或要求地址已分配到网卡。不会预先探测地址族：握手先尝试 IPv6 端点，全部失败时自动回退到 IPv4 端点（此时出口为共享地址）。留空则共用本机默认源地址。某些网络的 WARP 出口池本身已被用尽，此时每个新出口也会返回 429，网关会持续轮换出口，但仍会在尝试次数用尽后返回 429。`/healthz` 会返回 `warp` 状态块；启用 WARP 但没有任何活跃出口时返回 503。只有 WARP 关闭或存在 Go Key 需要代理时，`no_healthy_proxies` 才会阻塞就绪。诊断请求会占用出口，但不会轮换或淘汰它。关闭 WARP 后，免费通道恢复使用代理。
 
@@ -291,7 +307,7 @@ System One 使用原生 `noul` 类型询问“1+1 是否等于 2”，不注入�
 
 状态保存在 `config.json.<上游地址指纹>.availability.json`，重启后保留，按 Zen 上游 URL 隔离。后台每分钟检查到期项，跳过手动控制的模型，串行探测其余模型，每条通道最多等待 60 秒。
 
-管理接口：`GET /api/models/availability` 查看状态；`POST /api/models/restore` 携带 `{"model":"MODEL_ID"}` 恢复并进入手动控制；`POST /api/models/manual` 携带 `{"model":"MODEL_ID","manual":true|false}` 在手动与自动之间切换。均需管理登录，写入接口还需 CSRF 校验。
+管理接口：`GET /api/models/availability` 查看状态；`POST /api/models/probe` 将所有自动探测的免费模型标记为到期并立即开始一轮探测，WebUI「刷新状态」按钮即调用它（真正的重新探测，而不是只重载缓存视图）；`POST /api/models/restore` 携带 `{"model":"MODEL_ID"}` 恢复并进入手动控制；`POST /api/models/manual` 携带 `{"model":"MODEL_ID","manual":true|false}` 在手动与自动之间切换。均需管理登录，写入接口还需 CSRF 校验。
 
 ### 会话与代理
 
@@ -299,7 +315,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 
 服务使用稳定会话哈希选择首选 Key 或匿名代理。建议通过 `x-session-id` 区分独立会话，同时支持 `x-opencode-session`、`x-session-affinity`、`session_id`、`conversation-id`、`conversation_id` 请求头，请求体中的 `conversation_id`、`metadata.session_id`，以及 Claude Code `metadata.user_id` 中的会话 ID。
 
-网关自行生成的会话与项目标识按调用方的服务端 Key 隔离，不同 Key 不会共享上游会话、首选 Key 或匿名代理；客户端自带的官方 OpenCode 会话（`ses_…`）原样保留。没有显式会话 ID 时，使用系统提示词和第一条用户消息生成会话标识，因此同一 Key 下系统提示词和开场内容都相同的会话仍可能共享亲和性。需要互相隔离的用户应各自使用独立的服务端 Key。调整 Key 或代理池成员后，原有会话选择的节点可能变化。
+网关自行生成的会话与项目标识按调用方的服务端 Key 隔离，不同 Key 不会共享上游会话、首选 Key 或匿名代理；客户端自带的官方 OpenCode 会话（`ses_…`）原样保留；网关自行派生的会话标识按进程加盐，重启网关后会用新的标识，而不会沿用上一轮进程的上游会话。没有显式会话 ID 时，使用系统提示词和第一条用户消息生成会话标识，因此同一 Key 下系统提示词和开场内容都相同的会话仍可能共享亲和性。需要互相隔离的用户应各自使用独立的服务端 Key。调整 Key 或代理池成员后，原有会话选择的节点可能变化。
 
 失败冷却按指数增长，最高为 `performance.failure_cooldown_seconds` 的八倍；如果上游的 `Retry-After` 更长，则使用更长时间。所有认证 Key 都处于冷却时，路由仍可能尝试最早结束冷却的 Key；仍在冷却的匿名节点会被跳过。
 
@@ -316,7 +332,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `zen_keys`、`go_keys`       | 未启用匿名模式时，至少需要一个上游 Key。                                              |
 | `anonymous`                 | `false`。                                                                             |
 | `warp.enabled`              | `false`；免费通道流量通过 Cloudflare WARP 出口，不使用代理。                          |
-| `warp.pool_size`            | `2`；WARP 出口上限（活跃出口按并发动态调整），1–32。                                 |
+| `warp.pool_size`            | `2`；WARP 出口上限（后台预注册一半，活跃出口按并发调整），1–32。                    |
 | `warp.stack`                | `ipv6`；可选 `ipv6`、`ipv4`、`dual`。                                                 |
 | `warp.source_ipv6`          | 空；每个出口绑定的外层 IPv6 源前缀（`/64`），要求 `stack = "ipv6"`。                  |
 | `prefer`                    | `go`；可选 `go`、`zen`。                                                              |
