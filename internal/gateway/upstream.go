@@ -850,7 +850,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		body = shaped
 	}
 	setRequestShape(ctx, changed, toolRenames)
-	useWARP := g.usesWARP(route.ID, override.Tier, false)
+	useWARP := !node.bound && g.usesWARP(route.ID, override.Tier, false)
 	proxy := nodes.Proxy(node)
 	if !useWARP {
 		if proxy == nil {
@@ -945,6 +945,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		if node == nil {
 			break
 		}
+		attemptUseWARP := !node.bound && useWARP
 		attempts++
 		// Keep the request-level trace synchronized with the attempt that is
 		// about to be sent. Only the redacted key suffix is retained.
@@ -961,7 +962,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			return nil, err, attempts
 		}
 		proxy := nodes.Proxy(node)
-		if !useWARP {
+		if !attemptUseWARP {
 			if proxy == nil {
 				lastErr = errors.New("upstream key has no proxy binding")
 				break
@@ -971,7 +972,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			}
 		}
 		keyID := config.KeyDisplayID(node.key)
-		if useWARP {
+		if attemptUseWARP {
 			setRequestCredential(ctx, route.Tier, keyID, "key", false, nil)
 		} else {
 			setRequestCredential(ctx, route.Tier, keyID, "key", false, proxy)
@@ -979,7 +980,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		attemptStarted := time.Now()
 		var resp *http.Response
 		var egress string
-		if useWARP {
+		if attemptUseWARP {
 			resp, egress, err = g.doWARPAttempt(ctx, req, baseURL, route.ID, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
 		} else {
 			resp, err = doInferenceAttempt(g.inferenceClient(proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
@@ -998,7 +999,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		}
 		recordProxy := proxy
 		proxyLabel := ""
-		if useWARP {
+		if attemptUseWARP {
 			recordProxy = warpProxy(egress)
 			proxyLabel = egress
 			g.observeKeyResultWARP(ctx, nodes, node, resp, err)

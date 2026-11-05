@@ -608,6 +608,7 @@ type upstreamNode struct {
 	key            string
 	index          int
 	preferredProxy int
+	bound          bool
 	proxyIndex     atomic.Int64
 	failures       atomic.Uint32
 	cooldownUntil  atomic.Int64
@@ -625,11 +626,11 @@ type upstreamNodes struct {
 	bindingCount []int
 }
 
-// nodePool distributes keys over proxies in round-robin order. When there
-// are fewer keys than proxies, the remaining proxies are intentionally idle and
-// can take over a key immediately if an active proxy fails. It needs at least
-// one proxy transport.
-func nodePool(keys []string, transports *proxyTransports, cooldown time.Duration) (*upstreamNodes, error) {
+// nodePool distributes keys over proxies. When explicit proxy bindings are
+// configured, bound keys are permanently pinned to their specified proxy and
+// fail closed if that proxy fails. Unbound keys are distributed in round-robin
+// order and can fail over to other proxies.
+func nodePool(keys []string, transports *proxyTransports, cooldown time.Duration, bindings map[string]string) (*upstreamNodes, error) {
 	if transports == nil || len(transports.items) == 0 {
 		return nil, fmt.Errorf("at least one proxy transport is required")
 	}
@@ -642,9 +643,44 @@ func nodePool(keys []string, transports *proxyTransports, cooldown time.Duration
 	if len(keys) == 0 {
 		return pool, nil
 	}
+	proxyMap := make(map[string]int, len(transports.items)*2)
+	for i, t := range transports.items {
+		proxyMap[t.name] = i
+		clean, _ := config.ParseProxyEntry(t.name)
+		proxyMap[clean] = i
+	}
+
 	for i, key := range keys {
-		proxyIndex := i % len(transports.items)
-		node := &upstreamNode{key: key, index: i, preferredProxy: proxyIndex}
+		fp := config.Fingerprint(key)
+		targetProxy, hasBinding := bindings[fp]
+		if !hasBinding {
+			targetProxy, hasBinding = bindings[key]
+		}
+
+		var proxyIndex int
+		var bound bool
+		if hasBinding {
+			idx, ok := proxyMap[targetProxy]
+			if !ok {
+				cleanTarget, _ := config.ParseProxyEntry(targetProxy)
+				idx, ok = proxyMap[cleanTarget]
+			}
+			if !ok {
+				return nil, fmt.Errorf("bound proxy %q for key %s not found in transports", targetProxy, config.KeyDisplayID(key))
+			}
+			proxyIndex = idx
+			bound = true
+		} else {
+			proxyIndex = i % len(transports.items)
+			bound = false
+		}
+
+		node := &upstreamNode{
+			key:            key,
+			index:          i,
+			preferredProxy: proxyIndex,
+			bound:          bound,
+		}
 		node.proxyIndex.Store(int64(proxyIndex))
 		pool.nodes = append(pool.nodes, node)
 		pool.bindingCount[proxyIndex]++
@@ -666,7 +702,16 @@ func (p *upstreamNodes) RestoreProxy(recoveredProxy int) int {
 	moved := 0
 	for _, node := range p.nodes {
 		current := int(node.proxyIndex.Load())
-		if node.preferredProxy != recoveredProxy || current == recoveredProxy {
+		if node.preferredProxy != recoveredProxy {
+			continue
+		}
+		if node.bound {
+			// Clear failures and cooldown so bound node immediately resumes traffic on recovered proxy.
+			node.failures.Store(0)
+			node.cooldownUntil.Store(0)
+			continue
+		}
+		if current == recoveredProxy {
 			continue
 		}
 		if current >= 0 && current < len(p.bindingCount) {
@@ -724,6 +769,10 @@ func (p *upstreamNodes) RebindProxy(failedProxy int) int {
 	moved := 0
 	for _, node := range p.nodes {
 		if int(node.proxyIndex.Load()) != failedProxy {
+			continue
+		}
+		if node.bound {
+			// Fail-closed: bound nodes never migrate to another proxy or direct route.
 			continue
 		}
 		target := p.replacementLocked(failedProxy, true)
