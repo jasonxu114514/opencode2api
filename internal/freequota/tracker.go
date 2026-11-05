@@ -40,6 +40,7 @@ type Event struct {
 type Snapshot struct {
 	Enabled           bool            `json:"enabled"`
 	AssumedDailyLimit int             `json:"assumed_daily_limit"`
+	SharedLimit       int             `json:"shared_limit"`
 	Date              string          `json:"date"`
 	ResetsAt          time.Time       `json:"resets_at"`
 	TotalUsed         int             `json:"total_used"`
@@ -337,6 +338,15 @@ func (t *Tracker) Snapshot() Snapshot {
 	if day := t.days[date]; day != nil {
 		todayScopes = day.Scopes
 	}
+	// A ceiling observed on any egress is the best available bound for an
+	// egress the upstream has not exhausted yet.
+	shared := 0
+	for _, item := range items {
+		if item.LimitCeil > shared {
+			shared = item.LimitCeil
+		}
+	}
+	result.SharedLimit = shared
 	for egress, item := range items {
 		if scope := todayScopes[egress]; scope != nil && scopeActive(scope) {
 			item.Used = scope.Used
@@ -357,7 +367,7 @@ func (t *Tracker) Snapshot() Snapshot {
 				item.LastQuotaAt = &last
 			}
 		}
-		limit, source := learnedLimit(item, t.opts.AssumedDailyLimit)
+		limit, source := learnedLimit(item, t.opts.AssumedDailyLimit, shared)
 		item.Limit = limit
 		item.LimitSource = source
 		item.Confidence = confidence(item, source)
@@ -391,7 +401,7 @@ func scopeActive(scope *scopeState) bool {
 		scope.Quota429 > 0 || scope.ExhaustedUntil != nil
 }
 
-func learnedLimit(item *ScopeSnapshot, assumed int) (int, string) {
+func learnedLimit(item *ScopeSnapshot, assumed, shared int) (int, string) {
 	if item.LimitCeil > 0 {
 		limit := item.LimitCeil
 		if item.LimitFloor > limit {
@@ -401,6 +411,9 @@ func learnedLimit(item *ScopeSnapshot, assumed int) (int, string) {
 	}
 	if assumed > 0 && item.LimitFloor > assumed {
 		return item.LimitFloor, "learned"
+	}
+	if shared > 0 {
+		return shared, "learned"
 	}
 	if assumed > 0 {
 		return assumed, "assumed"

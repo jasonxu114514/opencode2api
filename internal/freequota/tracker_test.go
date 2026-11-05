@@ -347,3 +347,53 @@ func findOptionalScope(snapshot Snapshot, egress string) *ScopeSnapshot {
 	}
 	return nil
 }
+
+func TestSharedCeilingAppliesToScopeWithoutItsOwn(t *testing.T) {
+	tracker := newTestTracker(t, 200)
+	quotaAt := time.Date(2026, 11, 5, 23, 50, 0, 0, time.UTC)
+	now := quotaAt.Add(5 * time.Minute)
+	tracker.now = func() time.Time { return now }
+
+	for i := 0; i < 3; i++ {
+		recordSuccess(tracker, quotaAt.Add(-time.Duration(i+1)*time.Minute), "a", "m")
+	}
+	for i := 0; i < 10; i++ {
+		recordSuccess(tracker, quotaAt.Add(-time.Duration(i+1)*time.Minute), "b", "m")
+	}
+	recordQuota(tracker, quotaAt, "b", "m")
+
+	snapshot := tracker.Snapshot()
+	if snapshot.SharedLimit != 10 {
+		t.Fatalf("shared limit = %d, want 10", snapshot.SharedLimit)
+	}
+	if scope := findScope(t, snapshot, "a"); scope.Limit != 10 || scope.LimitSource != "learned" {
+		t.Fatalf("a = %+v, want shared learned limit 10", scope)
+	}
+	if scope := findScope(t, snapshot, "b"); scope.Limit != 10 || scope.LimitSource != "learned" {
+		t.Fatalf("b = %+v, want own learned limit 10", scope)
+	}
+}
+
+func TestOwnCeilingWinsOverShared(t *testing.T) {
+	tracker := newTestTracker(t, 200)
+	quotaAt := time.Date(2026, 11, 5, 23, 50, 0, 0, time.UTC)
+	now := quotaAt.Add(5 * time.Minute)
+	tracker.now = func() time.Time { return now }
+
+	for i := 0; i < 150; i++ {
+		recordSuccess(tracker, quotaAt.Add(-time.Duration(i+1)*time.Minute), "b", "m")
+	}
+	recordQuota(tracker, quotaAt.Add(-time.Minute), "b", "m")
+	for i := 0; i < 300; i++ {
+		recordSuccess(tracker, quotaAt.Add(-time.Duration(i+1)*time.Minute), "c", "m")
+	}
+	recordQuota(tracker, quotaAt, "c", "m")
+
+	snapshot := tracker.Snapshot()
+	if snapshot.SharedLimit != 300 {
+		t.Fatalf("shared limit = %d, want 300", snapshot.SharedLimit)
+	}
+	if scope := findScope(t, snapshot, "b"); scope.Limit != 150 || scope.LimitSource != "learned" {
+		t.Fatalf("b = %+v, want own ceiling 150 over shared 300", scope)
+	}
+}

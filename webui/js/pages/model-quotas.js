@@ -381,6 +381,8 @@ function freeRenderOverview(value, rows) {
   const assumed = rows.filter((row) => row.seen && freeState(row) === "assumed");
   const unknown = rows.filter((row) => row.seen && freeState(row) === "unknown");
   const unobserved = rows.filter((row) => !row.seen);
+  const planned = rows.filter((row) => !row.seen && row.limit > 0 && freeState(row) !== "unknown");
+  const plannedTotal = planned.reduce((sum, row) => sum + freeNum(row.limit), 0);
   const counted = rows.filter(freeCounted);
   const capacity = counted.reduce((sum, row) => sum + freeNum(row.limit), 0);
   const remaining = counted.reduce((sum, row) => sum + freeNum(row.remaining), 0);
@@ -394,13 +396,24 @@ function freeRenderOverview(value, rows) {
   const risk = rows.filter((row) => row.exhausted || row.cooling || row.blocked).length;
 
   const remainingEl = $("#freequota-kpi-remaining");
-  remainingEl.textContent = counted.length ? formatNumber(known) : t("未知", "common.unknown");
-  remainingEl.title = t(
-    `估算：合计 ${learned.length} 个已学习、${assumed.length} 个假定出口的剩余；未知与未观察不计入，也非上游权威。`,
-    "quotas.freeq.kpi.estimateTitle",
-    learned.length,
-    assumed.length,
-  );
+  remainingEl.textContent = counted.length
+    ? formatNumber(known)
+    : planned.length
+      ? `≈ ${formatNumber(plannedTotal)}`
+      : t("未知", "common.unknown");
+  remainingEl.title =
+    !counted.length && planned.length
+      ? t(
+          `仅有假定：${planned.length} 个出口的假定上限，非实测。`,
+          "quotas.freeq.kpi.assumedOnlyTitle",
+          planned.length,
+        )
+      : t(
+          `估算：合计 ${learned.length} 个已学习、${assumed.length} 个假定出口的剩余；未知与未观察不计入，也非上游权威。`,
+          "quotas.freeq.kpi.estimateTitle",
+          learned.length,
+          assumed.length,
+        );
   freeSetText("freequota-kpi-used", formatNumber(value.total_used ?? 0));
   freeSetText("freequota-kpi-reset", countdown);
   freeSetText("freequota-kpi-reset-note", localTime(value.resets_at));
@@ -426,6 +439,12 @@ function freeRenderOverview(value, rows) {
       `基于 ${assumed.length} 个出口的起始假定，尚未学习到真实上限`,
       "quotas.freeq.verdict.assumed",
       assumed.length,
+    );
+  else if (planned.length)
+    verdict = t(
+      `基于 ${planned.length} 个出口的起始假定，尚未学习到真实上限`,
+      "quotas.freeq.verdict.assumed",
+      planned.length,
     );
   const pieces = [verdict];
   if (unknownish)
@@ -506,7 +525,7 @@ function freeRenderOverview(value, rows) {
     freeSetText(`${id}-value`, formatNumber(count));
   };
   bucketRow("unknown", unknown.length, "freeq-seg-unknown", t(`${unknown.length} 个出口的上限未知，未计入容量`, "quotas.freeq.capacity.unknownNote", unknown.length));
-  bucketRow("unobserved", unobserved.length, "freeq-seg-unobserved", t(`${unobserved.length} 个出口尚未观察，未计入容量`, "quotas.freeq.capacity.unobservedNote", unobserved.length));
+  bucketRow("unobserved", unobserved.length, "freeq-seg-unobserved", t(`${unobserved.length} 个出口尚未观察；假定合计 ${formatNumber(plannedTotal)}，未计入容量`, "quotas.freeq.capacity.unobservedNote", unobserved.length, formatNumber(plannedTotal)));
 
   const counts = freeDistribution(rows);
   const items = [
@@ -572,9 +591,18 @@ function freeRow(row, value) {
     ]),
   ]);
   const stateLabel = state === "learned" ? t("已学习", "quotas.freeq.source.learned") : state === "assumed" ? t("假定", "quotas.freeq.source.assumed") : t("未知", "quotas.freeq.source.unknown");
+  const assumedLeft = !row.seen && state !== "unknown" && limit > 0;
   const usedText = row.seen ? formatNumber(used) : "—";
-  const numbers = row.seen && limit > 0 ? `${usedText} / ${formatNumber(limit)}` : usedText;
-  const left = remainingKnown ? t(`剩余 ${formatNumber(row.remaining)}`, "quotas.freeq.today.left", formatNumber(row.remaining)) : "—";
+  const numbers = assumedLeft
+    ? `— / ${formatNumber(limit)}`
+    : row.seen && limit > 0
+      ? `${usedText} / ${formatNumber(limit)}`
+      : usedText;
+  const left = remainingKnown
+    ? t(`剩余 ${formatNumber(row.remaining)}`, "quotas.freeq.today.left", formatNumber(row.remaining))
+    : assumedLeft
+      ? t(`≈ ${formatNumber(limit)}（假定，未验证）`, "quotas.freeq.today.assumedLeft", formatNumber(limit))
+      : "—";
   const line = el("div", { class: "freeq-today-line" }, [
     el("span", { class: `freeq-src freeq-src-${state}`, text: stateLabel }),
     el("span", { class: "freeq-used", text: numbers }),

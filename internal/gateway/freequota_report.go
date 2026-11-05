@@ -107,7 +107,7 @@ func (m *RuntimeController) FreeQuotaReport() FreeQuotaReport {
 				Healthy: proxy.healthy.Load(), HealthKnown: !proxy.pool,
 				Checking: proxy.checking.Load(), ProbeSupported: true,
 			}
-			applyFreeQuotaDefaults(&row, snapshot.AssumedDailyLimit)
+			applyFreeQuotaDefaults(&row, snapshot.AssumedDailyLimit, snapshot.SharedLimit)
 			if label == "direct" {
 				row.Kind = "direct"
 			}
@@ -138,7 +138,7 @@ func (m *RuntimeController) FreeQuotaReport() FreeQuotaReport {
 				row := FreeQuotaEgress{
 					Index: -1, Kind: "warp", Label: label, Healthy: true, HealthKnown: true,
 				}
-				applyFreeQuotaDefaults(&row, snapshot.AssumedDailyLimit)
+				applyFreeQuotaDefaults(&row, snapshot.AssumedDailyLimit, snapshot.SharedLimit)
 				if scope, ok := scopes[label]; ok {
 					applyFreeQuotaScope(&row, scope)
 					seen[label] = true
@@ -155,7 +155,7 @@ func (m *RuntimeController) FreeQuotaReport() FreeQuotaReport {
 			continue
 		}
 		row := FreeQuotaEgress{Index: -1, Kind: "unknown", Label: scope.Egress}
-		applyFreeQuotaDefaults(&row, snapshot.AssumedDailyLimit)
+		applyFreeQuotaDefaults(&row, snapshot.AssumedDailyLimit, snapshot.SharedLimit)
 		applyFreeQuotaScope(&row, scope)
 		report.Egresses = append(report.Egresses, row)
 	}
@@ -163,6 +163,7 @@ func (m *RuntimeController) FreeQuotaReport() FreeQuotaReport {
 	for _, row := range report.Egresses {
 		if !row.Seen {
 			report.UnobservedEgresses++
+			continue
 		}
 		if row.Remaining != nil {
 			report.RemainingKnown += *row.Remaining
@@ -186,8 +187,14 @@ func (m *RuntimeController) FreeQuotaReport() FreeQuotaReport {
 // applyFreeQuotaDefaults fills a row that has carried no evidence with the
 // starting prior. The prior is a bound, not an observation, so the row stays
 // unseen and carries no remaining: capacity only counts observed exits.
-func applyFreeQuotaDefaults(row *FreeQuotaEgress, assumed int) {
+func applyFreeQuotaDefaults(row *FreeQuotaEgress, assumed, shared int) {
 	row.History = []freequota.HistoryDay{}
+	if shared > 0 {
+		row.Limit = shared
+		row.LimitSource = "assumed"
+		row.Confidence = "low"
+		return
+	}
 	if assumed > 0 {
 		row.Limit = assumed
 		row.LimitSource = "assumed"
