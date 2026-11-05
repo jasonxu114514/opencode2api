@@ -40,6 +40,7 @@ type Config struct {
 	Upstream          UpstreamConfig               `json:"upstream"`
 	Retry             RetryConfig                  `json:"retry"`
 	Models            ModelsConfig                 `json:"models"`
+	FreeQuota         FreeQuotaConfig              `json:"free_quota"`
 	Performance       PerformanceConfig            `json:"performance"`
 	Logging           LoggingConfig                `json:"logging"`
 	WebUI             WebUIConfig                  `json:"webui"`
@@ -144,6 +145,26 @@ type UpstreamConfig struct {
 type RetryConfig struct {
 	MaxAttempts    int `json:"max_attempts"`
 	TimeoutSeconds int `json:"timeout_seconds"`
+}
+
+// DefaultAssumedFreeQuotaLimit is the starting daily allowance per egress when
+// the operator did not set one.
+const DefaultAssumedFreeQuotaLimit = 200
+
+// FreeQuotaConfig controls the passive free-model quota estimate. A nil
+// AssumedDailyLimit uses DefaultAssumedFreeQuotaLimit; zero starts unknown.
+type FreeQuotaConfig struct {
+	Disabled          bool `json:"disabled,omitempty"`
+	AssumedDailyLimit *int `json:"assumed_daily_limit,omitempty"`
+}
+
+// AssumedLimit returns the configured starting allowance, or the default when
+// the pointer is nil.
+func (f FreeQuotaConfig) AssumedLimit() int {
+	if f.AssumedDailyLimit == nil {
+		return DefaultAssumedFreeQuotaLimit
+	}
+	return *f.AssumedDailyLimit
 }
 
 // ModelsConfig controls model discovery and routing. RefreshSeconds is the
@@ -374,6 +395,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Models.RefreshSeconds < 1 {
 		return Config{}, errors.New("models.refresh_seconds must be at least 1")
+	}
+	if limit := cfg.FreeQuota.AssumedDailyLimit; limit != nil && (*limit < 0 || *limit > 1000000) {
+		return Config{}, errors.New("free_quota.assumed_daily_limit must be between 0 and 1000000")
 	}
 	if cfg.Performance.MaxIdleConns < 1 || cfg.Performance.MaxIdleConnsPerHost < 1 || cfg.Performance.MaxConnsPerHost < 0 || cfg.Performance.IdleConnTimeoutSeconds < 1 || cfg.Performance.ConnectTimeoutSeconds < 1 || cfg.Performance.FailureCooldownSeconds < 1 {
 		return Config{}, errors.New("performance values must be positive (max_conns_per_host may be zero for unlimited)")

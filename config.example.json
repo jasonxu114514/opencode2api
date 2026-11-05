@@ -27,6 +27,9 @@
     "free_only": false,
     "active_probes": false
   },
+  "free_quota": {
+    "assumed_daily_limit": 200
+  },
   "performance": {
     "max_idle_conns": 2048,
     "max_idle_conns_per_host": 256,

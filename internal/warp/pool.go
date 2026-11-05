@@ -131,6 +131,9 @@ type Snapshot struct {
 	Standby int
 	Cooling int
 	Egress  []string
+	// EgressKeys is the quota block for each address in Egress: the /64 for
+	// IPv6 and the /32 for IPv4, matching the free tier's metering scope.
+	EgressKeys []string
 }
 
 // Options configure a WARP pool.
@@ -391,6 +394,9 @@ func (p *Pool) Snapshot() Snapshot {
 		}
 		if active.egress.IsValid() {
 			snapshot.Egress = append(snapshot.Egress, active.egress.String())
+			if key := active.egressKey(); key != "" {
+				snapshot.EgressKeys = append(snapshot.EgressKeys, key)
+			}
 		}
 	}
 	return snapshot

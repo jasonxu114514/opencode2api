@@ -645,6 +645,7 @@
             <div class="tabs" role="tablist" aria-label="模型视图">
               <button class="tab active" data-tab="quota" role="tab" aria-selected="true" data-i18n="quotas.tab.quota">套餐额度</button>
               <button class="tab" data-tab="free" role="tab" aria-selected="false" data-i18n="quotas.tab.free">免费模型</button>
+              <button class="tab" data-tab="free-quota" role="tab" aria-selected="false" data-i18n="quotas.tab.freeQuota">免费额度</button>
             </div>
             <div data-panel="quota" class="stack" role="tabpanel">
               <section class="section">
@@ -740,6 +741,71 @@
                     <tbody id="availability-models"></tbody>
                   </table>
                 </div>
+              </section>
+            </div>
+            <div data-panel="free-quota" class="stack hidden" role="tabpanel">
+              <section class="section">
+                <div class="section-head">
+                  <div>
+                    <h2 class="section-title" data-i18n="quotas.freeq.title">免费模型每日额度估算</h2>
+                    <p class="section-caption" data-i18n="quotas.freeq.caption">本地估算；探测会消耗一次真实的免费模型请求。</p>
+                  </div>
+                  <div class="key-actions">
+                    <button id="freequota-probe-all" class="btn btn-sm btn-ghost" data-i18n="quotas.freeq.probeAll">探测全部</button>
+                    <button id="freequota-refresh" class="btn btn-sm" data-i18n="quotas.freeq.refresh">刷新估算</button>
+                  </div>
+                </div>
+                <p id="freequota-status" class="section-caption" role="status" aria-live="polite">进入页面后读取估算。</p>
+                <div class="metrics freeq-metrics">
+                  <div class="metric">
+                    <div class="metric-label" data-i18n="quotas.freeq.metric.remaining">剩余估算</div>
+                    <div id="freequota-kpi-remaining" class="metric-value">—</div>
+                    <div id="freequota-kpi-remaining-note" class="metric-note" data-i18n="quotas.freeq.metric.remainingNote">按已配置上限统计</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label" data-i18n="quotas.freeq.metric.used">今日已用</div>
+                    <div id="freequota-kpi-used" class="metric-value">—</div>
+                    <div class="metric-note" data-i18n="quotas.freeq.metric.usedNote">观察到的尝试与探测</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label" data-i18n="quotas.freeq.metric.reset">距重置</div>
+                    <div id="freequota-kpi-reset" class="metric-value">—</div>
+                    <div id="freequota-kpi-reset-note" class="metric-note"></div>
+                  </div>
+                </div>
+                <p id="freequota-verdict" class="freeq-verdict"></p>
+                <div class="freeq-capacity">
+                  <p class="section-caption" data-i18n="quotas.freeq.note">假定上限也计入估算，只有在真实每日额度 429 后才变为已学习。</p>
+                  <div class="tier-row freeq-bar-row">
+                    <span data-i18n="quotas.freeq.capacity.estimated">容量</span>
+                    <div id="freequota-usage-track" class="tier-track freeq-stack" role="img"></div>
+                    <span id="freequota-usage-value" class="tier-value">—</span>
+                  </div>
+                  <div id="freequota-unknown-row" class="tier-row freeq-bar-row hidden">
+                    <span data-i18n="quotas.freeq.capacity.unknown">未知上限</span>
+                    <div id="freequota-unknown-track" class="tier-track freeq-stack" aria-hidden="true"></div>
+                    <span id="freequota-unknown-value" class="tier-value">—</span>
+                  </div>
+                  <div class="tier-row freeq-bar-row">
+                    <span data-i18n="quotas.freeq.dist.title">出口状态</span>
+                    <div id="freequota-distribution-track" class="tier-track freeq-stack" role="img"></div>
+                    <div id="freequota-distribution-legend" class="freeq-legend"></div>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table freeq-table">
+                    <thead>
+                      <tr>
+                        <th data-i18n="quotas.freeq.col.egress">出口</th>
+                        <th data-i18n="quotas.freeq.col.today">今日</th>
+                        <th data-i18n="quotas.freeq.col.last">最后结果</th>
+                        <th data-i18n="quotas.freeq.col.action">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="freequota-egresses"></tbody>
+                  </table>
+                </div>
+                <p id="freequota-updated" class="section-caption"></p>
               </section>
             </div>
           </section>

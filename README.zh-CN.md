@@ -254,6 +254,12 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 上游的免费额度按**出口网段**计算，所以只有替换出口能拿到不同网段时轮换才有意义：IPv6 出口按 `/64` 去重并冷却 30 分钟，IPv4 出口按 `/32`。Cloudflare WARP 的 IPv4 出口通常是同一个共享 NAT 地址，常被其他用户用尽；IPv6 网络栈的出口则由外层 WireGuard 源地址决定。把 `warp.source_ipv6` 设为路由到本机的 IPv6 前缀（通常是 `/64`，`warp.stack` 默认已是 `ipv6`），每个出口就会从该前缀绑定自己的源地址。Linux 下该地址通过 `IPV6_FREEBIND` 绑定（网关已自动设置），或要求地址已分配到网卡。不会预先探测地址族：握手先尝试 IPv6 端点，全部失败时自动回退到 IPv4 端点（此时出口为共享地址）。留空则共用本机默认源地址。某些网络的 WARP 出口池本身已被用尽，此时每个新出口也会返回 429，网关会持续轮换出口，但仍会在尝试次数用尽后返回 429。`/healthz` 会返回 `warp` 状态块；启用 WARP 但没有任何活跃出口时返回 503。只有 WARP 关闭或存在 Go Key 需要代理时，`no_healthy_proxies` 才会阻塞就绪。诊断请求会占用出口，但不会轮换或淘汰它。关闭 WARP 后，免费通道恢复使用代理。
 
+### 免费模型额度估算
+
+免费层没有剩余额度接口，也不返回限流响应头，因此网关只能根据已经发出的流量在本地估算每个出口的每日额度。这是本地估算，不是上游真实值；上游额度会动态变化，新出现的出口可能先获得约两倍的额度。`free_quota.assumed_daily_limit`（默认 `200`，`0` 表示未知）是每个出口的初始每日额度。保留期内最高的单日成功数抬高下界（`limit_floor`）；真正的额度 429——`FreeUsageLimitError` 且 `Retry-After` 接近下一个 UTC 零点——记录上界，并用 `max(limit_ceil, limit_floor)` 取代初始值。置信度 `high` 表示两次耗尽结果吻合，`medium` 表示出现过一次，假定值或仅有下界时为 `low`，完全未知时为 `none`。数据在 `config.json.freequota.json` 中保留 30 天。一次探测会消耗一个真实的免费模型请求。
+
+`GET /api/free-quotas` 返回当日估算和所有已配置出口——静态代理、直连、活跃 WARP 出口，以及已不再匹配任何传输、但仍保留的 `kind:"unknown"` 作用域——字段包括 `used`、`limit`、`limit_source`（`assumed`/`learned`/`unknown`）、可为空的 `remaining`、`confidence`、`exhausted`、`last_status`、`last_model`、`last_attempt_at`、`observed_days`、`successes`、`lifetime_used`、`exhaustions`、`limit_floor`、`limit_ceil` 和稀疏的 14 天 `history`。没有观测到流量的行 `seen:false`，不计入容量。汇总字段包括 `enabled`、`assumed_daily_limit`、`date`、`resets_at`、`total_used`，以及计数器 `remaining_known`、`learned_egresses`、`assumed_egresses`、`unknown_egresses`、`unobserved_egresses`、`exhausted_egresses`。`POST /api/free-quotas/probe` 发送一次诊断请求（`{"relay":{"index":0}}`、`{"warp":true}` 或 `{"all":true}`，可选 `model`），返回 `probes` 和刷新后的报告。
+
 ### 官方系统提示词
 
 每个经过整形的免费模型请求都会携带 OpenCode CLI 自身的系统提示词——基础指令、`<env>` 环境块和内置 skill 列表——因为免费层级会校验请求是否具有 agent 形态。v1 `/zen` 使用 1.x 工具名，`/inference` 与 `/zen/go` 使用 2.x 工具名。环境块包含请求的模型、网关工作目录、平台和 UTC 日期。
@@ -319,6 +325,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.anonymous_backoff`  | 缺省关闭；`{threshold, base_hours, max_hours}`，默认 6、1、24。                       |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |
+| `free_quota.assumed_daily_limit` | `200`；每个出口的初始每日额度，之后由学习值取代。`0` 表示未知。 |
 
 ### 强制思考强度
 

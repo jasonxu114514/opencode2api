@@ -976,3 +976,8 @@ func parseRetryAfter(value string) time.Duration {
 	}
 	return 0
 }
+
+// ParseRetryAfter exposes the gateway's Retry-After parsing to the admin
+// probe, which classifies a throttled response with the same rule the tracker
+// uses for recorded traffic.
+func ParseRetryAfter(value string) time.Duration { return parseRetryAfter(value) }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/freequota"
 	modelcatalog "opencode2api/internal/models"
 	"opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
@@ -71,6 +72,9 @@ type RuntimeController struct {
 	// and stack are unchanged. warpKey is the identity used for that reuse.
 	warpPool *warp.Pool
 	warpKey  string
+	// freeQuota estimates the daily free-model allowance per egress scope. It
+	// is shared across runtime rebuilds so a reload keeps today's counts.
+	freeQuota *freequota.Tracker
 }
 
 // EffectiveListeners are the listener settings the running process actually
@@ -93,6 +97,11 @@ func RuntimeManager(root context.Context, configPath string, cfg config.Config, 
 		effective: EffectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
 	manager.metadata = modelcatalog.PricingStore(configPath, logger)
+	freeQuotaPath := ""
+	if configPath != "" {
+		freeQuotaPath = configPath + ".freequota.json"
+	}
+	manager.freeQuota = freequota.Open(freeQuotaPath, freeQuotaOptions(cfg.FreeQuota))
 	// OpenCode metadata refreshes ride the active runtime's healthy proxy
 	// transports and fall back to the registry's direct client when none are
 	// available.
@@ -196,6 +205,10 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 		return nil, err
 	}
 	gateway.rotation = m.rotation
+	if m.freeQuota != nil {
+		m.freeQuota.Configure(freeQuotaOptions(cfg.FreeQuota))
+		gateway.freeQuota = m.freeQuota
+	}
 	availabilityPath := ""
 	if m.configPath != "" {
 		availabilityPath = m.configPath + "." + config.Fingerprint(cfg.Upstream.Zen) + ".availability.json"
@@ -455,6 +468,10 @@ func (m *RuntimeController) Shutdown() {
 		m.warpPool = nil
 		m.warpKey = ""
 	}
+	if m.freeQuota != nil {
+		m.freeQuota.Close()
+		m.freeQuota = nil
+	}
 }
 
 // ResourceSnapshot is the operator view of the current runtime's models, keys,
@@ -545,6 +562,29 @@ func (m *RuntimeController) Resources() ResourceSnapshot {
 		}
 	}
 	return result
+}
+
+// FreeQuotas reports the current UTC day's estimated free-model allowance per
+// egress scope. It is always available: when no runtime exists it returns the
+// configured defaults with no scopes.
+func (m *RuntimeController) FreeQuotas() freequota.Snapshot {
+	if m.freeQuota == nil {
+		return freequota.Snapshot{
+			Enabled:           true,
+			AssumedDailyLimit: config.DefaultAssumedFreeQuotaLimit,
+			ResetsAt:          nextFreeQuotaReset(time.Now()),
+		}
+	}
+	return m.freeQuota.Snapshot()
+}
+
+func freeQuotaOptions(cfg config.FreeQuotaConfig) freequota.Options {
+	return freequota.Options{Disabled: cfg.Disabled, AssumedDailyLimit: cfg.AssumedLimit()}
+}
+
+func nextFreeQuotaReset(now time.Time) time.Time {
+	utc := now.UTC()
+	return time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
 }
 
 // DebugModels returns a routing diagnostic for every catalog model, with no
