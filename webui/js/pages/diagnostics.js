@@ -78,6 +78,19 @@ function renderKeys() {
   else select.value = "auto";
 }
 
+function renderRelays() {
+  const select = $("#play-relay");
+  if (!select) return;
+  const selected = select.value;
+  select.replaceChildren();
+  select.append(el("option", { value: "auto", text: t("任意 Relay（正常路由）", "playground.relay.auto") }));
+  (store.get("debug")?.relays || []).forEach((name, index) => {
+    select.append(el("option", { value: String(index), text: `${index} · ${name}` }));
+  });
+  if (selected && [...select.options].some((option) => option.value === selected)) select.value = selected;
+  else select.value = "auto";
+}
+
 function renderModels() {
   const select = $("#play-model");
   const selected = select.value;
@@ -88,6 +101,7 @@ function renderModels() {
   if (selected && [...select.options].some((option) => option.value === selected)) select.value = selected;
   if (!$("#play-request").value.trim()) resetTemplate();
   renderKeys();
+  renderRelays();
 }
 
 function showResult(result) {
@@ -119,6 +133,7 @@ function showResult(result) {
       keyTest || t("自动路由未单独判定", "play.keyVerdict.none"),
       result.key_test === "usable" ? "ok" : result.key_test ? "bad" : "",
     ],
+    [t("测试 Relay", "play.testedRelay"), result.relay_test || "—"],
     [t("实际路由", "play.actualRoute"), routeLabel],
     [t("原生协议", "play.nativeProtocol"), route.native_protocol || "—"],
     [
@@ -143,6 +158,9 @@ async function run(event) {
     toast(t(`请求 JSON 无效：${error.message}`, "toast.play.invalidJson", error.message), true);
     return;
   }
+  const relayValue = $("#play-relay")?.value || "auto";
+  const relayNames = store.get("debug")?.relays || [];
+  const relay = relayValue === "auto" ? undefined : { index: Number(relayValue), name: relayNames[Number(relayValue)] };
   const keyValue = $("#play-key").value;
   const key =
     keyValue === "auto"
@@ -158,7 +176,7 @@ async function run(event) {
       "lastPlayground",
       await api("/api/debug/inference", {
         method: "POST",
-        body: JSON.stringify({ protocol: $("#play-protocol").value, key, request }),
+        body: JSON.stringify({ protocol: $("#play-protocol").value, key, ...(relay ? { relay } : {}), request }),
       }),
     );
   } catch (error) {
