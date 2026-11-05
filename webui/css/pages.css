@@ -377,3 +377,104 @@
     grid-column: 1 / -1;
   }
 }
+
+/* Free-quota estimate: one capacity card, one honest table. */
+[data-panel="free-quota"] > .section { min-width: 0; }
+.freeq-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.freeq-verdict {
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--border-2);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.freeq-capacity {
+  display: grid;
+  gap: 2px;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.freeq-bar-row {
+  grid-template-columns: 84px minmax(0, 1fr) minmax(120px, auto);
+  border-top: 1px solid var(--border-1);
+}
+.freeq-capacity > .freeq-bar-row:first-of-type { border-top: 0; }
+.freeq-bar-row > :first-child { color: var(--text-2); white-space: nowrap; }
+.freeq-stack { display: flex; }
+.freeq-seg { height: 100%; }
+.freeq-seg-learned-used { background: var(--inverse-bg); }
+.freeq-seg-learned-rest { background: var(--ok); opacity: 0.45; }
+.freeq-seg-assumed-used { background: var(--text-2); }
+.freeq-seg-assumed-rest { background: var(--text-3); opacity: 0.45; }
+.freeq-seg-healthy { background: var(--ok); }
+.freeq-seg-cooling { background: var(--warn); }
+.freeq-seg-blocked,
+.freeq-seg-exhausted { background: var(--bad); }
+.freeq-seg-unobserved { background: var(--text-3); opacity: 0.3; }
+.freeq-seg-unknown { background: var(--text-3); opacity: 0.8; }
+.freeq-seg-other { background: var(--border-2); }
+.freeq-legend { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: var(--fs-xs); color: var(--text-2); }
+.freeq-legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.freeq-dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+.freeq-table { width: 100%; min-width: 560px; }
+.freeq-table th { white-space: nowrap; }
+.freeq-table td { vertical-align: middle; }
+.freeq-egress { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.freeq-egress .mono { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.freeq-health-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  flex: none;
+}
+.freeq-health-unknown { color: var(--text-3); }
+.freeq-today { min-width: 240px; }
+.freeq-today-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.freeq-src { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); white-space: nowrap; }
+.freeq-src::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+  flex: none;
+}
+.freeq-src-learned { color: var(--ok); }
+.freeq-src-assumed { color: var(--text-2); }
+.freeq-src-unknown,
+.freeq-left-none { color: var(--text-3); }
+.freeq-used { color: var(--text-1); }
+.freeq-left { color: var(--text-2); }
+.freeq-progress { width: 100%; height: 6px; margin: 4px 0 0; background: var(--border-2); }
+.freeq-progress::-webkit-progress-bar { background: var(--border-2); }
+.freeq-progress-assumed::-webkit-progress-value { background: var(--text-2); }
+.freeq-progress-assumed::-moz-progress-bar { background: var(--text-2); }
+.freeq-history { display: flex; align-items: flex-end; gap: 1px; width: 68px; height: 14px; margin-top: 4px; }
+.freeq-hist { flex: 1 1 0; min-width: 1px; border-radius: 1px; background: var(--border-2); }
+.freeq-hist-empty { background: var(--bg-subtle); }
+.freeq-hist-ok { background: var(--ok); }
+.freeq-hist-bad { background: var(--bad); }
+.freeq-last {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.freeq-actions { display: flex; justify-content: flex-end; }
+@media (max-width: 680px) {
+  .freeq-metrics { grid-template-columns: 1fr; }
+  .freeq-bar-row { grid-template-columns: 76px minmax(0, 1fr); }
+  .freeq-bar-row .tier-value,
+  .freeq-legend { grid-column: 2; }
+}

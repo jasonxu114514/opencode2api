@@ -227,10 +227,13 @@ func warpProxy(label string) *proxyTransport {
 // cursor do not, because a block is a property of the WARP exit and rotation
 // replaces it.
 func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
-	if !g.anonymous.AllowAttempt() {
-		return nil, errAnonymousLanePaused, 0
+	diagnostic := isDiagnosticRequest(ctx)
+	if !diagnostic {
+		if !g.anonymous.AllowAttempt() {
+			return nil, errAnonymousLanePaused, 0
+		}
+		defer g.anonymous.ReleaseProbe()
 	}
-	defer g.anonymous.ReleaseProbe()
 	rawBody := bodies[config.TierZen]
 	if len(rawBody) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
@@ -249,6 +252,10 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	limit := g.cfg.Retry.MaxAttempts
 	if limit < 1 || isTitle {
 		// A title request gets one attempt: on failure it is answered locally.
+		limit = 1
+	}
+	if warpProbeFrom(ctx) {
+		// A probe measures one lease's answer, not a rotation.
 		limit = 1
 	}
 	firstEventTimeout := time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds) * time.Second
@@ -297,7 +304,9 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			status := upstreamStatus(resp)
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, warpProxy(egress), resp, err, duration)
 			if err == nil && status/100 == 2 {
-				g.anonymous.NoteSuccess()
+				if !diagnostic {
+					g.anonymous.NoteSuccess()
+				}
 				g.logger.Debug("anonymous WARP upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "status", status, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
@@ -341,9 +350,11 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			}
 		}
 		if !leaseBlocked && upstreamStatus(lastResponse) != http.StatusTooManyRequests {
-			if pause, tripped := g.anonymous.NoteFailure(); tripped {
-				g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", upstreamStatus(lastResponse), "paused_for", pause.String())
-				break
+			if !diagnostic {
+				if pause, tripped := g.anonymous.NoteFailure(); tripped {
+					g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", upstreamStatus(lastResponse), "paused_for", pause.String())
+					break
+				}
 			}
 		}
 	}

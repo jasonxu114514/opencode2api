@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/freequota"
 	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
@@ -92,6 +93,21 @@ func relayOverrideFrom(ctx context.Context) (RelaySelection, bool) {
 		return RelaySelection{}, false
 	}
 	return selection, true
+}
+
+type warpProbeContextKey struct{}
+
+// WithWARPProbe pins one diagnostic request to the WARP lane with a single
+// attempt, so an operator can ask whether the WARP exit can currently serve a
+// free model. It also marks the request diagnostic, so the probe cannot cool
+// an exit or trip the anonymous breaker.
+func WithWARPProbe(ctx context.Context) context.Context {
+	return context.WithValue(WithDiagnosticRequest(ctx), warpProbeContextKey{}, true)
+}
+
+func warpProbeFrom(ctx context.Context) bool {
+	probe, _ := ctx.Value(warpProbeContextKey{}).(bool)
+	return probe
 }
 
 // RelayNames lists the configured relays in configuration order, with any
@@ -337,6 +353,17 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 			g.logger.Debug("anonymous request did not succeed; entering preferred key tiers", "component", "upstream", "event", "anonymous_fallback", "request_id", ids.Request, "attempts", attempts, "key_tiers", route.KeyTiers)
 		}
 	}
+	// A WARP probe describes the anonymous lane alone. Fallback keys would
+	// answer for a different egress, so stop after the tunnel attempt.
+	if warpProbeFrom(ctx) {
+		if lastResponse != nil {
+			return lastResponse, effectiveRoute, attempts, nil
+		}
+		if lastErr == nil {
+			lastErr = errWARPUnavailable
+		}
+		return nil, effectiveRoute, attempts, lastErr
+	}
 	if ctx.Err() != nil {
 		// The anonymous phase already consumed the request budget. Entering the
 		// authenticated tiers here would only fire instant attempts against a
@@ -437,15 +464,29 @@ func (g *Gateway) maxAnonymousExits() int {
 // tiers. It returns the last response (body still open), else the last error,
 // plus the number of attempts made.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
-	if g.usesWARP(route.ID, config.TierZen, true) {
+	diagnostic := isDiagnosticRequest(ctx)
+	_, pinned := relayOverrideFrom(ctx)
+	if warpProbeFrom(ctx) {
+		if g.warp == nil || !g.usesWARP(route.ID, config.TierZen, true) {
+			return nil, errWARPUnavailable, 0
+		}
+		return g.doWarpAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
+	}
+	// A relay-pinned diagnostic measures that proxy, so WARP must not hijack
+	// the request; without a pin the WARP lane replaces the proxy cursor.
+	if !pinned && g.usesWARP(route.ID, config.TierZen, true) {
 		return g.doWarpAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
 	}
 	// The breaker holds the lane shut for an hour-scale window after repeated
 	// failures: poking a flagged upstream again would only extend the block.
-	if !g.anonymous.AllowAttempt() {
-		return nil, errAnonymousLanePaused, 0
+	// A diagnostic probe is deliberately allowed through, because its whole
+	// point is to measure one egress without changing lane state.
+	if !diagnostic {
+		if !g.anonymous.AllowAttempt() {
+			return nil, errAnonymousLanePaused, 0
+		}
+		defer g.anonymous.ReleaseProbe()
 	}
-	defer g.anonymous.ReleaseProbe()
 	var lastResponse *http.Response
 	var lastErr error
 	// blocked records that some exit is under the free tier's IP block. The
@@ -576,7 +617,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				// exit and move on to another one instead of adding attempts
 				// that only lengthen the penalty. The body is restored, so the
 				// caller still forwards the upstream error.
-				node.proxy.markBlocked(time.Now().Add(g.freeTierBlockTTL()))
+				if !diagnostic {
+					node.proxy.markBlocked(time.Now().Add(g.freeTierBlockTTL()))
+				}
 				lastErr = errFreeTierIPBlocked
 				blocked = true
 				g.logger.Warn("free tier blocked the egress IP; cooling the exit", "component", "upstream", "event", "free_tier_ip_blocked", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "block_for", g.freeTierBlockTTL().String())
@@ -600,7 +643,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			// proxy cannot shorten the context or repair the payload. Keep the
 			// response and let the caller forward it instead of sending the
 			// same request through every remaining exit.
-			g.anonymous.NoteNeutral()
+			if !diagnostic {
+				g.anonymous.NoteNeutral()
+			}
 			break
 		}
 		if ctx.Err() != nil {
@@ -617,7 +662,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	// Every configured exit is under the same IP block: another request
 	// cannot reach a working exit, so pause the lane instead of repeating the
 	// 403 walk until the exit cool-downs expire.
-	if blocked && g.anonymous.blockedExits(time.Now()) {
+	if blocked && g.anonymous.blockedExits(time.Now()) && !diagnostic {
 		if pause, tripped := g.anonymous.ForceOpen(); tripped {
 			g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "reason", "all_exits_blocked", "request_id", ids.Request, "paused_for", pause.String())
 		}
@@ -1259,6 +1304,26 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 			leg += "@" + config.RedactURL(proxy.name)
 		}
 		meta.Legs = append(meta.Legs, leg)
+	}
+	if g.freeQuota != nil && g.catalog != nil && g.catalog.IsFreeModel(route.ID) {
+		egress := "direct"
+		if proxy != nil {
+			egress = freequota.EgressLabel(proxy.name, config.RedactURL(proxy.name))
+		}
+		event := freequota.Event{
+			Time:           time.Now().UTC(),
+			Egress:         egress,
+			Model:          route.ID,
+			Status:         status,
+			TransportError: err != nil,
+		}
+		if resp != nil && (status == http.StatusTooManyRequests || status == http.StatusForbidden) {
+			event.Body = peekResponseBody(resp)
+		}
+		if resp != nil && status == http.StatusTooManyRequests {
+			event.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		}
+		g.freeQuota.Record(event)
 	}
 	if g.monitor == nil {
 		return
