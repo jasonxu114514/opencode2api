@@ -27,6 +27,7 @@ const toolWireNameLimit = 64
 type ToolRenames struct {
 	toWire   map[string]string
 	toClient map[string]string
+	official map[string]string
 	// byCase and byShape map a folded client name back to the one declared
 	// client tool it names. A value of "" marks a fold two tools share: that
 	// name is never guessed between.
@@ -39,6 +40,7 @@ func NewToolRenames() *ToolRenames {
 	return &ToolRenames{
 		toWire:   map[string]string{},
 		toClient: map[string]string{},
+		official: map[string]string{},
 		byCase:   map[string]string{},
 		byShape:  map[string]string{},
 	}
@@ -72,6 +74,28 @@ func (r *ToolRenames) Client(wire string) (string, bool) {
 		return "", false
 	}
 	client, ok := r.toClient[wire]
+	return client, ok
+}
+
+// BindOfficial records the declared client tool that matches one official name.
+func (r *ToolRenames) BindOfficial(official, client string) {
+	if r == nil || official == "" || client == "" {
+		return
+	}
+	if r.official == nil {
+		r.official = map[string]string{}
+	}
+	if _, exists := r.official[official]; !exists {
+		r.official[official] = client
+	}
+}
+
+// Official returns the declared client tool bound to an official name.
+func (r *ToolRenames) Official(official string) (string, bool) {
+	if r == nil || official == "" {
+		return "", false
+	}
+	client, ok := r.official[official]
 	return client, ok
 }
 
@@ -159,8 +183,9 @@ func (r *ToolRenames) HasLongerPrefix(prefix string) bool {
 
 // Resolve maps a tool name the upstream reported back to the name the client
 // declared. It is the response-side counterpart of the wire rename: an exact
-// wire name restores, a clint_ prefix is stripped as a best-effort recovery
-// (for example after a configuration reload mid-stream), and a name that
+// wire name restores, an official alias maps to the matching client tool, a
+// clint_ prefix is stripped as a best-effort recovery (for example after a
+// configuration reload mid-stream), and a name that
 // differs from exactly one declared client tool only in case, or else only in
 // case and separators (todowrite → todo_write), is folded onto that tool. A
 // name two tools fold to is never guessed between. It reports whether the
@@ -170,6 +195,9 @@ func (r *ToolRenames) Resolve(wire string) (string, bool) {
 		return wire, false
 	}
 	if client, ok := r.Client(wire); ok {
+		return client, client != wire
+	}
+	if client, ok := r.Official(wire); ok {
 		return client, client != wire
 	}
 	client := wire
