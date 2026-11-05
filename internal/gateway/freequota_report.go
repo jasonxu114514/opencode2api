@@ -183,6 +183,9 @@ func (m *RuntimeController) FreeQuotaReport() FreeQuotaReport {
 	return report
 }
 
+// applyFreeQuotaDefaults fills a row that has carried no evidence with the
+// starting prior. The prior is a bound, not an observation, so the row stays
+// unseen and carries no remaining: capacity only counts observed exits.
 func applyFreeQuotaDefaults(row *FreeQuotaEgress, assumed int) {
 	row.History = []freequota.HistoryDay{}
 	if assumed > 0 {

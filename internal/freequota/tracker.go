@@ -338,7 +338,7 @@ func (t *Tracker) Snapshot() Snapshot {
 		todayScopes = day.Scopes
 	}
 	for egress, item := range items {
-		if scope := todayScopes[egress]; scope != nil {
+		if scope := todayScopes[egress]; scope != nil && scopeActive(scope) {
 			item.Used = scope.Used
 			item.RetryAfterSeconds = scope.RetryAfterSeconds
 			item.LastStatus = scope.LastStatus
@@ -383,9 +383,12 @@ func (t *Tracker) Snapshot() Snapshot {
 	return result
 }
 
+// scopeActive reports whether a scope carries evidence worth reporting. A
+// scope that only recorded last-attempt fields for a transport error or 403
+// spent nothing and learned nothing, so it is not evidence.
 func scopeActive(scope *scopeState) bool {
 	return scope.Used > 0 || scope.Successes > 0 || scope.Ceiling > 0 ||
-		scope.Quota429 > 0 || scope.ExhaustedUntil != nil || scope.LastAttemptAt != nil
+		scope.Quota429 > 0 || scope.ExhaustedUntil != nil
 }
 
 func learnedLimit(item *ScopeSnapshot, assumed int) (int, string) {

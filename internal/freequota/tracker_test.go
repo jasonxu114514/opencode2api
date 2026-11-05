@@ -295,14 +295,14 @@ func TestRecordBillableClassification(t *testing.T) {
 	recordSuccess(tracker, now, "billable", "m")
 
 	snapshot := tracker.Snapshot()
-	if scope := findScope(t, snapshot, "transport"); scope.Used != 0 || scope.LastStatus != 0 || scope.LastAttemptAt == nil {
-		t.Fatalf("transport scope = %+v, want used 0, status 0, attempt set", scope)
+	if scope := findOptionalScope(snapshot, "transport"); scope != nil {
+		t.Fatalf("transport scope = %+v, want absent (spent nothing, learned nothing)", scope)
 	}
-	if scope := findScope(t, snapshot, "forbidden"); scope.Used != 0 || scope.LastStatus != 403 {
-		t.Fatalf("forbidden scope = %+v, want used 0, status 403", scope)
+	if scope := findOptionalScope(snapshot, "forbidden"); scope != nil {
+		t.Fatalf("forbidden scope = %+v, want absent (not free-tier usage)", scope)
 	}
-	if scope := findScope(t, snapshot, "session"); scope.Used != 0 || scope.Exhaustions != 0 {
-		t.Fatalf("session scope = %+v, want used 0, no exhaustion", scope)
+	if scope := findOptionalScope(snapshot, "session"); scope != nil {
+		t.Fatalf("session scope = %+v, want absent (session-risk 429 spends nothing)", scope)
 	}
 	if scope := findScope(t, snapshot, "throttle"); scope.Used != 1 || scope.Successes != 0 {
 		t.Fatalf("throttle scope used=%d successes=%d, want 1/0", scope.Used, scope.Successes)
@@ -335,4 +335,15 @@ func TestSameModelSuccessClearsExhaustion(t *testing.T) {
 	if scope.RetryAfterSeconds != 0 || scope.LastQuotaAt != nil {
 		t.Fatalf("after heal retry=%d last_quota=%v, want 0/nil", scope.RetryAfterSeconds, scope.LastQuotaAt)
 	}
+}
+
+// findOptionalScope returns nil when the egress produced no evidence, which is
+// the correct state for a transport error or a 403.
+func findOptionalScope(snapshot Snapshot, egress string) *ScopeSnapshot {
+	for i := range snapshot.Scopes {
+		if snapshot.Scopes[i].Egress == egress {
+			return &snapshot.Scopes[i]
+		}
+	}
+	return nil
 }
