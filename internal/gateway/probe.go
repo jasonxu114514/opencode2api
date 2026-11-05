@@ -269,7 +269,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 				return probeResult{attempted: true, reason: "network_abuse_blocked"}
 			}
 			result.effortRejected = isEffortRejection(resp.StatusCode, string(body))
-			if isModelUnavailable(resp.StatusCode, string(body)) {
+			if IsModelUnavailable(resp.StatusCode, string(body)) {
 				result.reason = "model_unavailable"
 			}
 		}
@@ -311,7 +311,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 		result.reason = "invalid_or_incomplete_response"
 		if err != nil {
 			result.effortRejected = isEffortRejection(400, err.Error())
-			if isModelUnavailable(400, err.Error()) {
+			if IsModelUnavailable(400, err.Error()) {
 				result.reason = "model_unavailable"
 			}
 		}
@@ -322,10 +322,10 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	return result
 }
 
-// isModelUnavailable reports whether a 400, 404, 410 or 422 error body says
+// IsModelUnavailable reports whether a 400, 404, 410 or 422 error body says
 // the model itself is unknown, retired or no longer available, as opposed to
 // a transient or credential failure.
-func isModelUnavailable(status int, body string) bool {
+func IsModelUnavailable(status int, body string) bool {
 	if status != 400 && status != 404 && status != 410 && status != 422 {
 		return false
 	}

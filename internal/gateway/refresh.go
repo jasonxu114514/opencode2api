@@ -163,47 +163,56 @@ func (g *Gateway) applyProxyHealthResult(result proxyHealthResult, source string
 	g.logger.Debug("proxy health check is still failing", "component", "proxy", "event", "health_check_still_failing", "source", source, "upstream_status", upstreamStatus, "proxy", config.RedactURL(result.proxy.name), "error", result.err)
 }
 
+// RefreshCatalog refreshes the catalog once. Concurrent or overlapping executions
+// on this gateway are skipped via g.refreshMu.
+func (g *Gateway) RefreshCatalog(ctx context.Context) {
+	if !g.refreshMu.TryLock() {
+		return
+	}
+	defer g.refreshMu.Unlock()
+	var zen, goModels []string
+	var capabilities modelcatalog.Capabilities
+	var capabilitiesErr error
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); zen = g.refreshZen(ctx) }()
+	go func() { defer wg.Done(); goModels = g.refreshTier(ctx, g.cfg.Upstream.Go, g.goNodes) }()
+	go func() {
+		defer wg.Done()
+		capabilityCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		capabilities, capabilitiesErr = g.refreshProtocolCapabilities(capabilityCtx)
+	}()
+	wg.Wait()
+	if ctx.Err() != nil {
+		return
+	}
+	if capabilitiesErr != nil {
+		g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
+	}
+	if zen != nil || goModels != nil {
+		g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
+		g.syncRotation()
+		if ctx.Err() == nil {
+			if err := g.catalog.SaveCache(); err != nil {
+				g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
+			}
+		}
+		g.logger.Info("model catalog refreshed", "component", "models", "event", "catalog_refreshed", "models", len(g.catalog.List()))
+	}
+}
+
 // StartModelRefresh refreshes the model catalog at once and then every
 // models.refresh_seconds until ctx is canceled. Each round concurrently lists
 // the Zen models (through the anonymous lane when no Zen key can) and the Go
 // models, and fetches OpenCode's protocol capabilities. The catalog is
 // replaced only when at least one listing succeeded; the rotation groups are
-// then resynced and the catalog cache saved.
+// then resynced and the catalog cache saved. If a refresh fails, the last-known-good
+// catalog is preserved intact.
+// Overlapping refresh executions within this gateway are skipped via g.refreshMu.
 func (g *Gateway) StartModelRefresh(ctx context.Context) {
-	refresh := func() {
-		var zen, goModels []string
-		var capabilities modelcatalog.Capabilities
-		var capabilitiesErr error
-		var wg sync.WaitGroup
-		wg.Add(3)
-		go func() { defer wg.Done(); zen = g.refreshZen(ctx) }()
-		go func() { defer wg.Done(); goModels = g.refreshTier(ctx, g.cfg.Upstream.Go, g.goNodes) }()
-		go func() {
-			defer wg.Done()
-			capabilityCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			capabilities, capabilitiesErr = g.refreshProtocolCapabilities(capabilityCtx)
-		}()
-		wg.Wait()
-		if ctx.Err() != nil {
-			return
-		}
-		if capabilitiesErr != nil {
-			g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
-		}
-		if zen != nil || goModels != nil {
-			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
-			g.syncRotation()
-			if ctx.Err() == nil {
-				if err := g.catalog.SaveCache(); err != nil {
-					g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
-				}
-			}
-			g.logger.Info("model catalog refreshed", "component", "models", "event", "catalog_refreshed", "models", len(g.catalog.List()))
-		}
-	}
 	go func() {
-		refresh()
+		g.RefreshCatalog(ctx)
 		ticker := time.NewTicker(time.Duration(g.cfg.Models.RefreshSeconds) * time.Second)
 		defer ticker.Stop()
 		for {
@@ -211,7 +220,7 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				refresh()
+				g.RefreshCatalog(ctx)
 			}
 		}
 	}()

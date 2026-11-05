@@ -285,6 +285,7 @@ const DICTIONARY = {
       "config.upstream.caption":
         "anonymous will use every available proxy; an explicit protocol mapping wins over inferring the protocol from the model name.",
       "config.upstream.freeOnly": "Only expose free models (even when Zen / Go Keys are configured)",
+      "config.upstream.activeProbes": "Enable active background probes for free models (disabled by default to save quota)",
       "config.upstream.attempts": "Max attempts per Key Tier",
       "config.upstream.timeout": "Request timeout (seconds)",
       "config.upstream.refresh": "Model refresh interval (seconds)",
@@ -856,6 +857,7 @@ const DICTIONARY = {
       "config.upstream.caption":
         "anonymous sẽ dùng hết các Proxy khả dụng; ánh xạ protocol tường minh được ưu tiên hơn việc suy luận từ tên mô hình.",
       "config.upstream.freeOnly": "Chỉ công khai mô hình miễn phí (kể cả khi đã cấu hình Zen / Go Key)",
+      "config.upstream.activeProbes": "Bật probe chủ động ngầm cho mô hình miễn phí (mặc định tắt để tiết kiệm hạn mức)",
       "config.upstream.attempts": "Số lần thử tối đa cho mỗi Key Tier",
       "config.upstream.timeout": "Timeout của request (giây)",
       "config.upstream.refresh": "Làm mới mô hình (giây)",
@@ -1439,6 +1441,8 @@ const DICTIONARY = {
         "anonymous userà ogni proxy disponibile; una mappatura esplicita di protocollo prevale sull'inferenza del protocollo dal nome del modello.",
       "config.upstream.freeOnly":
         "Espone solo modelli gratuiti (anche quando sono configurate Zen / Go Key)",
+      "config.upstream.activeProbes":
+        "Abilita i probe attivi in background per i modelli gratuiti (disabilitato per impostazione predefinita)",
       "config.upstream.attempts": "Tentativi massimi per Key Tier",
       "config.upstream.timeout": "Timeout richiesta (secondi)",
       "config.upstream.refresh": "Intervallo di refresh modelli (secondi)",

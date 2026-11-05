@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"opencode2api/internal/config"
@@ -93,6 +94,8 @@ type Gateway struct {
 	// freeTierBlock is how long an exit the free tier flagged stays out of the
 	// anonymous cursor. Zero uses freeTierBlockTTL.
 	freeTierBlock time.Duration
+	// refreshMu prevents overlapping catalog refreshes across concurrent or scheduled callers.
+	refreshMu sync.Mutex
 }
 
 // New builds a Gateway for cfg: one proxy transport per runtime proxy (a

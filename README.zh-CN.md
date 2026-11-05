@@ -315,6 +315,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
 | `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
 | `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
+| `models.active_probes`      | `false`；关闭时通过实际请求被动追踪模型可用性，不主动发起测试请求。设为 `true` 开启主动探测。 |
 | `models.anonymous_backoff`  | 缺省关闭；`{threshold, base_hours, max_hours}`，默认 6、1、24。                       |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |
