@@ -548,7 +548,15 @@ func (p *proxyTransports) checkClaimedProxy(ctx context.Context, proxy *proxyTra
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, target, nil)
 	if err == nil {
 		req.Header.Set("User-Agent", httpx.V2UserAgent())
-		resp, requestErr := proxy.client.Do(req)
+		// Probe with the same client free-model traffic uses. The Bun client
+		// reproduces the official OpenCode client's TLS fingerprint, so a probe
+		// through it measures the path it judges instead of a plain Go TLS
+		// handshake that some origins treat differently.
+		probeClient := proxy.client
+		if proxy.bun != nil {
+			probeClient = proxy.bun
+		}
+		resp, requestErr := probeClient.Do(req)
 		err = requestErr
 		if resp != nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
