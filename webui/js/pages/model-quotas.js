@@ -259,8 +259,7 @@ const freeState = (row) =>
     : row.limit_source === "assumed"
       ? "assumed"
       : "unknown";
-const freeCounted = (row) =>
-  row.seen === true && row.remaining != null && freeState(row) !== "unknown" && freeNum(row.limit) > 0;
+const freeLimited = (row) => freeNum(row.limit) > 0 && freeState(row) !== "unknown";
 const freeKey = (row) => `${row.kind || "unknown"}|${row.index ?? ""}|${row.label || ""}`;
 const freeProbeable = (row) =>
   Boolean(row.probe_supported) && ["proxy", "direct", "warp"].includes(row.kind);
@@ -364,12 +363,12 @@ function freeHistory(row, value) {
 }
 
 function freeDistribution(rows) {
-  const counts = { healthy: 0, cooling: 0, blocked: 0, exhausted: 0, unobserved: 0, other: 0 };
+  const counts = { healthy: 0, cooling: 0, blocked: 0, exhausted: 0, noTraffic: 0, other: 0 };
   for (const row of rows) {
     if (row.exhausted) counts.exhausted += 1;
     else if (row.blocked) counts.blocked += 1;
     else if (row.cooling) counts.cooling += 1;
-    else if (!row.seen) counts.unobserved += 1;
+    else if (!row.seen) counts.noTraffic += 1;
     else if (freeHealth(row).tone === "ok") counts.healthy += 1;
     else counts.other += 1;
   }
@@ -377,100 +376,99 @@ function freeDistribution(rows) {
 }
 
 function freeRenderOverview(value, rows) {
-  const learned = rows.filter((row) => row.seen && freeState(row) === "learned");
-  const assumed = rows.filter((row) => row.seen && freeState(row) === "assumed");
-  const unknown = rows.filter((row) => row.seen && freeState(row) === "unknown");
-  const unobserved = rows.filter((row) => !row.seen);
-  const planned = rows.filter((row) => !row.seen && row.limit > 0 && freeState(row) !== "unknown");
-  const plannedTotal = planned.reduce((sum, row) => sum + freeNum(row.limit), 0);
-  const counted = rows.filter(freeCounted);
-  const capacity = counted.reduce((sum, row) => sum + freeNum(row.limit), 0);
-  const remaining = counted.reduce((sum, row) => sum + freeNum(row.remaining), 0);
-  const used = counted.reduce(
-    (sum, row) => sum + Math.max(0, freeNum(row.limit) - freeNum(row.remaining)),
-    0,
-  );
-  const known = remaining;
+  const limited = rows.filter(freeLimited);
+  const learnedRows = limited.filter((row) => freeState(row) === "learned");
+  const assumedRows = limited.filter((row) => freeState(row) === "assumed");
+  const excluded = rows.filter((row) => !freeLimited(row));
+  const noTraffic = rows.filter((row) => !row.seen).length;
+  const learned = learnedRows.length;
+  const assumed = assumedRows.length;
+  const capacity = limited.reduce((sum, row) => sum + freeNum(row.limit), 0);
+  const used = freeNum(value.total_used);
+  const remaining = Math.max(0, capacity - used);
   const countdown = freeCountdown(value.resets_at);
-  const unknownish = unknown.length + unobserved.length;
   const risk = rows.filter((row) => row.exhausted || row.cooling || row.blocked).length;
 
-  const remainingEl = $("#freequota-kpi-remaining");
-  remainingEl.textContent = counted.length
-    ? formatNumber(known)
-    : planned.length
-      ? `≈ ${formatNumber(plannedTotal)}`
-      : t("未知", "common.unknown");
-  remainingEl.title =
-    !counted.length && planned.length
+  const remainingNote = !limited.length
+    ? t("没有配置上限的出口。", "quotas.freeq.kpi.noLimited")
+    : learned && assumed
       ? t(
-          `仅有假定：${planned.length} 个出口的假定上限，非实测。`,
-          "quotas.freeq.kpi.assumedOnlyTitle",
-          planned.length,
+          `基于 ${limited.length} 个出口；${learned} 个已学习、${assumed} 个假定。`,
+          "quotas.freeq.kpi.remainingMixed",
+          limited.length,
+          learned,
+          assumed,
         )
-      : t(
-          `估算：合计 ${learned.length} 个已学习、${assumed.length} 个假定出口的剩余；未知与未观察不计入，也非上游权威。`,
-          "quotas.freeq.kpi.estimateTitle",
-          learned.length,
-          assumed.length,
-        );
-  freeSetText("freequota-kpi-used", formatNumber(value.total_used ?? 0));
+      : assumed
+        ? t(
+            `基于 ${limited.length} 个出口；上限在学习到 429 前为假定。`,
+            "quotas.freeq.kpi.remainingAssumed",
+            limited.length,
+          )
+        : t(
+            `基于 ${limited.length} 个出口，上限均已学习。`,
+            "quotas.freeq.kpi.remainingLearned",
+            limited.length,
+          );
+  const remainingEl = $("#freequota-kpi-remaining");
+  remainingEl.textContent = capacity > 0 ? formatNumber(remaining) : t("未知", "common.unknown");
+  remainingEl.title = remainingNote;
+  freeSetText("freequota-kpi-remaining-note", remainingNote);
+  freeSetText("freequota-kpi-used", formatNumber(used));
   freeSetText("freequota-kpi-reset", countdown);
   freeSetText("freequota-kpi-reset-note", localTime(value.resets_at));
 
+  const assumedLimits = [...new Set(assumedRows.map((row) => freeNum(row.limit)))];
   let verdict = t("尚无可用上限估算", "quotas.freeq.verdict.none");
-  if (learned.length && assumed.length)
+  if (limited.length && !learned)
+    verdict =
+      assumedLimits.length === 1
+        ? t(
+            `尚未学习到上限；全部 ${limited.length} 个出口使用假定上限 ${formatNumber(assumedLimits[0])}。`,
+            "quotas.freeq.verdict.assumedUniform",
+            limited.length,
+            formatNumber(assumedLimits[0]),
+          )
+        : t(
+            `尚未学习到上限；全部 ${limited.length} 个出口使用假定上限。`,
+            "quotas.freeq.verdict.assumedPlural",
+            limited.length,
+          );
+  else if (learned && !assumed)
     verdict = t(
-      `已学习 ${learned.length}/${rows.length} 个出口，另有 ${assumed.length} 个假定`,
-      "quotas.freeq.verdict.mixed",
-      learned.length,
-      rows.length,
-      assumed.length,
-    );
-  else if (learned.length)
-    verdict = t(
-      `已学习 ${learned.length}/${rows.length} 个出口的上限`,
+      `全部 ${limited.length} 个出口均已学习上限。`,
       "quotas.freeq.verdict.learned",
-      learned.length,
-      rows.length,
+      limited.length,
     );
-  else if (assumed.length)
+  else if (learned)
     verdict = t(
-      `基于 ${assumed.length} 个出口的起始假定，尚未学习到真实上限`,
-      "quotas.freeq.verdict.assumed",
-      assumed.length,
-    );
-  else if (planned.length)
-    verdict = t(
-      `基于 ${planned.length} 个出口的起始假定，尚未学习到真实上限`,
-      "quotas.freeq.verdict.assumed",
-      planned.length,
+      `${learned}/${limited.length} 个出口已学习上限；${assumed} 个使用假定上限。`,
+      "quotas.freeq.verdict.mixed",
+      learned,
+      limited.length,
+      assumed,
     );
   const pieces = [verdict];
-  if (unknownish)
+  if (noTraffic)
     pieces.push(
-      t(`${unknownish} 个出口未知或未观察（未计入）`, "quotas.freeq.kpi.unknownish", unknownish),
+      t(`另有 ${noTraffic} 个出口暂无流量。`, "quotas.freeq.verdict.noTraffic", noTraffic),
     );
-  pieces.push(t(`距重置约 ${countdown}`, "quotas.freeq.verdict.reset", countdown));
   if (risk)
     pieces.push(
       t(`风险出口 ${risk} 个（耗尽/冷却/阻断）。`, "quotas.freeq.verdict.risk", risk),
     );
-  $("#freequota-verdict").textContent = pieces.join(" · ");
+  $("#freequota-verdict").textContent = pieces.join(" ");
 
   const usageTrack = $("#freequota-usage-track");
   const usageValue = $("#freequota-usage-value");
   if (capacity > 0) {
-    const group = (state) => counted.filter((row) => freeState(row) === state);
     const sum = (list, key) => list.reduce((total, row) => total + freeNum(row[key]), 0);
-    const lRows = group("learned");
-    const aRows = group("assumed");
-    const lCap = sum(lRows, "limit");
-    const aCap = sum(aRows, "limit");
-    const lLeft = sum(lRows, "remaining");
-    const aLeft = sum(aRows, "remaining");
-    const lUsed = Math.max(0, lCap - lLeft);
-    const aUsed = Math.max(0, aCap - aLeft);
+    const lCap = sum(learnedRows, "limit");
+    const aCap = sum(assumedRows, "limit");
+    const lUsed = Math.min(lCap, sum(learnedRows, "used"));
+    const aUsed = Math.min(aCap, sum(assumedRows, "used"));
+    const lLeft = Math.max(0, lCap - lUsed);
+    const aLeft = Math.max(0, aCap - aUsed);
     const learnedLabel = t("已学习", "quotas.freeq.source.learned");
     const assumedLabel = t("假定", "quotas.freeq.source.assumed");
     freeStack(usageTrack, [
@@ -524,28 +522,48 @@ function freeRenderOverview(value, rows) {
     ]);
     freeSetText(`${id}-value`, formatNumber(count));
   };
-  bucketRow("unknown", unknown.length, "freeq-seg-unknown", t(`${unknown.length} 个出口的上限未知，未计入容量`, "quotas.freeq.capacity.unknownNote", unknown.length));
-  bucketRow("unobserved", unobserved.length, "freeq-seg-unobserved", t(`${unobserved.length} 个出口尚未观察；假定合计 ${formatNumber(plannedTotal)}，未计入容量`, "quotas.freeq.capacity.unobservedNote", unobserved.length, formatNumber(plannedTotal)));
+  bucketRow(
+    "unknown",
+    excluded.length,
+    "freeq-seg-unknown",
+    t(
+      `${excluded.length} 个出口未配置上限，不计入容量`,
+      "quotas.freeq.capacity.unknownNote",
+      excluded.length,
+    ),
+  );
 
   const counts = freeDistribution(rows);
   const items = [
-    ["healthy", t("正常", "quotas.freeq.dist.healthy")],
-    ["cooling", t("冷却", "quotas.freeq.dist.cooling")],
-    ["blocked", t("阻断", "quotas.freeq.dist.blocked")],
-    ["exhausted", t("耗尽", "quotas.freeq.dist.exhausted")],
-    ["unobserved", t("未观察", "quotas.freeq.dist.unobserved")],
-    ["other", t("其他", "quotas.freeq.dist.other")],
+    ["healthy", t("正常", "quotas.freeq.dist.healthy"), "freeq-seg-healthy"],
+    ["cooling", t("冷却", "quotas.freeq.dist.cooling"), "freeq-seg-cooling"],
+    ["blocked", t("阻断", "quotas.freeq.dist.blocked"), "freeq-seg-blocked"],
+    ["exhausted", t("耗尽", "quotas.freeq.dist.exhausted"), "freeq-seg-exhausted"],
+    ["noTraffic", t("无流量", "quotas.freeq.dist.noTraffic"), "freeq-seg-unobserved"],
+    ["other", t("其他", "quotas.freeq.dist.other"), "freeq-seg-other"],
   ];
   const distribution = $("#freequota-distribution-track");
-  freeStack(distribution, items.map(([key, label]) => ({ value: counts[key], className: `freeq-seg-${key}`, title: `${label}: ${formatNumber(counts[key])}` })));
-  distribution.setAttribute("aria-label", `${t("出口状态", "quotas.freeq.dist.title")}: ${items.map(([key, label]) => `${label} ${formatNumber(counts[key])}`).join(" · ")}`);
+  freeStack(
+    distribution,
+    items.map(([key, label, className]) => ({
+      value: counts[key],
+      className,
+      title: `${label}: ${formatNumber(counts[key])}`,
+    })),
+  );
+  distribution.setAttribute(
+    "aria-label",
+    `${t("出口状态", "quotas.freeq.dist.title")}: ${items
+      .map(([key, label]) => `${label} ${formatNumber(counts[key])}`)
+      .join(" · ")}`,
+  );
   const legend = $("#freequota-distribution-legend");
   legend.replaceChildren();
-  for (const [key, label] of items)
+  for (const [key, label, className] of items)
     if (counts[key])
       legend.append(
         el("span", { class: "freeq-legend-item" }, [
-          el("span", { class: `freeq-dot freeq-seg-${key}` }),
+          el("span", { class: `freeq-dot ${className}` }),
           el("span", { text: label }),
           el("span", { text: formatNumber(counts[key]) }),
         ]),
@@ -582,7 +600,6 @@ function freeRow(row, value) {
   const label = freeLabel(row);
   const limit = freeNum(row.limit);
   const used = freeNum(row.used);
-  const remainingKnown = row.seen && state !== "unknown" && row.remaining != null;
   const healthTitle = [health.text, row.pool ? t("池成员", "quotas.freeq.health.pool") : ""].filter(Boolean).join(" · ");
   const egressCell = el("td", { title: healthTitle }, [
     el("div", { class: "freeq-egress" }, [
@@ -591,22 +608,20 @@ function freeRow(row, value) {
     ]),
   ]);
   const stateLabel = state === "learned" ? t("已学习", "quotas.freeq.source.learned") : state === "assumed" ? t("假定", "quotas.freeq.source.assumed") : t("未知", "quotas.freeq.source.unknown");
-  const assumedLeft = !row.seen && state !== "unknown" && limit > 0;
-  const usedText = row.seen ? formatNumber(used) : "—";
-  const numbers = assumedLeft
-    ? `— / ${formatNumber(limit)}`
-    : row.seen && limit > 0
-      ? `${usedText} / ${formatNumber(limit)}`
-      : usedText;
-  const left = remainingKnown
-    ? t(`剩余 ${formatNumber(row.remaining)}`, "quotas.freeq.today.left", formatNumber(row.remaining))
-    : assumedLeft
-      ? t(`≈ ${formatNumber(limit)}（假定，未验证）`, "quotas.freeq.today.assumedLeft", formatNumber(limit))
-      : "—";
+  const limited = limit > 0 && state !== "unknown";
+  const usedText = limited ? formatNumber(used) : row.seen ? formatNumber(used) : "—";
+  const numbers = limited ? `${usedText} / ${formatNumber(limit)}` : usedText;
+  const left = limited
+    ? t(
+        `剩余 ${formatNumber(Math.max(0, limit - used))}`,
+        "quotas.freeq.today.left",
+        formatNumber(Math.max(0, limit - used)),
+      )
+    : "—";
   const line = el("div", { class: "freeq-today-line" }, [
     el("span", { class: `freeq-src freeq-src-${state}`, text: stateLabel }),
     el("span", { class: "freeq-used", text: numbers }),
-    el("span", { class: remainingKnown ? "freeq-left" : "freeq-left freeq-left-none", text: left }),
+    el("span", { class: limited ? "freeq-left" : "freeq-left freeq-left-none", text: left }),
   ]);
   const bars = [];
   if (row.seen && state !== "unknown" && limit > 0)
@@ -622,7 +637,7 @@ function freeRow(row, value) {
     const history = freeHistory(row, value);
     if (history) bars.push(history);
   }
-  const todayCell = el("td", { class: "freeq-today", title: state === "assumed" ? t("先验假定，非已学习", "quotas.freeq.assumedTitle") : null }, [line, ...bars]);
+  const todayCell = el("td", { class: "freeq-today" }, [line, ...bars]);
   const probe = freeQuotaProbeResults.get(freeKey(row));
   const probeInfo = probe ? freeProbeLabel(probe) : null;
   const lastParts = [];
@@ -658,13 +673,13 @@ function freeRender(value, updateStatus = true) {
   const host = $("#freequota-egresses");
   host.replaceChildren();
   if (value.enabled === false) {
-    for (const id of ["freequota-kpi-remaining", "freequota-kpi-used", "freequota-kpi-reset", "freequota-usage-value", "freequota-unknown-value", "freequota-unobserved-value"]) freeSetText(id, "—");
+    for (const id of ["freequota-kpi-remaining", "freequota-kpi-used", "freequota-kpi-reset", "freequota-usage-value", "freequota-unknown-value"]) freeSetText(id, "—");
+    freeSetText("freequota-kpi-remaining-note", "");
     freeSetText("freequota-kpi-reset-note", "");
     freeSetText("freequota-verdict", t("免费额度估算已关闭。", "quotas.freeq.disabled"));
-    for (const id of ["freequota-usage-track", "freequota-unknown-track", "freequota-unobserved-track", "freequota-distribution-track"]) $(`#${id}`)?.replaceChildren();
+    for (const id of ["freequota-usage-track", "freequota-unknown-track", "freequota-distribution-track"]) $(`#${id}`)?.replaceChildren();
     $("#freequota-distribution-legend").replaceChildren();
     $("#freequota-unknown-row").classList.add("hidden");
-    $("#freequota-unobserved-row").classList.add("hidden");
     if (updateStatus) freeSetStatus("免费额度估算已关闭。", "quotas.freeq.disabled");
     emptyRow(host, 4, t("免费额度估算已关闭。", "quotas.freeq.disabled"));
     freeUpdateProbeAll();

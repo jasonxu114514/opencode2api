@@ -760,7 +760,7 @@
                   <div class="metric">
                     <div class="metric-label" data-i18n="quotas.freeq.metric.remaining">剩余估算</div>
                     <div id="freequota-kpi-remaining" class="metric-value">—</div>
-                    <div class="metric-note" data-i18n="quotas.freeq.metric.remainingNote">估算值，非上游权威</div>
+                    <div id="freequota-kpi-remaining-note" class="metric-note" data-i18n="quotas.freeq.metric.remainingNote">按已配置上限统计</div>
                   </div>
                   <div class="metric">
                     <div class="metric-label" data-i18n="quotas.freeq.metric.used">今日已用</div>
@@ -775,9 +775,9 @@
                 </div>
                 <p id="freequota-verdict" class="freeq-verdict"></p>
                 <div class="freeq-capacity">
-                  <p class="section-caption" data-i18n="quotas.freeq.note">仅统计已观察且有剩余值的已学习/假定出口；未知与未观察单列，不计入容量。</p>
+                  <p class="section-caption" data-i18n="quotas.freeq.note">假定上限也计入估算，只有在真实每日额度 429 后才变为已学习。</p>
                   <div class="tier-row freeq-bar-row">
-                    <span data-i18n="quotas.freeq.capacity.observed">容量</span>
+                    <span data-i18n="quotas.freeq.capacity.estimated">估算容量</span>
                     <div id="freequota-usage-track" class="tier-track freeq-stack" role="img"></div>
                     <span id="freequota-usage-value" class="tier-value">—</span>
                   </div>
@@ -785,11 +785,6 @@
                     <span data-i18n="quotas.freeq.capacity.unknown">未知上限</span>
                     <div id="freequota-unknown-track" class="tier-track freeq-stack" aria-hidden="true"></div>
                     <span id="freequota-unknown-value" class="tier-value">—</span>
-                  </div>
-                  <div id="freequota-unobserved-row" class="tier-row freeq-bar-row hidden">
-                    <span data-i18n="quotas.freeq.capacity.unobserved">未观察</span>
-                    <div id="freequota-unobserved-track" class="tier-track freeq-stack" aria-hidden="true"></div>
-                    <span id="freequota-unobserved-value" class="tier-value">—</span>
                   </div>
                   <div class="tier-row freeq-bar-row">
                     <span data-i18n="quotas.freeq.dist.title">出口状态</span>
