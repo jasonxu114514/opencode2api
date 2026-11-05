@@ -442,6 +442,12 @@ func (e *exit) observe(status int, body []byte) (bool, string) {
 	return false, ""
 }
 
+func (e *exit) isPenalized() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.penalized
+}
+
 func (e *exit) markPenalized() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()

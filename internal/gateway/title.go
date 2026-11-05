@@ -5,29 +5,43 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"opencode2api/internal/httpx"
 	"opencode2api/internal/jsonutil"
 )
 
-// Legacy OpenCode v1 title prompt prefix in a user message.
-const titlePromptLegacy = "generate a title for this conversation"
+// titlePromptV1 opens the user message of a 1.x OpenCode title request.
+const titlePromptV1 = "generate a title for this conversation"
 
-// OpenCode v2 title generation signatures in system / developer messages.
+// titlePromptsV2 are the system or developer prompt fragments that mark a 2.x
+// OpenCode title request.
+var titlePromptsV2 = []string{
+	"you name conversations so the user can find them later in a list of past sessions",
+	"you generate a descriptive title for this conversation",
+	"you decide whether the session title still matches the conversation",
+	"reply with a title and nothing else",
+	"reply with a title for it and nothing else",
+}
+
 const (
-	titlePromptV2Name    = "you name conversations so the user can find them later in a list of past sessions"
-	titlePromptV2Desc    = "you generate a descriptive title for this conversation"
-	titlePromptV2Auto    = "you decide whether the session title still matches the conversation"
-	titlePromptV2Rule    = "reply with a title and nothing else"
-	titlePromptV2RuleAlt = "reply with a title for it and nothing else"
+	// defaultTitle is returned when no usable user text is found.
+	defaultTitle = "New Session"
+	// titleMaxWords and titleMaxRunes bound a synthesized title.
+	titleMaxWords = 6
+	titleMaxRunes = 40
+	// titleMaxMessages is the largest message count a title request carries.
+	titleMaxMessages = 3
 )
 
-// isTitleGenerationBody checks if raw JSON body is an OpenCode title-generation request.
+// isTitleGenerationBody reports whether a raw JSON body is an OpenCode
+// title-generation request.
 func isTitleGenerationBody(body []byte) bool {
 	if len(body) == 0 {
 		return false
@@ -40,221 +54,168 @@ func isTitleGenerationBody(body []byte) bool {
 }
 
 // isTitleGenerationRequest reports whether payload is OpenCode's session-title
-// generation call rather than agent traffic (PR #102, Issue #164).
+// call rather than agent traffic.
 //
-// OpenCode issues title calls with an EMPTY tool list. The upstream free-tier gate
-// accepts that tool-free form but rejects the same call with 403 FreeTierError or
-// 429 FreeUsageLimitError once an agent tool list is attached. Therefore, the gateway
-// must not inject tools into title requests.
-//
-// To prevent false positives on user agent requests:
-// 1. Tool lists must be absent or empty.
-// 2. Message count must be at most 3 without assistant or tool turns.
-// 3. Known OpenCode title prompt signatures must match in their expected roles.
+// OpenCode sends title calls with no tools. The free tier accepts that form but
+// answers 403 FreeTierError or 429 FreeUsageLimitError once an agent tool list
+// is attached, so the gateway must not inject tools into it. To keep agent
+// traffic from matching, a title request has no tools, at most
+// titleMaxMessages messages, no assistant or tool turn, and a known title
+// prompt in the role OpenCode uses for it.
 func isTitleGenerationRequest(payload map[string]any) bool {
 	if payload == nil {
 		return false
 	}
-
-	// 1. Tool list must be absent or empty
 	if tools, ok := payload["tools"].([]any); ok && len(tools) > 0 {
 		return false
 	}
 	if functions, ok := payload["functions"].([]any); ok && len(functions) > 0 {
 		return false
 	}
-
-	// 2. Must have 1 to 3 messages
 	messages, ok := payload["messages"].([]any)
-	if !ok || len(messages) == 0 || len(messages) > 3 {
+	if !ok || len(messages) == 0 || len(messages) > titleMaxMessages {
 		return false
 	}
-
-	hasSystemSignature := false
-	hasLegacyUserSignature := false
-
+	matched := false
 	for _, raw := range messages {
-		msg, ok := raw.(map[string]any)
+		message, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		role := strings.ToLower(strings.TrimSpace(jsonutil.StringAt(msg, "role")))
-		// Any in-progress conversation turn means this is NOT a fresh title request
+		role := strings.ToLower(strings.TrimSpace(jsonutil.StringAt(message, "role")))
+		// A conversation turn means this is agent traffic, not a fresh title.
 		if role == "assistant" || role == "tool" || role == "function" {
 			return false
 		}
-
-		text := strings.ToLower(strings.TrimSpace(strings.Join(textFragments(msg["content"]), " ")))
+		text := strings.ToLower(strings.TrimSpace(strings.Join(textFragments(message["content"]), " ")))
 		if text == "" {
 			continue
 		}
-
-		if role == "system" || role == "developer" {
-			if strings.Contains(text, titlePromptV2Name) ||
-				strings.Contains(text, titlePromptV2Desc) ||
-				strings.Contains(text, titlePromptV2Auto) ||
-				(strings.Contains(text, titlePromptV2Rule) || strings.Contains(text, titlePromptV2RuleAlt)) {
-				hasSystemSignature = true
+		switch role {
+		case "system", "developer":
+			for _, prompt := range titlePromptsV2 {
+				if strings.Contains(text, prompt) {
+					matched = true
+					break
+				}
 			}
-		} else if role == "user" {
-			// Legacy v1 title generation: user message starts with the command prompt
-			if strings.HasPrefix(text, titlePromptLegacy) {
-				hasLegacyUserSignature = true
+		case "user":
+			if strings.HasPrefix(text, titlePromptV1) {
+				matched = true
 			}
 		}
 	}
-
-	return hasSystemSignature || hasLegacyUserSignature
+	return matched
 }
 
-// synthesizeTitle extracts the conversation topic from the payload's user message
-// and formats a clean, compact title suitable for OpenCode sessions.
+// synthesizeTitle derives a short title from the first user message: its first
+// line, cut to titleMaxWords words and titleMaxRunes runes.
 func synthesizeTitle(payload map[string]any) string {
-	if payload == nil {
-		return "New Session"
-	}
-	messages, ok := payload["messages"].([]any)
-	if !ok {
-		return "New Session"
-	}
-
 	userText := ""
-	for _, raw := range messages {
-		msg, ok := raw.(map[string]any)
-		if !ok {
+	for _, raw := range jsonutil.SliceAt(payload, "messages") {
+		message, ok := raw.(map[string]any)
+		if !ok || strings.ToLower(strings.TrimSpace(jsonutil.StringAt(message, "role"))) != "user" {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(jsonutil.StringAt(msg, "role"))) == "user" {
-			userText = strings.TrimSpace(strings.Join(textFragments(msg["content"]), " "))
-			if userText != "" {
-				break
-			}
+		if userText = strings.TrimSpace(strings.Join(textFragments(message["content"]), " ")); userText != "" {
+			break
 		}
 	}
-
-	if userText == "" {
-		return "New Session"
-	}
-
-	// Strip legacy prompt wrapper if present
-	lower := strings.ToLower(userText)
-	if strings.HasPrefix(lower, titlePromptLegacy) {
-		idx := strings.Index(userText, "\n")
-		if idx >= 0 && idx < len(userText)-1 {
-			userText = strings.TrimSpace(userText[idx+1:])
+	// A 1.x request carries the conversation after the prompt line.
+	if strings.HasPrefix(strings.ToLower(userText), titlePromptV1) {
+		if index := strings.Index(userText, "\n"); index >= 0 {
+			userText = strings.TrimSpace(userText[index+1:])
 		}
 	}
-
-	// Clean whitespace and linebreaks
-	lines := strings.Split(userText, "\n")
-	firstLine := strings.TrimSpace(lines[0])
+	firstLine, _, _ := strings.Cut(userText, "\n")
 	words := strings.Fields(firstLine)
-	if len(words) == 0 {
-		return "New Session"
-	}
-
-	// Take up to 6 words
-	if len(words) > 6 {
-		words = words[:6]
+	if len(words) > titleMaxWords {
+		words = words[:titleMaxWords]
 	}
 	title := strings.Join(words, " ")
-
-	// Unicode rune-safe truncation up to 40 runes
-	if utf8.RuneCountInString(title) > 40 {
-		runes := []rune(title)
-		title = string(runes[:40])
+	if utf8.RuneCountInString(title) > titleMaxRunes {
+		title = string([]rune(title)[:titleMaxRunes])
 	}
-
-	// Strip surrounding quotes or trailing periods
-	title = strings.Trim(title, `"'`+" \t\r\n.")
+	title = strings.Trim(title, "\"' \t\r\n.")
 	if title == "" {
-		return "New Session"
+		return defaultTitle
 	}
 	return title
 }
 
-// synthesizeTitleResponse builds an OpenAI-compliant 200 OK HTTP response
-// carrying the synthesized title, supporting both non-streaming and SSE streaming.
+// titleFallback answers a title request the upstream refused (429) or never
+// reached with a locally synthesized title, so the client does not surface an
+// error for a cosmetic call. It returns nil when the outcome needs no fallback;
+// otherwise it closes lastResponse.
+func titleFallback(logger *slog.Logger, model string, rawBody []byte, lastResponse *http.Response, lastErr error) *http.Response {
+	if upstreamStatus(lastResponse) != http.StatusTooManyRequests && (lastResponse != nil || lastErr == nil) {
+		return nil
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(rawBody, &payload)
+	title := synthesizeTitle(payload)
+	stream, _ := payload["stream"].(bool)
+	if lastResponse != nil {
+		httpx.DrainAndClose(lastResponse.Body)
+	}
+	logger.Info("title generation request rejected by upstream; returning a synthesized title", "component", "upstream", "event", "title_fallback_synthesized", "model", model, "title", title)
+	return synthesizeTitleResponse(model, title, stream)
+}
+
+// synthesizeTitleResponse builds a 200 OpenAI Chat response carrying title,
+// as one JSON completion or as an SSE stream ending in [DONE].
 func synthesizeTitleResponse(model, title string, stream bool) *http.Response {
 	var idBytes [8]byte
 	_, _ = rand.Read(idBytes[:])
-	reqID := "chatcmpl-title-" + hex.EncodeToString(idBytes[:])
-	now := time.Now().Unix()
-
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     make(http.Header),
-	}
+	id := "chatcmpl-title-" + hex.EncodeToString(idBytes[:])
+	created := time.Now().Unix()
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
 
 	if !stream {
-		respBody := map[string]any{
-			"id":      reqID,
+		completionTokens := utf8.RuneCountInString(title)
+		data, _ := json.Marshal(map[string]any{
+			"id":      id,
 			"object":  "chat.completion",
-			"created": now,
+			"created": created,
 			"model":   model,
-			"choices": []any{
-				map[string]any{
-					"index": 0,
-					"message": map[string]any{
-						"role":    "assistant",
-						"content": title,
-					},
-					"finish_reason": "stop",
-				},
-			},
+			"choices": []any{map[string]any{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": title},
+				"finish_reason": "stop",
+			}},
 			"usage": map[string]any{
-				"prompt_tokens":     10,
-				"completion_tokens": utf8.RuneCountInString(title),
-				"total_tokens":      10 + utf8.RuneCountInString(title),
+				"prompt_tokens":     0,
+				"completion_tokens": completionTokens,
+				"total_tokens":      completionTokens,
 			},
-		}
-		data, _ := json.Marshal(respBody)
+		})
 		resp.Header.Set("Content-Type", "application/json")
-		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(data)))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(data)))
 		resp.Body = io.NopCloser(bytes.NewReader(data))
 		return resp
 	}
 
-	// SSE streaming format
-	var buf bytes.Buffer
-	chunk1 := map[string]any{
-		"id":      reqID,
-		"object":  "chat.completion.chunk",
-		"created": now,
-		"model":   model,
-		"choices": []any{
-			map[string]any{
-				"index": 0,
-				"delta": map[string]any{
-					"role":    "assistant",
-					"content": title,
-				},
-				"finish_reason": nil,
-			},
-		},
+	chunk := func(delta map[string]any, finishReason any) []byte {
+		data, _ := json.Marshal(map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finishReason}},
+		})
+		return data
 	}
-	chunk2 := map[string]any{
-		"id":      reqID,
-		"object":  "chat.completion.chunk",
-		"created": now,
-		"model":   model,
-		"choices": []any{
-			map[string]any{
-				"index":         0,
-				"delta":         map[string]any{},
-				"finish_reason": "stop",
-			},
-		},
+	var body bytes.Buffer
+	for _, data := range [][]byte{
+		chunk(map[string]any{"role": "assistant", "content": title}, nil),
+		chunk(map[string]any{}, "stop"),
+	} {
+		body.WriteString("data: ")
+		body.Write(data)
+		body.WriteString("\n\n")
 	}
-	d1, _ := json.Marshal(chunk1)
-	d2, _ := json.Marshal(chunk2)
-	buf.WriteString("data: ")
-	buf.Write(d1)
-	buf.WriteString("\n\ndata: ")
-	buf.Write(d2)
-	buf.WriteString("\n\ndata: [DONE]\n\n")
-
+	body.WriteString("data: [DONE]\n\n")
 	resp.Header.Set("Content-Type", "text/event-stream")
-	resp.Body = io.NopCloser(&buf)
+	resp.Body = io.NopCloser(&body)
 	return resp
 }

@@ -530,16 +530,8 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		}
 	}
 	if isTitle {
-		if upstreamStatus(lastResponse) == http.StatusTooManyRequests || (lastResponse == nil && lastErr != nil) {
-			var payload map[string]any
-			_ = json.Unmarshal(rawBody, &payload)
-			title := synthesizeTitle(payload)
-			stream, _ := payload["stream"].(bool)
-			if lastResponse != nil {
-				httpx.DrainAndClose(lastResponse.Body)
-			}
-			g.logger.Info("title generation request rejected by upstream; returning synthesized title fallback", "component", "upstream", "event", "title_fallback_synthesized", "model", route.ID, "title", title)
-			return synthesizeTitleResponse(route.ID, title, stream), nil, attempts
+		if fallback := titleFallback(g.logger, route.ID, rawBody, lastResponse, lastErr); fallback != nil {
+			return fallback, nil, attempts
 		}
 	}
 	if lastResponse != nil {

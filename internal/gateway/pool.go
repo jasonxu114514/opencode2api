@@ -168,6 +168,18 @@ func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 	return anonymousCursor{pool: p, start: start}
 }
 
+// CursorForOffset is CursorFor shifted by offset nodes. A request that has
+// already spent offset attempts starts on the next node instead of repeating
+// the exit that just failed it.
+func (p *anonymousNodes) CursorForOffset(affinity string, offset int) anonymousCursor {
+	cursor := p.CursorFor(affinity)
+	if p == nil || len(p.nodes) == 0 || offset <= 0 {
+		return cursor
+	}
+	cursor.start = (cursor.start + offset) % len(p.nodes)
+	return cursor
+}
+
 // AllowAttempt reports whether an anonymous attempt may run. An open breaker
 // refuses every attempt. Once its window expires, exactly one caller wins the
 // half-open probe, so the lane is not flooded before it is known to work

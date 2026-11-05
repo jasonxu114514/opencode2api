@@ -456,6 +456,8 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 	return encoded
 }
 
+// releasePendingArguments prepends the argument fragments held back while the
+// tool name was still ambiguous to the current frame's arguments.
 func (renamer *streamToolRenamer) releasePendingArguments(state *streamToolRenameState, function map[string]any) bool {
 	if state.pendingArguments.Len() == 0 {
 		return false
@@ -473,6 +475,8 @@ func (renamer *streamToolRenamer) releasePendingArguments(state *streamToolRenam
 	return true
 }
 
+// finishState settles a call the choice finished while its name was still
+// ambiguous: the held-back name and arguments are emitted verbatim.
 func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, function map[string]any) bool {
 	changed := false
 	if state.pending != "" {
@@ -486,6 +490,8 @@ func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, func
 	return changed
 }
 
+// pendingCalls collects the undecided calls of one choice that the finishing
+// frame did not carry, so they are flushed before the choice ends.
 func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]bool) []any {
 	var calls []any
 	for _, key := range renamer.order {
@@ -504,6 +510,8 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 	return calls
 }
 
+// pendingCall renders one held-back call as a tool_calls delta and marks it
+// decided.
 func (renamer *streamToolRenamer) pendingCall(state *streamToolRenameState) any {
 	function := map[string]any{}
 	if state.pending != "" {
@@ -518,6 +526,8 @@ func (renamer *streamToolRenamer) pendingCall(state *streamToolRenameState) any 
 	return call
 }
 
+// finish flushes every call still held back when the stream ends without a
+// finish_reason, as one extra Chat frame. It returns nil when nothing is held.
 func (renamer *streamToolRenamer) finish() []byte {
 	if renamer.protocol != Chat {
 		return nil

@@ -334,6 +334,12 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 }
 
 func (p *Pool) Report(lease *Lease, status int, body []byte) {
+	p.ReportWithRetryAfter(lease, status, body, 0)
+}
+
+// ReportWithRetryAfter is Report with the upstream's Retry-After hint. A hint
+// longer than egressCooldown keeps the rejected egress cooling for that long.
+func (p *Pool) ReportWithRetryAfter(lease *Lease, status int, body []byte, retryAfter time.Duration) {
 	if lease == nil || lease.exit == nil {
 		return
 	}
@@ -341,7 +347,24 @@ func (p *Pool) Report(lease *Lease, status int, body []byte) {
 	if !rotate {
 		return
 	}
-	p.penalize(lease.exit, reason)
+	p.penalizeFor(lease.exit, reason, max(retryAfter, egressCooldown))
+}
+
+// HasUntriedActive reports whether an active, unpenalized exit sits on an
+// egress key that is not in tried, so another attempt would leave from a
+// different quota scope.
+func (p *Pool) HasUntriedActive(tried map[string]bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, active := range p.active {
+		if active.isPenalized() {
+			continue
+		}
+		if key := active.egressKey(); key == "" || !tried[key] {
+			return true
+		}
+	}
+	return false
 }
 
 // Fail drops an exit that cannot carry traffic even though the upstream never
@@ -374,6 +397,10 @@ func (p *Pool) Snapshot() Snapshot {
 }
 
 func (p *Pool) penalize(bad *exit, reason string) {
+	p.penalizeFor(bad, reason, egressCooldown)
+}
+
+func (p *Pool) penalizeFor(bad *exit, reason string, cooldown time.Duration) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -389,7 +416,7 @@ func (p *Pool) penalize(bad *exit, reason string) {
 		return
 	}
 	if key := bad.egressKey(); key != "" {
-		p.cooling[key] = time.Now().Add(egressCooldown)
+		p.cooling[key] = time.Now().Add(cooldown)
 		delete(p.reserved, key)
 	}
 	p.active = append(p.active[:index], p.active[index+1:]...)

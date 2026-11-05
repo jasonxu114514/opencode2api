@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -248,9 +247,8 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	// does the last 429 reach the client.
 	isTitle := isTitleGenerationBody(rawBody)
 	limit := g.cfg.Retry.MaxAttempts
-	if isTitle {
-		limit = 1
-	} else if limit < 1 {
+	if limit < 1 || isTitle {
+		// A title request gets one attempt: on failure it is answered locally.
 		limit = 1
 	}
 	firstEventTimeout := time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds) * time.Second
@@ -323,10 +321,9 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				break
 			}
 			if status == http.StatusTooManyRequests {
-				triedEgresses[egress] = true
+				triedEgresses[strings.TrimPrefix(egress, "warp:")] = true
 				if !g.warp.HasUntriedActive(triedEgresses) {
 					g.logger.Warn("all active WARP exits exhausted or cooling down; stopping retries", "component", "upstream", "event", "warp_429_exhausted", "request_id", ids.Request, "attempt", attempts)
-					halted = false
 					break
 				}
 			}
@@ -354,16 +351,8 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 		return lastResponse, errDeterministicClientRejection, attempts
 	}
 	if isTitle {
-		if upstreamStatus(lastResponse) == http.StatusTooManyRequests || (lastResponse == nil && lastErr != nil) {
-			var payload map[string]any
-			_ = json.Unmarshal(rawBody, &payload)
-			title := synthesizeTitle(payload)
-			stream, _ := payload["stream"].(bool)
-			if lastResponse != nil {
-				httpx.DrainAndClose(lastResponse.Body)
-			}
-			g.logger.Info("title generation request rejected by upstream; returning synthesized title fallback", "component", "upstream", "event", "title_fallback_synthesized", "model", route.ID, "title", title)
-			return synthesizeTitleResponse(route.ID, title, stream), nil, attempts
+		if fallback := titleFallback(g.logger, route.ID, rawBody, lastResponse, lastErr); fallback != nil {
+			return fallback, nil, attempts
 		}
 	}
 	if lastResponse != nil {
