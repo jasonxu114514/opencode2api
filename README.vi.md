@@ -475,7 +475,8 @@ Thống kê token chỉ dùng usage được báo. Token input bao gồm đọc 
 
 | Dữ liệu                                                  | Lưu trữ / thời gian giữ                                        |
 | -------------------------------------------------------- | -------------------------------------------------------------- |
-| Session, số đo, tổng token, kết quả Playground gần nhất   | Bộ nhớ tiến trình; bị xoá khi khởi động lại.                   |
+| Session, số đo, kết quả Playground gần nhất               | Bộ nhớ tiến trình; bị xoá khi khởi động lại.                   |
+| Mức dùng lifetime của từng server key                     | `usage.json` cạnh file cấu hình: nạp khi khởi động, ghi lại mỗi 5 phút và khi thoát. Cửa sổ một giờ không được lưu. |
 | Chi tiết request và lần thử                                | Một giờ gần nhất, tối đa 10.000 request và 20.000 lần thử; API trả tối đa 500 mục mỗi loại. |
 | Ring log trực tiếp                                         | Bộ nhớ tiến trình; kích thước do `logging.ring_size` quy định. |
 | Log có cấu trúc                                            | JSON trên stdout; thu thập bên ngoài để lưu lâu dài.          |

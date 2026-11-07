@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,6 +17,15 @@ import (
 	"opencode2api/internal/config"
 	"opencode2api/internal/gateway"
 	"opencode2api/internal/telemetry"
+)
+
+// usageSnapshotFile is the per-key usage snapshot kept next to the
+// configuration, and usageSnapshotInterval is how often it is rewritten. The
+// interval is coarse on purpose: the counters are a billing aid, and a frequent
+// write would add disk traffic to a request path that never touches the file.
+const (
+	usageSnapshotFile     = "usage.json"
+	usageSnapshotInterval = 5 * time.Minute
 )
 
 // version remains the linker injection point used by release builds.
@@ -51,6 +61,14 @@ func main() {
 	redactor.Replace(cfg)
 	logger := telemetry.StructuredLogger(level, hub, redactor)
 	monitor := telemetry.Monitor()
+	// Per-key usage is otherwise in-memory only, so every restart reset the
+	// metering an operator bills against. The snapshot lives next to the
+	// configuration it belongs to.
+	usagePath := filepath.Join(filepath.Dir(*configPath), usageSnapshotFile)
+	usages := telemetry.StartUsagePersistence(monitor, usagePath, usageSnapshotInterval, func(err error) {
+		logger.Warn("usage snapshot failed", "component", "telemetry", "event", "usage_snapshot_failed", "path", usagePath, "error", err)
+	})
+	defer usages.Close()
 	manager, err := gateway.RuntimeManager(ctx, *configPath, cfg, logger, monitor, hub, redactor, level)
 	if err != nil {
 		logger.Error("failed to initialize runtime", "component", "runtime", "event", "runtime_initialization_failed", "error", err)
