@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -33,6 +34,30 @@ func ParseProxyEntry(raw string) (clean string, pool bool) {
 		trimmed = strings.TrimSpace(trimmed[:idx])
 	}
 	return trimmed, pool
+}
+
+// ProxyFileOf reads only the proxyfile field of the configuration at path,
+// accepting the same comments Load accepts. It exists so that tooling which
+// works on the proxy file alone (see cmd/poolclean) can find that file without
+// having to satisfy the rest of the configuration: a proxy list can be pruned
+// before the gateway has keys or a listen address, and pruning must not fail on
+// an unrelated field.
+func ProxyFileOf(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	stripped, err := stripJSONComments(data)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	var partial struct {
+		ProxyFile string `json:"proxyfile"`
+	}
+	if err := json.Unmarshal(stripped, &partial); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	return partial.ProxyFile, nil
 }
 
 // resolveProxyFiles trims cfg.Proxies in place and stores the runtime proxy
