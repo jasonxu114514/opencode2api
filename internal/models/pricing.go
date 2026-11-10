@@ -92,6 +92,7 @@ type PricingRegistry struct {
 	endpoint       string
 	client         *http.Client
 	clientProvider func() []*http.Client
+	onRefresh      func()
 	logger         *slog.Logger
 }
 
@@ -123,6 +124,15 @@ func (store *PricingRegistry) SetClientProvider(provider func() []*http.Client) 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.clientProvider = provider
+}
+
+// SetOnRefresh registers a callback invoked after every successful refresh so
+// dynamic rotation groups can re-evaluate cost- or deprecation-based queries
+// without waiting for the OpenCode capability catalog to change.
+func (store *PricingRegistry) SetOnRefresh(callback func()) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.onRefresh = callback
 }
 
 // refreshClients returns the provider's clients, or the registry's own direct
@@ -213,7 +223,11 @@ func (store *PricingRegistry) Refresh(ctx context.Context) error {
 		}
 		store.mu.Lock()
 		store.models, store.updatedAt, store.lastError = models, now, ""
+		callback := store.onRefresh
 		store.mu.Unlock()
+		if callback != nil {
+			callback()
+		}
 		return nil
 	}
 	if lastErr == nil {
