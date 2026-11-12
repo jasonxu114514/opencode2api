@@ -38,6 +38,12 @@ type RequestIDs struct {
 	Message       string
 	Project       string
 	ParentSession string
+	// SessionDerived reports that the gateway minted Session itself, from a
+	// conversation seed or a re-encoded client id, rather than preserving an
+	// official OpenCode session verbatim. Only a derived session may be
+	// re-minted to escape an upstream quota bucket: no client state depends on
+	// its value.
+	SessionDerived bool
 }
 
 // DeriveRequestIDs derives the upstream identity of one request. scope names
@@ -72,6 +78,7 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 	if signal == "" || signal == `{}` {
 		signal = RandomID("fallback", 16)
 	}
+	sessionDerived := !isOfficialSessionID(signal)
 	session := scopedSessionID(scope, signal)
 	childSession := r.Header.Get("x-opencode-session-id")
 	if childSession != "" {
@@ -93,12 +100,13 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 		parentSession = scopedSessionID(scope, parentSession)
 	}
 	return RequestIDs{
-		Session:       session,
-		ChildSession:  childSession,
-		Request:       RandomID("req", 16),
-		Message:       UserMessageID(r, body, session),
-		Project:       projectSignal,
-		ParentSession: parentSession,
+		Session:        session,
+		ChildSession:   childSession,
+		Request:        RandomID("req", 16),
+		Message:        UserMessageID(r, body, session),
+		Project:        projectSignal,
+		ParentSession:  parentSession,
+		SessionDerived: sessionDerived,
 	}
 }
 
@@ -112,6 +120,25 @@ func scopedSessionID(scope, signal string) string {
 		signal = scope + "\x00" + signal
 	}
 	return CanonicalSessionID(signal)
+}
+
+// WithFreshSession returns ids whose upstream sessions are re-minted from the
+// current ones. The free tier ledges free-model usage per session id, so a
+// session that exhausted its bucket is answered with 429 "Free usage limit
+// reached" on every egress, however often the exit rotates; a re-minted session
+// is a fresh bucket. The derivation is deterministic and salted with bootNonce,
+// so one conversation keeps one replacement identity for the life of the
+// process instead of losing its prompt cache on every request. Request and
+// Message are preserved: they identify the request, not the conversation.
+func (ids RequestIDs) WithFreshSession() RequestIDs {
+	ids.Session = CanonicalSessionID("remint\x00" + ids.Session)
+	if ids.ChildSession != "" {
+		ids.ChildSession = CanonicalSessionID("remint\x00" + ids.ChildSession)
+	}
+	if ids.ParentSession != "" {
+		ids.ParentSession = CanonicalSessionID("remint\x00" + ids.ParentSession)
+	}
+	return ids
 }
 
 // claudeCodeSessionPattern extracts the per-session UUID Claude Code embeds in
@@ -224,7 +251,7 @@ func mintBootNonce() []byte {
 // (UUIDs, foreign client sessions, legacy gateway sessions, conversation
 // seeds) is re-encoded into that exact layout — inverted 48-bit millisecond
 // timestamp with counter 1, so the low 12 hex digits are ffe — keeping one
-// stable session per conversation for the life of the process. The upstream
+// stable session per conversation within a UTC day. The upstream
 // free tier also ties a session id to its risk/quota bookkeeping, so the
 // re-encoding is salted with bootNonce: a restart yields fresh ids instead of
 // resuming whatever the previous run's exits were charged for. A re-encoded

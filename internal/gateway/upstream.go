@@ -154,11 +154,32 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 // buffered (up to 1 MiB) so it can be read again. Debug key overrides skip the
 // replay so the Playground sees the selected key's own answer.
 func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
+	if !isDiagnosticRequest(ctx) {
+		// A conversation whose session the free tier already burned is sent with
+		// its remembered replacement, so the request starts on the fresh bucket
+		// instead of spending a full exit walk rediscovering the 429.
+		if escaped, ok := escapedSession(ids); ok {
+			ids = escaped
+			if meta := telemetry.MetaFromContext(ctx); meta != nil {
+				meta.Session = ids.Session
+			}
+			g.logger.Debug("using a remembered replacement session", "component", "upstream", "event", "free_limit_session_memo", "request_id", ids.Request, "session", ids.Session)
+		}
+	}
 	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
 		return resp, effectiveRoute, err
 	}
-	if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
+	if err != nil || resp == nil {
+		return resp, effectiveRoute, err
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		resp, effectiveRoute, attempts, err = g.escapeBurnedSession(ctx, route, bodies, ids, resp, effectiveRoute, attempts)
+		if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
+			return resp, effectiveRoute, err
+		}
+	}
+	if resp.StatusCode != http.StatusBadRequest {
 		return resp, effectiveRoute, err
 	}
 	origBody := resp.Body
@@ -456,6 +477,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	// then reports errDeterministicClientRejection so the caller keeps this
 	// 4xx instead of replacing it with a later tier's answer.
 	halted := false
+	// burned records that the free tier rejected this session's allowance.
+	// The burn follows the session id, not the exit, so the walk stops after
+	// the first such 429 and doUpstream re-mints the session and retries once.
+	burned := false
 	cursor := g.anonymous.CursorForOffset(ids.Session, attemptOffset)
 	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
@@ -560,10 +585,20 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
+				// The free tier meters its bucket per session and this request
+				// consumed it. Record the successor now so the next turn in the
+				// conversation starts on a fresh bucket instead of spending an
+				// attempt on a guaranteed 429.
+				advanceSessionAfterSuccess(ids)
 				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
-			lastResponse = resp
+			if resp != nil {
+				// Keep an earlier 429 when this attempt only timed out: the
+				// client can act on the quota answer, while a transport error
+				// would surface as a gateway failure.
+				lastResponse = resp
+			}
 			lastErr = asProxyUnavailable(node.proxy, err)
 			if err != nil {
 				g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
@@ -588,12 +623,31 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				halted = true
 				g.logger.Warn("upstream rejected the request; not trying other upstreams", "component", "upstream", "event", "deterministic_rejection", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				break
+			} else if stopBurnedWalk(ctx, ids, resp, err, time.Now()) {
+				// The burn follows the session and every exit leaves from the
+				// same egress, so walking cannot help: stop here and let
+				// doUpstream re-mint the session and retry once.
+				burned = true
+				break
+			} else if reset, exitScoped := exitFreeLimitReset(node, resp, ids, time.Now()); exitScoped {
+				// The free tier's free-model allowance is per egress IP, and
+				// this exit has spent it: the Retry-After lands on the daily
+				// reset, or a second session was rejected here. Park the exit
+				// until then and keep walking. A new session cannot restore an
+				// egress's allowance, so the escape must not fire for this shape.
+				if !isDiagnosticRequest(ctx) {
+					node.proxy.markDrained(reset)
+				}
+				g.logger.Info("free tier exhausted this exit's daily quota; parking it until reset", "component", "upstream", "event", "free_tier_daily_quota_exhausted", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "reset_at", reset.Format(time.RFC3339))
 			} else {
 				g.logger.Debug("anonymous upstream returned an error response; trying the next upstream or proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			}
 			if index+1 < len(upstreams) && !node.proxy.healthy.Load() {
 				break
 			}
+		}
+		if burned {
+			break
 		}
 		if halted {
 			// A request-level rejection is identical on every exit: another
@@ -606,7 +660,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if ctx.Err() != nil {
 			break
 		}
-		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
+		if isFreeUsageLimitResponse(nodeResp) {
+			// A free-limit 429 is the session bucket, not a lane outage: the
+			// escape below re-mints the session, so cooling the exit would park
+			// a healthy relay and could leave that retry with nothing to use.
+			if !isDiagnosticRequest(ctx) {
+				g.anonymous.NoteNeutral()
+			}
+		} else {
+			g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
+		}
 		if g.anonymous.Open() {
 			// This attempt tripped the breaker (or another request did):
 			// continuing the walk would keep probing a lane that is now
