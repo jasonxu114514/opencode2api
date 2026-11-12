@@ -477,6 +477,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	// then reports errDeterministicClientRejection so the caller keeps this
 	// 4xx instead of replacing it with a later tier's answer.
 	halted := false
+	// burned records that the free tier rejected this session's allowance.
+	// The burn follows the session id, not the exit, so the walk stops after
+	// the first such 429 and doUpstream re-mints the session and retries once.
+	burned := false
 	cursor := g.anonymous.CursorForOffset(ids.Session, attemptOffset)
 	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
@@ -609,12 +613,23 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				halted = true
 				g.logger.Warn("upstream rejected the request; not trying other upstreams", "component", "upstream", "event", "deterministic_rejection", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				break
+			} else if sessionScopedFreeLimit(ids, resp, err) {
+				// The burn follows the session, not the exit: every relay and
+				// base URL answers this session with the same free-limit 429.
+				// Stop the walk now so doUpstream re-mints the session and
+				// retries once instead of spending every exit on a guaranteed
+				// 429.
+				burned = true
+				break
 			} else {
 				g.logger.Debug("anonymous upstream returned an error response; trying the next upstream or proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			}
 			if index+1 < len(upstreams) && !node.proxy.healthy.Load() {
 				break
 			}
+		}
+		if burned {
+			break
 		}
 		if halted {
 			// A request-level rejection is identical on every exit: another
