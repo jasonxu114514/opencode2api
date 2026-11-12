@@ -251,7 +251,7 @@ func mintBootNonce() []byte {
 // (UUIDs, foreign client sessions, legacy gateway sessions, conversation
 // seeds) is re-encoded into that exact layout — inverted 48-bit millisecond
 // timestamp with counter 1, so the low 12 hex digits are ffe — keeping one
-// stable session per conversation for the life of the process. The upstream
+// stable session per conversation within a UTC day. The upstream
 // free tier also ties a session id to its risk/quota bookkeeping, so the
 // re-encoding is salted with bootNonce: a restart yields fresh ids instead of
 // resuming whatever the previous run's exits were charged for. A re-encoded
