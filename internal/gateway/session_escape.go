@@ -159,7 +159,12 @@ type sessionEscapeKey struct{ session, child, parent string }
 var sessionEscapes = struct {
 	sync.Mutex
 	entries map[sessionEscapeKey]sessionEscapeKey
-}{entries: map[sessionEscapeKey]sessionEscapeKey{}}
+	// spent marks a replacement that has already served a request. The free
+	// tier meters its free-model bucket per session, and one request at the
+	// observed sizes consumes it: replaying a spent session only earns a
+	// guaranteed 429, so the chain advances before the request is sent.
+	spent map[sessionEscapeKey]bool
+}{entries: map[sessionEscapeKey]sessionEscapeKey{}, spent: map[sessionEscapeKey]bool{}}
 
 func sessionEscapeKeyOf(ids identity.RequestIDs) sessionEscapeKey {
 	return sessionEscapeKey{ids.Session, ids.ChildSession, ids.ParentSession}
@@ -168,19 +173,38 @@ func sessionEscapeKeyOf(ids identity.RequestIDs) sessionEscapeKey {
 // escapedSession returns ids with every remembered replacement applied. One
 // conversation can burn more than one session over its life, so the chain is
 // followed until it ends. The second result reports whether anything changed.
+//
+// If the chain ends on a replacement that has already served a request, the
+// next link is minted here and recorded, so the request is sent on a fresh
+// bucket instead of replaying a 429 the upstream is certain to answer.
 func escapedSession(ids identity.RequestIDs) (identity.RequestIDs, bool) {
 	changed := false
 	// Follow the whole chain: a long conversation burns one bucket per link,
 	// so stopping early would hand back a session that is already spent.
 	for range sessionEscapeLimit {
+		key := sessionEscapeKeyOf(ids)
 		sessionEscapes.Lock()
-		value, ok := sessionEscapes.entries[sessionEscapeKeyOf(ids)]
+		value, ok := sessionEscapes.entries[key]
+		spent := ok && sessionEscapes.spent[value]
 		sessionEscapes.Unlock()
 		if !ok {
 			break
 		}
 		ids.Session, ids.ChildSession, ids.ParentSession = value.session, value.child, value.parent
 		changed = true
+		if !spent {
+			continue
+		}
+		// The replacement answered one request already; a second request on
+		// it is a guaranteed 429. Advance the chain now and reuse the new
+		// link for the rest of the conversation.
+		next := ids.WithFreshSession()
+		ids = next
+		sessionEscapes.Lock()
+		sessionEscapes.entries[key] = sessionEscapeKeyOf(next)
+		delete(sessionEscapes.spent, value)
+		sessionEscapes.Unlock()
+		break
 	}
 	return ids, changed
 }
@@ -190,12 +214,23 @@ func escapedSession(ids identity.RequestIDs) (identity.RequestIDs, bool) {
 // costs the oldest conversations one fresh escape.
 func rememberSessionEscape(original, escaped identity.RequestIDs) {
 	key := sessionEscapeKeyOf(original)
+	target := sessionEscapeKeyOf(escaped)
 	sessionEscapes.Lock()
 	defer sessionEscapes.Unlock()
 	if _, exists := sessionEscapes.entries[key]; !exists && len(sessionEscapes.entries) >= sessionEscapeLimit {
 		sessionEscapes.entries = map[sessionEscapeKey]sessionEscapeKey{}
+		sessionEscapes.spent = map[sessionEscapeKey]bool{}
 	}
-	sessionEscapes.entries[key] = sessionEscapeKeyOf(escaped)
+	sessionEscapes.entries[key] = target
+	delete(sessionEscapes.spent, target)
+}
+
+// markSessionEscapeSpent records that a replacement already served a request,
+// so escapedSession rotates it instead of replaying the burn.
+func markSessionEscapeSpent(escaped identity.RequestIDs) {
+	sessionEscapes.Lock()
+	defer sessionEscapes.Unlock()
+	sessionEscapes.spent[sessionEscapeKeyOf(escaped)] = true
 }
 
 // escapeBurnedSession retries one routing pass with a re-minted session when
@@ -231,6 +266,10 @@ func (g *Gateway) escapeBurnedSession(ctx context.Context, route models.Route, b
 	attempts += used
 	if retryErr == nil && retryResp != nil && retryResp.StatusCode/100 == 2 {
 		rememberSessionEscape(ids, escaped)
+		// The free tier gave this bucket one request. Marking it spent makes
+		// the next request in the conversation rotate before sending instead
+		// of spending an attempt on a guaranteed 429.
+		markSessionEscapeSpent(escaped)
 		return retryResp, retryRoute, attempts, nil
 	}
 	if retryErr != nil && ctx.Err() != nil {

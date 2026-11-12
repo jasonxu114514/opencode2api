@@ -16,6 +16,7 @@ func resetSessionEscapes() {
 	sessionEscapes.Lock()
 	defer sessionEscapes.Unlock()
 	sessionEscapes.entries = map[sessionEscapeKey]sessionEscapeKey{}
+	sessionEscapes.spent = map[sessionEscapeKey]bool{}
 }
 
 func TestIsFreeUsageLimitResponse(t *testing.T) {
@@ -75,6 +76,40 @@ func TestSessionEscapeMemoChains(t *testing.T) {
 	unknown := identity.RequestIDs{Session: "ses_unknown"}
 	if _, ok := escapedSession(unknown); ok {
 		t.Fatal("an unknown session must not report a replacement")
+	}
+}
+
+func TestSessionEscapeRotatesSpentReplacement(t *testing.T) {
+	resetSessionEscapes()
+	first := identity.RequestIDs{Session: "ses_first"}
+	second := first.WithFreshSession()
+	rememberSessionEscape(first, second)
+	markSessionEscapeSpent(second)
+
+	// The replacement already served a request, so the chain must advance
+	// instead of handing back a bucket that is certain to 429.
+	got, ok := escapedSession(first)
+	if !ok {
+		t.Fatal("expected a remembered replacement")
+	}
+	third := second.WithFreshSession()
+	if got.Session != third.Session {
+		t.Fatalf("spent replacement was not rotated: got %q want %q", got.Session, third.Session)
+	}
+
+	// The rotation is recorded, so the next request reuses the same link
+	// rather than minting another one.
+	again, _ := escapedSession(first)
+	if again.Session != third.Session {
+		t.Fatalf("rotation was not memoized: got %q want %q", again.Session, third.Session)
+	}
+
+	// Once that link has served a request, the next call rotates again.
+	markSessionEscapeSpent(third)
+	fourth := third.WithFreshSession()
+	next, _ := escapedSession(first)
+	if next.Session != fourth.Session {
+		t.Fatalf("second rotation failed: got %q want %q", next.Session, fourth.Session)
 	}
 }
 
