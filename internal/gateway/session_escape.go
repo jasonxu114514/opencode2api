@@ -170,13 +170,32 @@ func sessionEscapeKeyOf(ids identity.RequestIDs) sessionEscapeKey {
 	return sessionEscapeKey{ids.Session, ids.ChildSession, ids.ParentSession}
 }
 
+// nextUnspentSession returns the next deterministic link after ids that has
+// not already served a request. WithFreshSession is deterministic, so minting
+// from the same link twice returns the same id; a chain that has advanced
+// before must skip the links it already used or it would cycle between two
+// spent ids and replay the 429 forever.
+func nextUnspentSession(ids identity.RequestIDs) identity.RequestIDs {
+	next := ids.WithFreshSession()
+	for range sessionEscapeLimit {
+		sessionEscapes.Lock()
+		spent := sessionEscapes.spent[sessionEscapeKeyOf(next)]
+		sessionEscapes.Unlock()
+		if !spent {
+			break
+		}
+		next = next.WithFreshSession()
+	}
+	return next
+}
+
 // escapedSession returns ids with every remembered replacement applied. One
 // conversation can burn more than one session over its life, so the chain is
 // followed until it ends. The second result reports whether anything changed.
 //
 // If the chain ends on a replacement that has already served a request, the
-// next link is minted here and recorded, so the request is sent on a fresh
-// bucket instead of replaying a 429 the upstream is certain to answer.
+// next unused link is minted here and recorded, so the request is sent on a
+// fresh bucket instead of replaying a 429 the upstream is certain to answer.
 func escapedSession(ids identity.RequestIDs) (identity.RequestIDs, bool) {
 	changed := false
 	// Follow the whole chain: a long conversation burns one bucket per link,
@@ -198,7 +217,7 @@ func escapedSession(ids identity.RequestIDs) (identity.RequestIDs, bool) {
 		// The replacement answered one request already; a second request on
 		// it is a guaranteed 429. Advance the chain now and reuse the new
 		// link for the rest of the conversation.
-		next := ids.WithFreshSession()
+		next := nextUnspentSession(ids)
 		ids = next
 		sessionEscapes.Lock()
 		sessionEscapes.entries[key] = sessionEscapeKeyOf(next)
@@ -225,11 +244,26 @@ func rememberSessionEscape(original, escaped identity.RequestIDs) {
 	delete(sessionEscapes.spent, target)
 }
 
+// advanceSessionAfterSuccess records that used has served its one request and
+// that the next turn should start on its successor. The free tier meters per
+// session, so without the recorded successor a conversation reusing the
+// client's id would pay a guaranteed 429 on every turn after the first.
+func advanceSessionAfterSuccess(used identity.RequestIDs) {
+	next := nextUnspentSession(used)
+	rememberSessionEscape(used, next)
+	markSessionEscapeSpent(used)
+}
+
 // markSessionEscapeSpent records that a replacement already served a request,
 // so escapedSession rotates it instead of replaying the burn.
 func markSessionEscapeSpent(escaped identity.RequestIDs) {
 	sessionEscapes.Lock()
 	defer sessionEscapes.Unlock()
+	if len(sessionEscapes.spent) >= sessionEscapeLimit {
+		// The marks are only an optimization: dropping them costs at most one
+		// rediscovered 429 per chain, so the map never grows without bound.
+		sessionEscapes.spent = map[sessionEscapeKey]bool{}
+	}
 	sessionEscapes.spent[sessionEscapeKeyOf(escaped)] = true
 }
 
@@ -254,7 +288,7 @@ func (g *Gateway) escapeBurnedSession(ctx context.Context, route models.Route, b
 	original := *resp
 	originalBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	httpx.DrainAndClose(resp.Body)
-	escaped := ids.WithFreshSession()
+	escaped := nextUnspentSession(ids)
 	if meta := telemetry.MetaFromContext(ctx); meta != nil {
 		meta.Session = escaped.Session
 	}

@@ -586,10 +586,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
 				// The free tier meters its bucket per session and this request
-				// consumed it. Mark the link spent so the next request in the
-				// conversation rotates before sending instead of spending an
+				// consumed it. Record the successor now so the next turn in the
+				// conversation starts on a fresh bucket instead of spending an
 				// attempt on a guaranteed 429.
-				markSessionEscapeSpent(ids)
+				advanceSessionAfterSuccess(ids)
 				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}

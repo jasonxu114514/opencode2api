@@ -113,6 +113,54 @@ func TestSessionEscapeRotatesSpentReplacement(t *testing.T) {
 	}
 }
 
+func TestSessionEscapeAdvancesPastUsedLinks(t *testing.T) {
+	resetSessionEscapes()
+	first := identity.RequestIDs{Session: "ses_advance"}
+	second := first.WithFreshSession()
+	rememberSessionEscape(first, second)
+	markSessionEscapeSpent(second)
+
+	// Every turn must reach a link that has not served a request yet. With a
+	// deterministic mint from the same key, a naive rotation cycles between
+	// two spent ids and replays the 429 forever.
+	seen := map[string]bool{second.Session: true}
+	for turn := 0; turn < 8; turn++ {
+		got, ok := escapedSession(first)
+		if !ok {
+			t.Fatal("expected a remembered replacement")
+		}
+		if seen[got.Session] {
+			t.Fatalf("turn %d reused spent link %q", turn, got.Session)
+		}
+		seen[got.Session] = true
+		markSessionEscapeSpent(got)
+	}
+}
+
+func TestAdvanceSessionAfterSuccess(t *testing.T) {
+	resetSessionEscapes()
+	first := identity.RequestIDs{Session: "ses_conv"}
+
+	// The first turn against the client's own id must leave a successor, or
+	// the next turn reuses a spent bucket and pays a 429.
+	advanceSessionAfterSuccess(first)
+	got, ok := escapedSession(first)
+	if !ok {
+		t.Fatal("a served session must have a successor")
+	}
+	if got.Session == first.Session {
+		t.Fatal("the next turn must not reuse the served session")
+	}
+
+	// The successor is fresh, so it is used as-is; after it serves a request
+	// the chain must advance again.
+	advanceSessionAfterSuccess(got)
+	next, _ := escapedSession(first)
+	if next.Session == got.Session {
+		t.Fatalf("chain did not advance after the successor served a request: %q", next.Session)
+	}
+}
+
 func TestSessionEscapeMemoCaps(t *testing.T) {
 	resetSessionEscapes()
 	for i := 0; i < sessionEscapeLimit+8; i++ {
