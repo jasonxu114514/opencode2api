@@ -55,10 +55,19 @@ func sessionReminted(ctx context.Context) bool {
 	return reminted
 }
 
-// dailyQuotaSkew is how close a 429's Retry-After must land to the next UTC
+// dailyQuotaSkew is how late a 429's Retry-After may land after the next UTC
 // midnight for the rejection to be the exit's daily free-model allowance
-// rather than a per-session throttle. It matches the free-quota tracker's rule.
-const dailyQuotaSkew = 5 * time.Minute
+// rather than a per-session throttle. The observed free-tier reset is a few
+// minutes past midnight (5-7 min), so the window has to be wider than the
+// tracker's tight 5-minute rule; the per-session throttles seen so far land
+// 18+ minutes past, leaving a gap this window stays inside.
+const dailyQuotaSkew = 15 * time.Minute
+
+// freeLimitRepeatWindow is how long a second free-limit rejection on the same
+// exit, for a different session, marks that exit as spent. A per-session
+// throttle cannot answer two sessions, so a repeat proves the allowance
+// belongs to the egress IP and survives a session re-mint.
+const freeLimitRepeatWindow = 30 * time.Minute
 
 // dailyQuotaReset reports whether resp is the free tier's daily allowance
 // rejection for this egress, and when that allowance resets. The free-model
@@ -89,6 +98,32 @@ func dailyQuotaReset(resp *http.Response, now time.Time) (time.Time, bool) {
 	return reset, true
 }
 
+// exitFreeLimitReset reports whether the free-limit 429 belongs to the exit
+// and when it can serve again. The Retry-After naming the daily reset is the
+// fast path. Otherwise only a repeat rejection for a different session proves
+// the allowance is per egress: a single rejection may be the session's own
+// burn, which the escape retry can clear by re-minting, so parking on it would
+// sacrifice a healthy exit.
+func exitFreeLimitReset(node *anonymousNode, resp *http.Response, ids identity.RequestIDs, now time.Time) (time.Time, bool) {
+	if node == nil || node.proxy == nil || !isFreeUsageLimitResponse(resp) {
+		return time.Time{}, false
+	}
+	if reset, daily := dailyQuotaReset(resp, now); daily {
+		node.proxy.noteFreeLimit(ids.Session, now)
+		return reset, true
+	}
+	if !node.proxy.noteFreeLimit(ids.Session, now) {
+		return time.Time{}, false
+	}
+	retry := parseRetryAfter(resp.Header.Get("Retry-After"))
+	if retry < time.Minute {
+		// A repeat with no usable hint still means the exit is spent; bound
+		// the park so it recovers on its own if the hint was wrong.
+		retry = time.Hour
+	}
+	return now.Add(retry), true
+}
+
 // sessionScopedFreeLimit reports whether the attempt's free-tier allowance
 // rejection belongs to the session rather than to the exit. The gateway
 // re-mints a session it minted itself and retries once, so such a response must
@@ -97,13 +132,13 @@ func dailyQuotaReset(resp *http.Response, now time.Time) (time.Time, bool) {
 // daily-quota 429 is excluded: that one belongs to the egress IP and is parked
 // until its reset, not answered by a new session.
 func sessionScopedFreeLimit(ids identity.RequestIDs, resp *http.Response, err error, now time.Time) bool {
-	if err != nil || !ids.SessionDerived || !isFreeUsageLimitResponse(resp) {
-		return false
-	}
-	if _, daily := dailyQuotaReset(resp, now); daily {
-		return false
-	}
-	return true
+	// The free tier ledges the free-model allowance per session id, and every
+	// exit leaves from the same egress IP (the pool's tunnels differ, the
+	// observed egress does not), so a free-limit 429 is the same answer on
+	// every exit. A re-minted session is the only way past it, including for a
+	// client-supplied session: a burned bucket has no prompt cache to keep.
+	// The daily reset hint describes that session bucket, not the exit.
+	return err == nil && isFreeUsageLimitResponse(resp)
 }
 
 // stopBurnedWalk reports whether the anonymous exit walk should stop on this
@@ -172,7 +207,7 @@ func rememberSessionEscape(original, escaped identity.RequestIDs) {
 // locally). The retry's attempt count is added to the total so telemetry keeps
 // numbering one request's attempts in sequence.
 func (g *Gateway) escapeBurnedSession(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, resp *http.Response, effectiveRoute models.Route, attempts int) (*http.Response, models.Route, int, error) {
-	if !ids.SessionDerived || isDiagnosticRequest(ctx) || ctx.Err() != nil {
+	if isDiagnosticRequest(ctx) || ctx.Err() != nil {
 		return resp, effectiveRoute, attempts, nil
 	}
 	if !sessionScopedFreeLimit(ids, resp, nil, time.Now()) {

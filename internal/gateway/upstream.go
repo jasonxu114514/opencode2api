@@ -588,7 +588,12 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
-			lastResponse = resp
+			if resp != nil {
+				// Keep an earlier 429 when this attempt only timed out: the
+				// client can act on the quota answer, while a transport error
+				// would surface as a gateway failure.
+				lastResponse = resp
+			}
 			lastErr = asProxyUnavailable(node.proxy, err)
 			if err != nil {
 				g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
@@ -613,24 +618,22 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				halted = true
 				g.logger.Warn("upstream rejected the request; not trying other upstreams", "component", "upstream", "event", "deterministic_rejection", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				break
-			} else if reset, daily := dailyQuotaReset(resp, time.Now()); daily {
+			} else if stopBurnedWalk(ctx, ids, resp, err, time.Now()) {
+				// The burn follows the session and every exit leaves from the
+				// same egress, so walking cannot help: stop here and let
+				// doUpstream re-mint the session and retry once.
+				burned = true
+				break
+			} else if reset, exitScoped := exitFreeLimitReset(node, resp, ids, time.Now()); exitScoped {
 				// The free tier's free-model allowance is per egress IP, and
-				// this exit has spent it: the Retry-After lands on the next UTC
-				// midnight. Park the exit until then and keep walking. A new
-				// session cannot restore an egress's allowance, so the escape
-				// must not fire for this shape.
+				// this exit has spent it: the Retry-After lands on the daily
+				// reset, or a second session was rejected here. Park the exit
+				// until then and keep walking. A new session cannot restore an
+				// egress's allowance, so the escape must not fire for this shape.
 				if !isDiagnosticRequest(ctx) {
 					node.proxy.markDrained(reset)
 				}
 				g.logger.Info("free tier exhausted this exit's daily quota; parking it until reset", "component", "upstream", "event", "free_tier_daily_quota_exhausted", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "reset_at", reset.Format(time.RFC3339))
-			} else if stopBurnedWalk(ctx, ids, resp, err, time.Now()) {
-				// The burn follows the session, not the exit: every relay and
-				// base URL answers this session with the same free-limit 429.
-				// Stop the walk now so doUpstream re-mints the session and
-				// retries once instead of spending every exit on a guaranteed
-				// 429.
-				burned = true
-				break
 			} else {
 				g.logger.Debug("anonymous upstream returned an error response; trying the next upstream or proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			}
@@ -652,15 +655,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if ctx.Err() != nil {
 			break
 		}
-		if sessionScopedFreeLimit(ids, nodeResp, nodeErr, time.Now()) {
-			// A burned session is not this exit's fault: the escape retry below
-			// re-mints the session, so cooling the exit would park a healthy
-			// relay and could leave that retry with nothing to use.
-		} else if _, daily := dailyQuotaReset(nodeResp, time.Now()); daily {
-			// The exit answered but spent its own daily free-model allowance.
-			// That is not a lane outage: parking the exit is enough, and
-			// counting it as a failure would pause the whole lane while other
-			// exits still have quota.
+		if isFreeUsageLimitResponse(nodeResp) {
+			// A free-limit 429 is the session bucket, not a lane outage: the
+			// escape below re-mints the session, so cooling the exit would park
+			// a healthy relay and could leave that retry with nothing to use.
 			if !isDiagnosticRequest(ctx) {
 				g.anonymous.NoteNeutral()
 			}

@@ -129,14 +129,18 @@ func TestStopBurnedWalk(t *testing.T) {
 	if stopBurnedWalk(withSessionRemint(context.Background()), derived, freeLimit(""), nil, now) {
 		t.Fatal("the re-minted retry must keep walking exits")
 	}
-	// The exit's own daily allowance is spent (Retry-After = next UTC midnight);
-	// that is not the session's burn, so the walk must continue to other exits.
-	if stopBurnedWalk(context.Background(), derived, freeLimit("21600"), nil, now) {
-		t.Fatal("a daily-quota 429 must keep walking exits")
+	// A daily reset hint still describes the session's own bucket: every exit
+	// shares one egress, so walking cannot help and the re-mint is the only way
+	// past it. The original walk must stop too.
+	if !stopBurnedWalk(context.Background(), derived, freeLimit("21600"), nil, now) {
+		t.Fatal("a daily-reset 429 must stop the original walk")
 	}
+	// Client-supplied sessions are re-minted as well for the same reason: one
+	// egress means the same answer on every exit, and a burned bucket has no
+	// prompt cache left to preserve.
 	official := identity.RequestIDs{Session: "ses_y"}
-	if stopBurnedWalk(context.Background(), official, freeLimit(""), nil, now) {
-		t.Fatal("an official session must not stop the walk")
+	if !stopBurnedWalk(context.Background(), official, freeLimit(""), nil, now) {
+		t.Fatal("an official session's free-limit 429 must stop the walk too")
 	}
 	if stopBurnedWalk(context.Background(), derived, &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil, now) {
 		t.Fatal("a 200 must not stop the walk")
@@ -170,6 +174,45 @@ func TestDailyQuotaReset(t *testing.T) {
 	}
 	if _, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "21600", `{"error":{"message":"rate limit"}}`), now); ok {
 		t.Fatal("a non-free-limit 429 must not be treated as quota")
+	}
+	// The observed free-tier reset lands a few minutes past midnight, so the
+	// window must cover it while still excluding the later session throttles.
+	if _, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "20700", freeLimitBody), now); !ok {
+		t.Fatal("a Retry-After five minutes past midnight must be a daily reset")
+	}
+	if _, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "19800", freeLimitBody), now); ok {
+		t.Fatal("a Retry-After half an hour before midnight must not be a daily reset")
+	}
+}
+
+func TestExitFreeLimitReset(t *testing.T) {
+	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
+	resp := func(retry string) *http.Response {
+		r := &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"Free usage limit reached"}}`))}
+		if retry != "" {
+			r.Header.Set("Retry-After", retry)
+		}
+		return r
+	}
+	proxy := &proxyTransport{index: 0, name: "a"}
+	node := &anonymousNode{proxy: proxy}
+	// A single session's rejection may be that session's own burn, which the
+	// escape retry clears by re-minting, so the exit stays usable.
+	if _, ok := exitFreeLimitReset(node, resp("20000"), identity.RequestIDs{Session: "ses_a", SessionDerived: true}, now); ok {
+		t.Fatal("a single session's free-limit 429 must not park the exit")
+	}
+	// A rejection for a different session proves the allowance is the egress's.
+	reset, ok := exitFreeLimitReset(node, resp("20000"), identity.RequestIDs{Session: "ses_b", SessionDerived: true}, now.Add(time.Minute))
+	if !ok {
+		t.Fatal("a second session's free-limit 429 must park the exit")
+	}
+	if !reset.After(now) {
+		t.Fatalf("reset = %s, want after %s", reset, now)
+	}
+	// The daily hint still parks on the first rejection.
+	other := &anonymousNode{proxy: &proxyTransport{index: 1, name: "b"}}
+	if _, ok := exitFreeLimitReset(other, resp("20700"), identity.RequestIDs{Session: "ses_c"}, now); !ok {
+		t.Fatal("a Retry-After past midnight must park the exit immediately")
 	}
 }
 

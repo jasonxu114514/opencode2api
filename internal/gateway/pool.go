@@ -39,6 +39,13 @@ type proxyTransport struct {
 	checking     atomic.Bool
 	blockedUntil atomic.Int64
 	drainedUntil atomic.Int64
+
+	// freeLimitSession and freeLimitAt record the last session this exit
+	// rejected with the free-model allowance, so a rejection for another
+	// session within freeLimitRepeatWindow identifies a spent egress.
+	freeLimitMu      sync.Mutex
+	freeLimitSession string
+	freeLimitAt      time.Time
 }
 
 // proxyTransports holds every configured proxy route, indexed by
@@ -53,6 +60,21 @@ func (t *proxyTransport) blocked(now time.Time) bool {
 		return false
 	}
 	return t.blockedUntil.Load() > now.UnixNano()
+}
+
+// noteFreeLimit records the session this exit rejected for the free-model
+// allowance and reports whether the previous rejection came from a different
+// session recently, which a per-session throttle cannot explain.
+func (t *proxyTransport) noteFreeLimit(session string, now time.Time) bool {
+	if t == nil {
+		return false
+	}
+	t.freeLimitMu.Lock()
+	defer t.freeLimitMu.Unlock()
+	repeat := t.freeLimitSession != "" && t.freeLimitSession != session && now.Sub(t.freeLimitAt) <= freeLimitRepeatWindow
+	t.freeLimitSession = session
+	t.freeLimitAt = now
+	return repeat
 }
 
 // markBlocked keeps this exit out of the anonymous cursor until until. The
@@ -400,6 +422,13 @@ func (c *anonymousCursor) Next() *anonymousNode {
 		}
 		node := c.pool.nodes[idx]
 		if isBlocked(node) {
+			continue
+		}
+		if node.cooldownUntil.Load() > nowNanos {
+			// A cooled exit already failed on this traffic; retrying it costs
+			// a full attempt timeout and turns a clean 429 into a gateway
+			// error when the relay blackholes. Let the caller answer with the
+			// last upstream response instead.
 			continue
 		}
 		healthy := node.proxy.healthy.Load()
