@@ -241,7 +241,6 @@ func rememberSessionEscape(original, escaped identity.RequestIDs) {
 		sessionEscapes.spent = map[sessionEscapeKey]bool{}
 	}
 	sessionEscapes.entries[key] = target
-	delete(sessionEscapes.spent, target)
 }
 
 // advanceSessionAfterSuccess records that used has served its one request and

@@ -161,6 +161,21 @@ func TestAdvanceSessionAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestRememberSessionEscapeKeepsSpentTarget(t *testing.T) {
+	resetSessionEscapes()
+	first := identity.RequestIDs{Session: "ses_seq"}
+	second := first.WithFreshSession()
+	markSessionEscapeSpent(second)
+	// The escape path remembers the mapping after the retry already
+	// succeeded, so remembering must not unmask a target the success path
+	// just marked spent.
+	rememberSessionEscape(first, second)
+	got, _ := escapedSession(first)
+	if got.Session == second.Session {
+		t.Fatalf("spent target %q was reused after being remembered", second.Session)
+	}
+}
+
 func TestSessionEscapeMemoCaps(t *testing.T) {
 	resetSessionEscapes()
 	for i := 0; i < sessionEscapeLimit+8; i++ {
