@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,7 +14,7 @@ import (
 func resetSessionEscapes() {
 	sessionEscapes.Lock()
 	defer sessionEscapes.Unlock()
-	sessionEscapes.entries = map[sessionEscapeKey]sessionEscapeValue{}
+	sessionEscapes.entries = map[sessionEscapeKey]sessionEscapeKey{}
 }
 
 func TestIsFreeUsageLimitResponse(t *testing.T) {
@@ -86,5 +87,46 @@ func TestSessionEscapeMemoCaps(t *testing.T) {
 	defer sessionEscapes.Unlock()
 	if len(sessionEscapes.entries) > sessionEscapeLimit {
 		t.Fatalf("memo grew past its limit: %d > %d", len(sessionEscapes.entries), sessionEscapeLimit)
+	}
+}
+
+func TestSessionEscapeMemoFollowsLongChains(t *testing.T) {
+	resetSessionEscapes()
+	first := identity.RequestIDs{Session: "ses_chain"}
+	current := first
+	for i := 0; i < 8; i++ {
+		next := current.WithFreshSession()
+		rememberSessionEscape(current, next)
+		current = next
+	}
+	got, ok := escapedSession(first)
+	if !ok {
+		t.Fatal("expected a remembered replacement")
+	}
+	if got.Session != current.Session {
+		t.Fatalf("chain stopped early: got %q want %q", got.Session, current.Session)
+	}
+}
+
+func TestStopBurnedWalk(t *testing.T) {
+	freeLimit := func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Free usage limit reached"}}`)),
+		}
+	}
+	derived := identity.RequestIDs{Session: "ses_x", SessionDerived: true}
+	if !stopBurnedWalk(context.Background(), derived, freeLimit(), nil) {
+		t.Fatal("a derived session's free-limit 429 must stop the original walk")
+	}
+	if stopBurnedWalk(withSessionRemint(context.Background()), derived, freeLimit(), nil) {
+		t.Fatal("the re-minted retry must keep walking exits")
+	}
+	official := identity.RequestIDs{Session: "ses_y"}
+	if stopBurnedWalk(context.Background(), official, freeLimit(), nil) {
+		t.Fatal("an official session must not stop the walk")
+	}
+	if stopBurnedWalk(context.Background(), derived, &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil) {
+		t.Fatal("a 200 must not stop the walk")
 	}
 }

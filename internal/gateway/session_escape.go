@@ -63,18 +63,25 @@ func sessionScopedFreeLimit(ids identity.RequestIDs, resp *http.Response, err er
 	return err == nil && ids.SessionDerived && isFreeUsageLimitResponse(resp)
 }
 
+// stopBurnedWalk reports whether the anonymous exit walk should stop on this
+// response instead of trying the next exit. A free-limit rejection of the
+// original session is identical on every exit, so walking cannot help; the
+// re-minted retry pass keeps walking, because one particular exit may still
+// reject the fresh session.
+func stopBurnedWalk(ctx context.Context, ids identity.RequestIDs, resp *http.Response, err error) bool {
+	return !sessionReminted(ctx) && sessionScopedFreeLimit(ids, resp, err)
+}
+
 // sessionEscapeLimit bounds the memo of burned-session replacements so callers
 // that keep opening fresh conversations cannot grow it without bound.
 const sessionEscapeLimit = 4096
 
 type sessionEscapeKey struct{ session, child, parent string }
 
-type sessionEscapeValue struct{ session, child, parent string }
-
 var sessionEscapes = struct {
 	sync.Mutex
-	entries map[sessionEscapeKey]sessionEscapeValue
-}{entries: map[sessionEscapeKey]sessionEscapeValue{}}
+	entries map[sessionEscapeKey]sessionEscapeKey
+}{entries: map[sessionEscapeKey]sessionEscapeKey{}}
 
 func sessionEscapeKeyOf(ids identity.RequestIDs) sessionEscapeKey {
 	return sessionEscapeKey{ids.Session, ids.ChildSession, ids.ParentSession}
@@ -85,7 +92,9 @@ func sessionEscapeKeyOf(ids identity.RequestIDs) sessionEscapeKey {
 // followed until it ends. The second result reports whether anything changed.
 func escapedSession(ids identity.RequestIDs) (identity.RequestIDs, bool) {
 	changed := false
-	for range 4 {
+	// Follow the whole chain: a long conversation burns one bucket per link,
+	// so stopping early would hand back a session that is already spent.
+	for range sessionEscapeLimit {
 		sessionEscapes.Lock()
 		value, ok := sessionEscapes.entries[sessionEscapeKeyOf(ids)]
 		sessionEscapes.Unlock()
@@ -106,9 +115,9 @@ func rememberSessionEscape(original, escaped identity.RequestIDs) {
 	sessionEscapes.Lock()
 	defer sessionEscapes.Unlock()
 	if _, exists := sessionEscapes.entries[key]; !exists && len(sessionEscapes.entries) >= sessionEscapeLimit {
-		sessionEscapes.entries = map[sessionEscapeKey]sessionEscapeValue{}
+		sessionEscapes.entries = map[sessionEscapeKey]sessionEscapeKey{}
 	}
-	sessionEscapes.entries[key] = sessionEscapeValue{escaped.Session, escaped.ChildSession, escaped.ParentSession}
+	sessionEscapes.entries[key] = sessionEscapeKeyOf(escaped)
 }
 
 // escapeBurnedSession retries one routing pass with a re-minted session when

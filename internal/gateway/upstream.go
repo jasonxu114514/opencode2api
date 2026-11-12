@@ -613,7 +613,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				halted = true
 				g.logger.Warn("upstream rejected the request; not trying other upstreams", "component", "upstream", "event", "deterministic_rejection", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				break
-			} else if sessionScopedFreeLimit(ids, resp, err) && !sessionReminted(ctx) {
+			} else if stopBurnedWalk(ctx, ids, resp, err) {
 				// The burn follows the session, not the exit: every relay and
 				// base URL answers this session with the same free-limit 429.
 				// Stop the walk now so doUpstream re-mints the session and
