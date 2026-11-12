@@ -39,6 +39,21 @@ func isFreeUsageLimitResponse(resp *http.Response) bool {
 	return false
 }
 
+// sessionRemintKey marks a routing pass that already uses a re-minted session.
+// Such a pass must not stop at the first free-limit 429, because the answer may
+// still be exit-specific: the fresh session has to walk exits like any normal
+// request, while a burned original session does not.
+type sessionRemintKey struct{}
+
+func withSessionRemint(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sessionRemintKey{}, true)
+}
+
+func sessionReminted(ctx context.Context) bool {
+	reminted, _ := ctx.Value(sessionRemintKey{}).(bool)
+	return reminted
+}
+
 // sessionScopedFreeLimit reports whether the attempt's free-tier allowance
 // rejection can belong to the session rather than to the exit. The gateway
 // re-mints a session it minted itself and retries once, so such a response must
@@ -125,7 +140,7 @@ func (g *Gateway) escapeBurnedSession(ctx context.Context, route models.Route, b
 		"component", "upstream", "event", "free_limit_session_retry", "request_id", ids.Request,
 		"model", route.ID, "session", ids.Session, "fresh_session", escaped.Session,
 		"retry_after", resp.Header.Get("Retry-After"))
-	retryResp, retryRoute, used, retryErr := g.doUpstreamTiers(ctx, route, bodies, escaped, attempts)
+	retryResp, retryRoute, used, retryErr := g.doUpstreamTiers(withSessionRemint(ctx), route, bodies, escaped, attempts)
 	attempts += used
 	if retryErr == nil && retryResp != nil && retryResp.StatusCode/100 == 2 {
 		rememberSessionEscape(ids, escaped)
