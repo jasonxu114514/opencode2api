@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"opencode2api/internal/identity"
 )
@@ -109,24 +110,101 @@ func TestSessionEscapeMemoFollowsLongChains(t *testing.T) {
 }
 
 func TestStopBurnedWalk(t *testing.T) {
-	freeLimit := func() *http.Response {
-		return &http.Response{
+	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
+	freeLimit := func(retryAfter string) *http.Response {
+		resp := &http.Response{
 			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{},
 			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Free usage limit reached"}}`)),
 		}
+		if retryAfter != "" {
+			resp.Header.Set("Retry-After", retryAfter)
+		}
+		return resp
 	}
 	derived := identity.RequestIDs{Session: "ses_x", SessionDerived: true}
-	if !stopBurnedWalk(context.Background(), derived, freeLimit(), nil) {
+	if !stopBurnedWalk(context.Background(), derived, freeLimit(""), nil, now) {
 		t.Fatal("a derived session's free-limit 429 must stop the original walk")
 	}
-	if stopBurnedWalk(withSessionRemint(context.Background()), derived, freeLimit(), nil) {
+	if stopBurnedWalk(withSessionRemint(context.Background()), derived, freeLimit(""), nil, now) {
 		t.Fatal("the re-minted retry must keep walking exits")
 	}
+	// The exit's own daily allowance is spent (Retry-After = next UTC midnight);
+	// that is not the session's burn, so the walk must continue to other exits.
+	if stopBurnedWalk(context.Background(), derived, freeLimit("21600"), nil, now) {
+		t.Fatal("a daily-quota 429 must keep walking exits")
+	}
 	official := identity.RequestIDs{Session: "ses_y"}
-	if stopBurnedWalk(context.Background(), official, freeLimit(), nil) {
+	if stopBurnedWalk(context.Background(), official, freeLimit(""), nil, now) {
 		t.Fatal("an official session must not stop the walk")
 	}
-	if stopBurnedWalk(context.Background(), derived, &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil) {
+	if stopBurnedWalk(context.Background(), derived, &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil, now) {
 		t.Fatal("a 200 must not stop the walk")
+	}
+}
+
+func TestDailyQuotaReset(t *testing.T) {
+	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
+	nextMidnight := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	resp := func(status int, retryAfter, body string) *http.Response {
+		r := &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+		if retryAfter != "" {
+			r.Header.Set("Retry-After", retryAfter)
+		}
+		return r
+	}
+	const freeLimitBody = `{"error":{"type":"upstream_error","message":"Free usage limit reached. Free models work in OpenCode"}}`
+
+	reset, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "21600", freeLimitBody), now)
+	if !ok {
+		t.Fatal("a free-limit 429 with a midnight Retry-After must be a daily-quota exhaustion")
+	}
+	if !reset.Equal(nextMidnight) {
+		t.Fatalf("reset = %s, want %s", reset, nextMidnight)
+	}
+	if _, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "30", freeLimitBody), now); ok {
+		t.Fatal("a short Retry-After must not park the exit until midnight")
+	}
+	if _, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "", freeLimitBody), now); ok {
+		t.Fatal("a free-limit 429 without Retry-After must stay session-scoped")
+	}
+	if _, ok := dailyQuotaReset(resp(http.StatusTooManyRequests, "21600", `{"error":{"message":"rate limit"}}`), now); ok {
+		t.Fatal("a non-free-limit 429 must not be treated as quota")
+	}
+}
+
+func TestCursorSkipsDrainedExits(t *testing.T) {
+	first := &proxyTransport{index: 0, name: "a"}
+	second := &proxyTransport{index: 1, name: "b"}
+	first.healthy.Store(true)
+	second.healthy.Store(true)
+	pool := &anonymousNodes{nodes: []*anonymousNode{{proxy: first}, {proxy: second}}}
+	first.markDrained(time.Now().Add(time.Hour))
+	cursor := &anonymousCursor{pool: pool}
+	if node := cursor.Next(); node == nil || node.proxy != second {
+		t.Fatal("a drained exit must be skipped by the anonymous cursor")
+	}
+	if node := cursor.Next(); node != nil {
+		t.Fatalf("the cursor must skip the drained exit every time, got %q", node.proxy.name)
+	}
+}
+
+func TestCursorProbesFullyDrainedPoolOnce(t *testing.T) {
+	first := &proxyTransport{index: 0, name: "a"}
+	second := &proxyTransport{index: 1, name: "b"}
+	first.healthy.Store(true)
+	second.healthy.Store(true)
+	pool := &anonymousNodes{nodes: []*anonymousNode{{proxy: first}, {proxy: second}}}
+	reset := time.Now().Add(time.Hour)
+	first.markDrained(reset)
+	second.markDrained(reset)
+	cursor := &anonymousCursor{pool: pool}
+	// A fully drained pool must still answer with one real upstream attempt so
+	// the client receives the quota 429 instead of a gateway error.
+	if node := cursor.Next(); node == nil {
+		t.Fatal("a fully drained pool must probe one exit instead of returning nil")
+	}
+	if node := cursor.Next(); node != nil {
+		t.Fatalf("the drain probe must happen once per request, got %q", node.proxy.name)
 	}
 }

@@ -38,6 +38,7 @@ type proxyTransport struct {
 	healthy      atomic.Bool
 	checking     atomic.Bool
 	blockedUntil atomic.Int64
+	drainedUntil atomic.Int64
 }
 
 // proxyTransports holds every configured proxy route, indexed by
@@ -62,6 +63,25 @@ func (t *proxyTransport) markBlocked(until time.Time) {
 		return
 	}
 	t.blockedUntil.Store(until.UnixNano())
+}
+
+// drained reports whether this exit spent the free tier's daily free-model
+// allowance for its egress IP.
+func (t *proxyTransport) drained(now time.Time) bool {
+	if t == nil {
+		return false
+	}
+	return t.drainedUntil.Load() > now.UnixNano()
+}
+
+// markDrained keeps this exit out of the anonymous cursor until the free
+// tier's per-IP daily allowance resets. Unlike an abuse block, this is not the
+// exit's fault: the answer is a quota 429 whose Retry-After names the reset.
+func (t *proxyTransport) markDrained(until time.Time) {
+	if t == nil {
+		return
+	}
+	t.drainedUntil.Store(until.UnixNano())
 }
 
 // anonymousNodes gives the shared OpenCode "public" credential an independent
@@ -105,6 +125,10 @@ type anonymousCursor struct {
 	offset int
 	used   []bool
 	single bool
+	// probedDrained records that the cursor already sent the one probe allowed
+	// to an exit parked on its daily allowance, so a fully drained pool answers
+	// with one real 429 instead of re-walking every parked exit.
+	probedDrained bool
 }
 
 // anonymousPool builds one anonymous node per proxy transport, or an empty
@@ -330,9 +354,15 @@ func (c *anonymousCursor) Next() *anonymousNode {
 		}
 		return c.pool.nodes[index]
 	}
-	now := time.Now().UnixNano()
+	now := time.Now()
+	nowNanos := now.UnixNano()
+	// unusable marks an exit the free tier itself told us to leave alone: an
+	// abuse block, or a spent daily free-model allowance parked until its reset.
 	isBlocked := func(node *anonymousNode) bool {
-		return node.proxy != nil && node.proxy.blockedUntil.Load() > now
+		if node.proxy == nil {
+			return false
+		}
+		return node.proxy.blockedUntil.Load() > nowNanos || node.proxy.drained(now)
 	}
 	for c.offset < n {
 		idx := (c.start + c.offset) % n
@@ -345,7 +375,7 @@ func (c *anonymousCursor) Next() *anonymousNode {
 			c.used[idx] = true
 			continue
 		}
-		if node.proxy.pool || (!c.used[idx] && node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now) {
+		if node.proxy.pool || (!c.used[idx] && node.proxy.healthy.Load() && node.cooldownUntil.Load() <= nowNanos) {
 			c.used[idx] = true
 			return node
 		}
@@ -382,7 +412,48 @@ func (c *anonymousCursor) Next() *anonymousNode {
 		c.used[choice] = true
 		return c.pool.nodes[choice]
 	}
+	// Every exit is parked because its daily free-model allowance is spent.
+	// The client must still get the upstream's 429 (with its reset hint), not a
+	// gateway error, so probe the exit that resets soonest once per request. A
+	// parked exit's allowance can also recover early when the observed quota is
+	// shared with other traffic on that IP.
+	if !c.probedDrained && c.allParked(now) {
+		best, earliest := -1, int64(0)
+		for step := range n {
+			idx := (c.start + step) % n
+			node := c.pool.nodes[idx]
+			if node.proxy == nil || !node.proxy.drained(now) {
+				continue
+			}
+			until := node.proxy.drainedUntil.Load()
+			if best < 0 || until < earliest {
+				best, earliest = idx, until
+			}
+		}
+		if best >= 0 {
+			c.probedDrained = true
+			c.used[best] = true
+			return c.pool.nodes[best]
+		}
+	}
 	return nil
+}
+
+// allParked reports whether the free tier has parked every exit: each proxy is
+// either under an abuse block or drained of its daily free-model allowance.
+func (c *anonymousCursor) allParked(now time.Time) bool {
+	if c.pool == nil || len(c.pool.nodes) == 0 {
+		return false
+	}
+	for _, node := range c.pool.nodes {
+		if node.proxy == nil {
+			return false
+		}
+		if !node.proxy.blocked(now) && !node.proxy.drained(now) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *anonymousNodes) MarkSuccess(node *anonymousNode) {

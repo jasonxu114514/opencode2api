@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"opencode2api/internal/config"
 	"opencode2api/internal/httpx"
@@ -54,13 +55,55 @@ func sessionReminted(ctx context.Context) bool {
 	return reminted
 }
 
+// dailyQuotaSkew is how close a 429's Retry-After must land to the next UTC
+// midnight for the rejection to be the exit's daily free-model allowance
+// rather than a per-session throttle. It matches the free-quota tracker's rule.
+const dailyQuotaSkew = 5 * time.Minute
+
+// dailyQuotaReset reports whether resp is the free tier's daily allowance
+// rejection for this egress, and when that allowance resets. The free-model
+// quota is per egress IP and shared by every session leaving through it: the
+// body is the same "Free usage limit reached" seen for a burned session, but
+// its Retry-After points at the next UTC midnight. Re-minting the session
+// cannot restore an egress's allowance, so this case must park the exit
+// instead of triggering the session escape.
+func dailyQuotaReset(resp *http.Response, now time.Time) (time.Time, bool) {
+	if !isFreeUsageLimitResponse(resp) {
+		return time.Time{}, false
+	}
+	retry := parseRetryAfter(resp.Header.Get("Retry-After"))
+	// A hint under a minute is a transient throttle, not a daily reset;
+	// treating it as exhaustion would park a healthy exit until midnight.
+	if retry < time.Minute {
+		return time.Time{}, false
+	}
+	utc := now.UTC()
+	reset := time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
+	delta := reset.Sub(now.Add(retry))
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > dailyQuotaSkew {
+		return time.Time{}, false
+	}
+	return reset, true
+}
+
 // sessionScopedFreeLimit reports whether the attempt's free-tier allowance
-// rejection can belong to the session rather than to the exit. The gateway
+// rejection belongs to the session rather than to the exit. The gateway
 // re-mints a session it minted itself and retries once, so such a response must
 // not cool the exit: a healthy relay would be parked and the retry could find
-// no exit left, which would make the escape impossible on a small pool.
-func sessionScopedFreeLimit(ids identity.RequestIDs, resp *http.Response, err error) bool {
-	return err == nil && ids.SessionDerived && isFreeUsageLimitResponse(resp)
+// no exit left, which would make the escape impossible on a small pool. A
+// daily-quota 429 is excluded: that one belongs to the egress IP and is parked
+// until its reset, not answered by a new session.
+func sessionScopedFreeLimit(ids identity.RequestIDs, resp *http.Response, err error, now time.Time) bool {
+	if err != nil || !ids.SessionDerived || !isFreeUsageLimitResponse(resp) {
+		return false
+	}
+	if _, daily := dailyQuotaReset(resp, now); daily {
+		return false
+	}
+	return true
 }
 
 // stopBurnedWalk reports whether the anonymous exit walk should stop on this
@@ -68,8 +111,8 @@ func sessionScopedFreeLimit(ids identity.RequestIDs, resp *http.Response, err er
 // original session is identical on every exit, so walking cannot help; the
 // re-minted retry pass keeps walking, because one particular exit may still
 // reject the fresh session.
-func stopBurnedWalk(ctx context.Context, ids identity.RequestIDs, resp *http.Response, err error) bool {
-	return !sessionReminted(ctx) && sessionScopedFreeLimit(ids, resp, err)
+func stopBurnedWalk(ctx context.Context, ids identity.RequestIDs, resp *http.Response, err error, now time.Time) bool {
+	return !sessionReminted(ctx) && sessionScopedFreeLimit(ids, resp, err, now)
 }
 
 // sessionEscapeLimit bounds the memo of burned-session replacements so callers
@@ -132,7 +175,7 @@ func (g *Gateway) escapeBurnedSession(ctx context.Context, route models.Route, b
 	if !ids.SessionDerived || isDiagnosticRequest(ctx) || ctx.Err() != nil {
 		return resp, effectiveRoute, attempts, nil
 	}
-	if !isFreeUsageLimitResponse(resp) {
+	if !sessionScopedFreeLimit(ids, resp, nil, time.Now()) {
 		return resp, effectiveRoute, attempts, nil
 	}
 	if isTitleGenerationBody(bodies[config.TierZen]) || isTitleGenerationBody(bodies[route.Tier]) {

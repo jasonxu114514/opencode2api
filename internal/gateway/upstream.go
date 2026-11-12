@@ -613,7 +613,17 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				halted = true
 				g.logger.Warn("upstream rejected the request; not trying other upstreams", "component", "upstream", "event", "deterministic_rejection", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				break
-			} else if stopBurnedWalk(ctx, ids, resp, err) {
+			} else if reset, daily := dailyQuotaReset(resp, time.Now()); daily {
+				// The free tier's free-model allowance is per egress IP, and
+				// this exit has spent it: the Retry-After lands on the next UTC
+				// midnight. Park the exit until then and keep walking. A new
+				// session cannot restore an egress's allowance, so the escape
+				// must not fire for this shape.
+				if !isDiagnosticRequest(ctx) {
+					node.proxy.markDrained(reset)
+				}
+				g.logger.Info("free tier exhausted this exit's daily quota; parking it until reset", "component", "upstream", "event", "free_tier_daily_quota_exhausted", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "reset_at", reset.Format(time.RFC3339))
+			} else if stopBurnedWalk(ctx, ids, resp, err, time.Now()) {
 				// The burn follows the session, not the exit: every relay and
 				// base URL answers this session with the same free-limit 429.
 				// Stop the walk now so doUpstream re-mints the session and
@@ -642,10 +652,19 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if ctx.Err() != nil {
 			break
 		}
-		if !sessionScopedFreeLimit(ids, nodeResp, nodeErr) {
+		if sessionScopedFreeLimit(ids, nodeResp, nodeErr, time.Now()) {
 			// A burned session is not this exit's fault: the escape retry below
 			// re-mints the session, so cooling the exit would park a healthy
 			// relay and could leave that retry with nothing to use.
+		} else if _, daily := dailyQuotaReset(nodeResp, time.Now()); daily {
+			// The exit answered but spent its own daily free-model allowance.
+			// That is not a lane outage: parking the exit is enough, and
+			// counting it as a failure would pause the whole lane while other
+			// exits still have quota.
+			if !isDiagnosticRequest(ctx) {
+				g.anonymous.NoteNeutral()
+			}
+		} else {
 			g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
 		}
 		if g.anonymous.Open() {
