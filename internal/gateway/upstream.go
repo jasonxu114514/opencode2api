@@ -154,11 +154,32 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 // buffered (up to 1 MiB) so it can be read again. Debug key overrides skip the
 // replay so the Playground sees the selected key's own answer.
 func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
+	if !isDiagnosticRequest(ctx) {
+		// A conversation whose session the free tier already burned is sent with
+		// its remembered replacement, so the request starts on the fresh bucket
+		// instead of spending a full exit walk rediscovering the 429.
+		if escaped, ok := escapedSession(ids); ok {
+			ids = escaped
+			if meta := telemetry.MetaFromContext(ctx); meta != nil {
+				meta.Session = ids.Session
+			}
+			g.logger.Debug("using a remembered replacement session", "component", "upstream", "event", "free_limit_session_memo", "request_id", ids.Request, "session", ids.Session)
+		}
+	}
 	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
 		return resp, effectiveRoute, err
 	}
-	if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
+	if err != nil || resp == nil {
+		return resp, effectiveRoute, err
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		resp, effectiveRoute, attempts, err = g.escapeBurnedSession(ctx, route, bodies, ids, resp, effectiveRoute, attempts)
+		if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
+			return resp, effectiveRoute, err
+		}
+	}
+	if resp.StatusCode != http.StatusBadRequest {
 		return resp, effectiveRoute, err
 	}
 	origBody := resp.Body
@@ -606,7 +627,12 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if ctx.Err() != nil {
 			break
 		}
-		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
+		if !sessionScopedFreeLimit(ids, nodeResp, nodeErr) {
+			// A burned session is not this exit's fault: the escape retry below
+			// re-mints the session, so cooling the exit would park a healthy
+			// relay and could leave that retry with nothing to use.
+			g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
+		}
 		if g.anonymous.Open() {
 			// This attempt tripped the breaker (or another request did):
 			// continuing the walk would keep probing a lane that is now
