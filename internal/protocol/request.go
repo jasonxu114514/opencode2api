@@ -540,7 +540,9 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 						request.System = append(request.System, blocks...)
 					} else if role == "developer" {
 						request.Developer = append(request.Developer, blocks...)
-					} else if role == "user" || role == "assistant" {
+					} else if role == "assistant" {
+						appendAssistantMessage(&request.Messages, blocks)
+					} else if role == "user" {
 						request.Messages = append(request.Messages, bridgeMessage{Role: role, Blocks: blocks})
 					}
 				default:
@@ -672,6 +674,22 @@ func appendBridgeBlock(messages *[]bridgeMessage, role string, block bridgeBlock
 		}
 	}
 	*messages = append(*messages, bridgeMessage{Role: role, Blocks: []bridgeBlock{block}})
+}
+
+// appendAssistantMessage adds the blocks of a Responses message item with the
+// assistant role. A turn may carry its text in an item that follows the
+// function_call items of the same turn, and the Chat and Anthropic encoders
+// cannot express an assistant message that interrupts its own tool calls, so
+// the text joins the trailing assistant message instead of starting a new one.
+func appendAssistantMessage(messages *[]bridgeMessage, blocks []bridgeBlock) {
+	if len(blocks) > 0 && len(*messages) > 0 {
+		last := &(*messages)[len(*messages)-1]
+		if last.Role == "assistant" {
+			last.Blocks = append(last.Blocks, blocks...)
+			return
+		}
+	}
+	*messages = append(*messages, bridgeMessage{Role: "assistant", Blocks: blocks})
 }
 
 // bridgeBlocksOnlyTools reports whether blocks is non-empty and holds only
