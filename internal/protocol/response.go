@@ -109,6 +109,13 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 					Name:          jsonutil.StringAt(item, "name"),
 					ArgumentsJSON: jsonutil.StringAt(item, "arguments"),
 				})
+			case "custom_tool_call":
+				response.Tools = append(response.Tools, bridgeBlock{
+					Kind:          "tool_call",
+					ID:            jsonutil.FirstString(jsonutil.StringAt(item, "call_id"), jsonutil.StringAt(item, "id")),
+					Name:          jsonutil.StringAt(item, "name"),
+					ArgumentsJSON: customToolCallArguments(item["input"]),
+				})
 			default:
 				return response, fmt.Errorf("Responses response has unsupported output item type %q", jsonutil.StringAt(item, "type"))
 			}
@@ -558,12 +565,21 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 		if !ok {
 			return false
 		}
-		client, changed := renames.Resolve(name)
-		if !changed {
-			return false
+		changed := false
+		if transform, ok := renames.ArgumentTransform(name); ok {
+			if arguments, ok := container["arguments"].(string); ok {
+				if rewritten, err := transform(arguments); err == nil && rewritten != arguments {
+					container["arguments"] = rewritten
+					changed = true
+				}
+			}
 		}
-		container["name"] = client
-		return true
+		client, renamed := renames.Resolve(name)
+		if renamed {
+			container["name"] = client
+			changed = true
+		}
+		return changed
 	}
 	renameItem := func(item map[string]any) bool {
 		switch jsonutil.StringAt(item, "type") {
