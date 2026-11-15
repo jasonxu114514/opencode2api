@@ -28,6 +28,7 @@ type bridgeStreamTool struct {
 	AnthropicIndex   int
 	Started          bool
 	EmittedArguments int
+	Custom           bool
 }
 
 // bridgeStreamEncoder turns bridge stream events into one downstream protocol's
@@ -76,7 +77,7 @@ type bridgeStreamEncoder struct {
 // bridgeStreamEmitter builds an encoder for the target protocol. The response
 // ID is taken from the first event that carries one and the model from the
 // last event that carries one, so the constructor's model is only a fallback.
-func bridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string) *bridgeStreamEncoder {
+func bridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string, renames *ToolRenames) *bridgeStreamEncoder {
 	return &bridgeStreamEncoder{
 		w:       writer,
 		flush:   flusher,
@@ -84,7 +85,14 @@ func bridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol
 		model:   model,
 		created: time.Now().Unix(),
 		tools:   map[string]*bridgeStreamTool{},
+		renames: renames,
 	}
+}
+
+// customTool reports whether a resolved client tool name is a freeform custom
+// tool that the client expects as a custom_tool_call item.
+func (emitter *bridgeStreamEncoder) customTool(name string) bool {
+	return emitter.renames.IsCustom(name)
 }
 
 // Emit encodes one bridge stream event for the target protocol. The response
@@ -460,6 +468,7 @@ func (emitter *bridgeStreamEncoder) startTool(tool *bridgeStreamTool) error {
 		emitter.textOpen = false
 	}
 	tool.Started = true
+	tool.Custom = emitter.customTool(tool.Name)
 	switch emitter.target {
 	case Chat:
 		return emitter.chatChunk(map[string]any{"tool_calls": []any{map[string]any{
@@ -474,11 +483,9 @@ func (emitter *bridgeStreamEncoder) startTool(tool *bridgeStreamTool) error {
 	case Responses:
 		tool.Index = emitter.nextOutput
 		emitter.nextOutput++
-		var item map[string]any
-		if emitter.renames.IsCustom(tool.Name) {
+		item := map[string]any{"id": tool.ItemID, "type": "function_call", "status": "in_progress", "arguments": "", "call_id": tool.ID, "name": tool.Name}
+		if tool.Custom {
 			item = map[string]any{"id": tool.ItemID, "type": "custom_tool_call", "status": "in_progress", "input": "", "call_id": tool.ID, "name": tool.Name}
-		} else {
-			item = map[string]any{"id": tool.ItemID, "type": "function_call", "status": "in_progress", "arguments": "", "call_id": tool.ID, "name": tool.Name}
 		}
 		return emitter.sse("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": tool.Index, "item": item, "sequence_number": emitter.nextSequence()})
 	case Anthropic:
@@ -498,6 +505,12 @@ func (emitter *bridgeStreamEncoder) emitToolDelta(tool *bridgeStreamTool, delta 
 	if delta == "" {
 		return nil
 	}
+	return emitter.emitToolArguments(tool, delta)
+}
+
+// emitToolArguments writes one complete argument payload in the target
+// protocol's form, bypassing the incremental-rewrite guard.
+func (emitter *bridgeStreamEncoder) emitToolArguments(tool *bridgeStreamTool, delta string) error {
 	switch emitter.target {
 	case Chat:
 		return emitter.chatChunk(map[string]any{"tool_calls": []any{map[string]any{
@@ -505,10 +518,9 @@ func (emitter *bridgeStreamEncoder) emitToolDelta(tool *bridgeStreamTool, delta 
 			"function": map[string]any{"arguments": delta},
 		}}}, nil)
 	case Responses:
-		if emitter.renames.IsCustom(tool.Name) {
-			// A custom tool call carries its whole freeform input on
-			// completion; JSON argument fragments would be the wrong shape
-			// for the client to accumulate.
+		if tool.Custom {
+			// Custom tool input is freeform text, while the upstream streamed a
+			// JSON envelope. The complete input is delivered on the done item.
 			return nil
 		}
 		return emitter.sse("response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "delta": delta, "item_id": tool.ItemID, "output_index": tool.Index, "sequence_number": emitter.nextSequence()})
@@ -657,17 +669,17 @@ func (emitter *bridgeStreamEncoder) finishResponsesItems() error {
 	}
 	for _, key := range emitter.order {
 		tool := emitter.tools[key]
+		if err := emitter.startTool(tool); err != nil {
+			return err
+		}
 		arguments := tool.Arguments.String()
 		if arguments == "" {
 			arguments = "{}"
 		}
-		if err := emitter.startTool(tool); err != nil {
-			return err
-		}
-		if err := emitter.emitPendingToolArguments(tool); err != nil {
-			return err
-		}
-		if emitter.renames.IsCustom(tool.Name) {
+		if tool.Custom {
+			if err := emitter.emitPendingToolArguments(tool); err != nil {
+				return err
+			}
 			input := freeformToolInput(arguments)
 			if err := emitter.sse("response.custom_tool_call_input.done", map[string]any{"type": "response.custom_tool_call_input.done", "input": input, "item_id": tool.ItemID, "output_index": tool.Index, "sequence_number": emitter.nextSequence()}); err != nil {
 				return err

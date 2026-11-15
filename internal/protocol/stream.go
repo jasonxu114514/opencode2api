@@ -89,8 +89,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		responseArgs:      map[string]bool{},
 		responseReasoning: map[string]bool{},
 	}
-	emitter := bridgeStreamEmitter(w, flusher, to, model)
-	emitter.renames = renames
+	emitter := bridgeStreamEmitter(w, flusher, to, model, renames)
 	termination := streamOpen
 	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
@@ -224,7 +223,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		WriteError(w, protocol, http.StatusBadGateway, "upstream SSE stream failed", "upstream_error", "")
 		return usage, observer.Reported(), cause
 	}
-	emitter := bridgeStreamEmitter(w, flusher, protocol, model)
+	emitter := bridgeStreamEmitter(w, flusher, protocol, model, nil)
 	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
 		return usage, observer.Reported(), err
 	}
@@ -334,10 +333,27 @@ func (reader *renameStreamReader) rewriteLine(line string) []byte {
 		return []byte(line)
 	}
 	rewritten := reader.renamer.rewriteFrame(raw)
-	if string(rewritten) == raw {
+	queued := reader.renamer.drainPending()
+	if len(rewritten) == 0 && len(queued) == 0 {
+		// The frame was fully replaced by a completion event, or dropped
+		// because its payload is held back for a whole-object rewrite.
+		return nil
+	}
+	if len(queued) == 0 && string(rewritten) == raw {
 		return []byte(line)
 	}
-	return []byte("data: " + string(rewritten) + terminator)
+	var out []byte
+	for _, payload := range queued {
+		out = append(out, "data: "...)
+		out = append(out, payload...)
+		out = append(out, "\n\n"...)
+	}
+	if len(rewritten) > 0 {
+		out = append(out, "data: "...)
+		out = append(out, rewritten...)
+		out = append(out, terminator...)
+	}
+	return out
 }
 
 // streamToolRenameState tracks how one tool call's name was resolved while a
@@ -348,6 +364,8 @@ type streamToolRenameState struct {
 	decided          bool
 	renamed          bool
 	pending          string
+	upstream         string
+	transform        ArgumentTransform
 	pendingArguments strings.Builder
 	callIndex        any
 	choiceIndex      any
@@ -365,6 +383,40 @@ type streamToolRenamer struct {
 	// custom_tool_call, so the argument events that follow can be rewritten
 	// into custom tool call input events even though they carry no tool name.
 	customItems map[string]bool
+	// itemTransforms maps a Responses output item id to the argument rewrite
+	// registered for its upstream tool name. A rewrite reads the whole JSON
+	// object, so the incremental fragments are held back until the item
+	// completes and then replaced by the rewritten arguments.
+	itemTransforms map[string]ArgumentTransform
+	// anthropicBlocks tracks Anthropic tool_use blocks whose arguments an
+	// adapter rewrites, keyed by content block index.
+	anthropicBlocks map[string]*anthropicBlockState
+	// pendingFrames holds payloads produced while rewriting a frame that must
+	// be written before it, such as a buffered argument delta that has to
+	// precede the content block stop it completes.
+	pendingFrames []string
+}
+
+// anthropicBlockState is one Anthropic tool_use block whose arguments are
+// buffered until the block closes.
+type anthropicBlockState struct {
+	transform ArgumentTransform
+	arguments strings.Builder
+}
+
+// drainPending returns the payloads queued before the current frame.
+func (renamer *streamToolRenamer) drainPending() []string {
+	pending := renamer.pendingFrames
+	renamer.pendingFrames = nil
+	return pending
+}
+
+// queueFrame records a payload to write before the frame being rewritten.
+func (renamer *streamToolRenamer) queueFrame(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	renamer.pendingFrames = append(renamer.pendingFrames, string(payload))
 }
 
 // rewriteFrame rewrites one SSE data payload, which is raw JSON text. Frames
@@ -375,13 +427,8 @@ func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 	if renamer.protocol == Responses {
 		return renamer.rewriteResponsesFrame(raw)
 	}
-	if renamer.protocol != Chat {
-		// Anthropic streams always carry a complete tool name in a single
-		// event, so the stateless object rewrite is exact.
-		if !mayCarryToolName([]byte(raw)) {
-			return []byte(raw)
-		}
-		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.renames)
+	if renamer.protocol == Anthropic {
+		return renamer.rewriteAnthropicFrame(raw)
 	}
 	if !strings.Contains(raw, `"tool_calls"`) && !strings.Contains(raw, `"finish_reason"`) {
 		return []byte(raw)
@@ -392,23 +439,38 @@ func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 // rewriteResponsesFrame rewrites one Responses SSE payload. Besides restoring
 // aliased tool names, it keeps a custom tool's call shaped the way the client
 // declared it: an item announced as a function_call for a client custom tool is
-// re-encoded as custom_tool_call, and the argument deltas and completion that
-// follow are turned into custom tool call input events, which carry the input
-// text instead of JSON arguments. Deltas name no tool, so the item announced
-// earlier is remembered by id.
+// re-encoded as custom_tool_call, and the argument completion that follows is
+// turned into a custom tool call input event, which carries the input text
+// instead of JSON arguments. When an adapter rewrites the arguments of the
+// upstream tool, the incremental fragments are held back and replaced by the
+// rewritten arguments on completion, because a rewrite reads the whole object.
+// Deltas name no tool, so the announced item is remembered by id.
 func (renamer *streamToolRenamer) rewriteResponsesFrame(raw string) []byte {
 	named := mayCarryToolName([]byte(raw))
 	arguments := strings.Contains(raw, "function_call_arguments")
-	if !named && !arguments && len(renamer.customItems) == 0 {
+	if !named && !arguments && len(renamer.customItems) == 0 && len(renamer.itemTransforms) == 0 {
 		return []byte(raw)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return []byte(raw)
 	}
+	// The upstream tool name decides whether an argument adapter applies, and
+	// the rename below replaces it, so read it first.
+	var itemName, itemID string
+	if item, ok := payload["item"].(map[string]any); ok {
+		itemName = jsonutil.StringAt(item, "name")
+		itemID = jsonutil.StringAt(item, "id")
+	}
 	changed := renameToolInMap(payload, renamer.protocol, renamer.renames)
 	switch jsonutil.StringAt(payload, "type") {
 	case "response.output_item.added", "response.output_item.done":
+		if transform, ok := renamer.renames.ArgumentTransform(itemName); ok && itemID != "" {
+			if renamer.itemTransforms == nil {
+				renamer.itemTransforms = map[string]ArgumentTransform{}
+			}
+			renamer.itemTransforms[itemID] = transform
+		}
 		if item, ok := payload["item"].(map[string]any); ok && jsonutil.StringAt(item, "type") == "custom_tool_call" {
 			if id := jsonutil.StringAt(item, "id"); id != "" {
 				if renamer.customItems == nil {
@@ -417,16 +479,33 @@ func (renamer *streamToolRenamer) rewriteResponsesFrame(raw string) []byte {
 				renamer.customItems[id] = true
 			}
 		}
-	case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+	case "response.function_call_arguments.delta":
 		id := jsonutil.StringAt(payload, "item_id")
-		if id != "" && renamer.customItems[id] {
-			if jsonutil.StringAt(payload, "type") == "response.function_call_arguments.done" {
-				payload["type"] = "response.custom_tool_call_input.done"
-				payload["input"] = freeformToolInput(payload["arguments"])
-				delete(payload, "arguments")
-			} else {
-				payload["type"] = "response.custom_tool_call_input.delta"
+		transform, buffered := renamer.itemTransforms[id]
+		if buffered {
+			// The rewritten arguments are emitted on completion instead.
+			_ = transform
+			return nil
+		}
+		if renamer.customItems[id] {
+			// A custom tool call carries its whole freeform input on
+			// completion, so a JSON fragment would be the wrong shape.
+			return nil
+		}
+	case "response.function_call_arguments.done":
+		id := jsonutil.StringAt(payload, "item_id")
+		if transform, ok := renamer.itemTransforms[id]; ok {
+			if raw, isString := payload["arguments"].(string); isString {
+				if rewritten, err := transform(raw); err == nil && rewritten != "" {
+					payload["arguments"] = rewritten
+					changed = true
+				}
 			}
+		}
+		if renamer.customItems[id] {
+			payload["type"] = "response.custom_tool_call_input.done"
+			payload["input"] = freeformToolInput(payload["arguments"])
+			delete(payload, "arguments")
 			changed = true
 		}
 	}
@@ -436,6 +515,82 @@ func (renamer *streamToolRenamer) rewriteResponsesFrame(raw string) []byte {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return []byte(raw)
+	}
+	return encoded
+}
+
+// rewriteAnthropicFrame rewrites one Anthropic SSE payload. Tool names are
+// restored per frame, and a tool_use block whose arguments an adapter rewrites
+// holds its input fragments back: the whole object is rewritten when the block
+// closes and written as one input_json_delta ahead of the content_block_stop.
+func (renamer *streamToolRenamer) rewriteAnthropicFrame(raw string) []byte {
+	named := mayCarryToolName([]byte(raw))
+	if !named && !strings.Contains(raw, "input_json_delta") && len(renamer.anthropicBlocks) == 0 {
+		return []byte(raw)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return []byte(raw)
+	}
+	index := fmt.Sprint(jsonutil.FirstAny(payload["index"], 0))
+	switch jsonutil.StringAt(payload, "type") {
+	case "content_block_start":
+		if block, ok := payload["content_block"].(map[string]any); ok {
+			if transform, ok := renamer.renames.ArgumentTransform(jsonutil.StringAt(block, "name")); ok {
+				if renamer.anthropicBlocks == nil {
+					renamer.anthropicBlocks = map[string]*anthropicBlockState{}
+				}
+				renamer.anthropicBlocks[index] = &anthropicBlockState{transform: transform}
+			}
+		}
+		return RenameResponseTool([]byte(raw), Anthropic, renamer.renames)
+	case "content_block_delta":
+		state := renamer.anthropicBlocks[index]
+		if state == nil {
+			return RenameResponseTool([]byte(raw), Anthropic, renamer.renames)
+		}
+		delta, _ := payload["delta"].(map[string]any)
+		if jsonutil.StringAt(delta, "type") != "input_json_delta" {
+			return RenameResponseTool([]byte(raw), Anthropic, renamer.renames)
+		}
+		state.arguments.WriteString(jsonutil.StringAt(delta, "partial_json"))
+		return nil
+	case "content_block_stop":
+		state := renamer.anthropicBlocks[index]
+		delete(renamer.anthropicBlocks, index)
+		if state != nil {
+			if rewritten, ok := rewriteWholeArguments(state.transform, state.arguments.String()); ok {
+				renamer.queueFrame(mustMarshal(map[string]any{
+					"type":  "content_block_delta",
+					"index": payload["index"],
+					"delta": map[string]any{"type": "input_json_delta", "partial_json": rewritten},
+				}))
+			}
+		}
+		return RenameResponseTool([]byte(raw), Anthropic, renamer.renames)
+	}
+	return RenameResponseTool([]byte(raw), Anthropic, renamer.renames)
+}
+
+// rewriteWholeArguments applies an argument rewrite to a complete JSON object.
+// A rewrite that fails or produces nothing keeps the original text.
+func rewriteWholeArguments(transform ArgumentTransform, arguments string) (string, bool) {
+	if transform == nil || arguments == "" {
+		return "", false
+	}
+	rewritten, err := transform(arguments)
+	if err != nil || rewritten == "" {
+		return "", false
+	}
+	return rewritten, true
+}
+
+// mustMarshal encodes a payload built by the rewriter itself, which always
+// succeeds; an unexpected failure drops the frame instead of corrupting it.
+func mustMarshal(payload map[string]any) []byte {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil
 	}
 	return encoded
 }
@@ -482,23 +637,39 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 						changed = true
 					}
 				}
-				if arguments, exists := function["arguments"]; exists && !state.decided {
-					if renamer.renames.HasLongerPrefix(state.pending) {
+				if arguments, exists := function["arguments"]; exists {
+					if !state.decided {
+						if renamer.renames.HasLongerPrefix(state.pending) {
+							if fragment, ok := arguments.(string); ok {
+								state.pendingArguments.WriteString(fragment)
+								delete(function, "arguments")
+								changed = true
+							}
+						} else {
+							if state.pending != "" {
+								function["name"] = state.pending
+								state.upstream = state.pending
+								state.transform = renamer.argumentTransform(state.upstream)
+								changed = true
+							}
+							state.decided = true
+						}
+					}
+					if state.decided && state.transform != nil {
 						if fragment, ok := arguments.(string); ok {
 							state.pendingArguments.WriteString(fragment)
 							delete(function, "arguments")
 							changed = true
 						}
-					} else {
-						if state.pending != "" {
-							function["name"] = state.pending
-							changed = true
-						}
-						state.decided = true
 					}
 				}
-				if state.decided && renamer.releasePendingArguments(state, function) {
+				if state.decided && state.transform == nil && renamer.releasePendingArguments(state, function) {
 					changed = true
+				}
+				if finished && state.transform != nil && state.pendingArguments.Len() > 0 {
+					if renamer.flushTransformedArguments(state, function) {
+						changed = true
+					}
 				}
 				if finished && !state.decided && (state.pending != "" || state.pendingArguments.Len() > 0) {
 					if renamer.finishState(state, function) {
@@ -549,6 +720,31 @@ func (renamer *streamToolRenamer) releasePendingArguments(state *streamToolRenam
 	return true
 }
 
+// argumentTransform returns the registered argument rewrite for an upstream
+// tool name, or nil when the call needs no translation.
+func (renamer *streamToolRenamer) argumentTransform(name string) ArgumentTransform {
+	if transform, ok := renamer.renames.ArgumentTransform(name); ok {
+		return transform
+	}
+	return nil
+}
+
+// flushTransformedArguments writes the buffered arguments of one tool call
+// through its argument transform. Arguments an upstream streamed in fragments
+// are complete by the time the choice finishes.
+func (renamer *streamToolRenamer) flushTransformedArguments(state *streamToolRenameState, function map[string]any) bool {
+	if state.transform == nil || state.pendingArguments.Len() == 0 {
+		return false
+	}
+	arguments := state.pendingArguments.String()
+	if rewritten, err := state.transform(arguments); err == nil {
+		arguments = rewritten
+	}
+	function["arguments"] = arguments
+	state.pendingArguments.Reset()
+	return true
+}
+
 // finishState settles a call the choice finished while its name was still
 // ambiguous: the held-back name and arguments are emitted verbatim.
 func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, function map[string]any) bool {
@@ -573,10 +769,14 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 			continue
 		}
 		state := renamer.tools[key]
-		if state == nil || state.decided || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
+		if state == nil || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
 			continue
 		}
-		if state.pending == "" && state.pendingArguments.Len() == 0 {
+		if state.decided {
+			if state.transform == nil || state.pendingArguments.Len() == 0 {
+				continue
+			}
+		} else if state.pending == "" && state.pendingArguments.Len() == 0 {
 			continue
 		}
 		calls = append(calls, renamer.pendingCall(state))
@@ -588,10 +788,16 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 // decided.
 func (renamer *streamToolRenamer) pendingCall(state *streamToolRenameState) any {
 	function := map[string]any{}
-	if state.pending != "" {
+	if !state.decided && state.pending != "" {
 		function["name"] = state.pending
 	}
-	if state.pendingArguments.Len() > 0 {
+	if state.transform != nil && state.pendingArguments.Len() > 0 {
+		arguments := state.pendingArguments.String()
+		if rewritten, err := state.transform(arguments); err == nil {
+			arguments = rewritten
+		}
+		function["arguments"] = arguments
+	} else if state.pendingArguments.Len() > 0 {
 		function["arguments"] = state.pendingArguments.String()
 	}
 	call := map[string]any{"index": state.callIndex, "function": function}
@@ -614,7 +820,14 @@ func (renamer *streamToolRenamer) finish() []byte {
 	byIndex := map[string]*choiceCalls{}
 	for _, key := range renamer.order {
 		state := renamer.tools[key]
-		if state == nil || state.decided || state.pending == "" && state.pendingArguments.Len() == 0 {
+		if state == nil {
+			continue
+		}
+		if state.decided {
+			if state.transform == nil || state.pendingArguments.Len() == 0 {
+				continue
+			}
+		} else if state.pending == "" && state.pendingArguments.Len() == 0 {
 			continue
 		}
 		index := state.choiceIndex
@@ -670,6 +883,8 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	state.pending = mergeToolName(state.pending, fragment)
 	if client, ok := renamer.renames.Client(state.pending); ok {
 		function["name"] = client
+		state.upstream = state.pending
+		state.transform = renamer.argumentTransform(state.upstream)
 		state.decided, state.renamed = true, true
 		return true
 	}
@@ -684,6 +899,8 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	// declared is written out as the model sent it.
 	client, renamed := renamer.renames.Resolve(state.pending)
 	function["name"] = client
+	state.upstream = state.pending
+	state.transform = renamer.argumentTransform(state.upstream)
 	state.decided, state.renamed = true, renamed
 	return true
 }

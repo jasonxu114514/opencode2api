@@ -31,6 +31,11 @@ const clientToolDigestLength = 12
 // toolWireNameLimit is the longest tool name the upstreams accept.
 const toolWireNameLimit = 64
 
+// ArgumentTransform rewrites the JSON arguments of one upstream tool call into
+// the argument shape of the client tool it is mapped to. It returns the
+// original arguments unchanged when the call cannot be translated.
+type ArgumentTransform func(arguments string) (string, error)
+
 // ToolRenames records the client-to-wire tool names of one shaped request. The
 // zero value and a nil pointer are both empty and safe to use.
 type ToolRenames struct {
@@ -46,17 +51,21 @@ type ToolRenames struct {
 	// name is never guessed between.
 	byCase  map[string]string
 	byShape map[string]string
+	// transforms rewrites the arguments of official tool calls that are bound
+	// to a client tool with a different argument schema.
+	transforms map[string]ArgumentTransform
 }
 
 // NewToolRenames returns an empty rename set.
 func NewToolRenames() *ToolRenames {
 	return &ToolRenames{
-		toWire:   map[string]string{},
-		toClient: map[string]string{},
-		official: map[string]string{},
-		custom:   map[string]bool{},
-		byCase:   map[string]string{},
-		byShape:  map[string]string{},
+		toWire:     map[string]string{},
+		toClient:   map[string]string{},
+		official:   map[string]string{},
+		custom:     map[string]bool{},
+		byCase:     map[string]string{},
+		byShape:    map[string]string{},
+		transforms: map[string]ArgumentTransform{},
 	}
 }
 
@@ -169,6 +178,36 @@ func (r *ToolRenames) Official(official string) (string, bool) {
 	}
 	client, ok := r.official[official]
 	return client, ok
+}
+
+// SetArgumentTransform registers the argument rewrite for one official tool
+// name. It is only consulted when the upstream reports that official name.
+func (r *ToolRenames) SetArgumentTransform(official string, transform ArgumentTransform) {
+	if r == nil || official == "" || transform == nil {
+		return
+	}
+	if r.transforms == nil {
+		r.transforms = map[string]ArgumentTransform{}
+	}
+	r.transforms[official] = transform
+}
+
+// ArgumentTransform returns the registered argument rewrite for an upstream
+// tool name.
+func (r *ToolRenames) ArgumentTransform(name string) (ArgumentTransform, bool) {
+	if r == nil || name == "" {
+		return nil, false
+	}
+	transform, ok := r.transforms[name]
+	return transform, ok
+}
+
+// Custom reports whether a client tool was declared as a freeform custom tool.
+func (r *ToolRenames) Custom(client string) bool {
+	if r == nil || client == "" {
+		return false
+	}
+	return r.custom[client]
 }
 
 // Add records one client-to-wire mapping. Adding the same pair twice is a

@@ -25,6 +25,9 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 		// a clone of the client's and needs the same guard.
 		jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(output["max_output_tokens"]))
 	}
+	if to == Chat {
+		normalizeChatEmptyContent(output)
+	}
 	normalizeToolReasoningHistory(to, jsonutil.StringAt(output, "model"), upstreamURL, output)
 	return output, nil
 }
@@ -258,6 +261,35 @@ func requestEnablesReasoning(input map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// normalizeChatEmptyContent replaces a null or missing message content with
+// an empty string. OpenAI-shaped clients serialize a tool-call-only assistant
+// turn with "content": null, which strict Chat providers (Alibaba DashScope,
+// Cloudflare Workers AI) reject with "The content field is a required field"
+// even though the OpenAI schema permits null. The field is a string there, and
+// an empty string carries the same meaning. A same-protocol body is cloned and
+// never passes through the Chat encoder, so the repair runs on the prepared
+// upstream body to cover both paths.
+func normalizeChatEmptyContent(input map[string]any) bool {
+	messages, ok := input["messages"].([]any)
+	if !ok {
+		return false
+	}
+
+	changed := false
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			continue
+		}
+		if content, present := message["content"]; present && content != nil {
+			continue
+		}
+		message["content"] = ""
+		changed = true
+	}
+	return changed
 }
 
 // normalizeChatToolReasoningHistory ensures every assistant tool-call turn
@@ -878,7 +910,7 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 		if budget := reasoningBudget(request.Reasoning); budget <= 0 {
 			return
 		}
-		encoded := map[string]any{"role": "assistant", "content": nil}
+		encoded := map[string]any{"role": "assistant", "content": ""}
 		carryBudget(encoded)
 		if encoded["reasoning_budget_tokens"] == nil {
 			return
@@ -907,7 +939,7 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 			if len(results) > 0 {
 				return nil, fmt.Errorf("messages[%d]: assistant message contains tool results", i)
 			}
-			encoded := map[string]any{"role": "assistant", "content": nil}
+			encoded := map[string]any{"role": "assistant", "content": ""}
 			carryBudget(encoded)
 			if value, ok := bridgeReasoningText(reasoning); ok {
 				encoded["reasoning_content"] = value

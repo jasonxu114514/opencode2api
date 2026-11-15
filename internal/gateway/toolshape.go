@@ -3,6 +3,7 @@ package gateway
 import (
 	_ "embed"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -86,39 +87,69 @@ func officialToolNames(v1 bool) []string {
 	return v2OfficialToolOrder
 }
 
-// OfficialToolCandidates returns client tool names equivalent to an official name.
-func OfficialToolCandidates(officialName string) []string {
+// OfficialToolCandidates returns client tool names equivalent to an official
+// name for the platform the client reported. exec_command is Codex's single
+// workhorse tool: shell maps to it directly, and the file tools get it as a
+// fallback with translated arguments. The fallbacks are registered only when
+// the client runs on Windows, where the adapter can synthesize a PowerShell
+// command, and only for clients that declare exec_command, so a Claude Code or
+// OpenCode client keeps its native tool names.
+func OfficialToolCandidates(officialName, platform string) []string {
 	switch strings.ToLower(officialName) {
 	case "bash", "shell":
-		return []string{"Bash"}
+		return []string{"Bash", "exec_command"}
 	case "edit":
-		return []string{"Edit"}
+		return windowsToolCandidates(platform, "Edit")
 	case "glob":
-		return []string{"Glob"}
+		return windowsToolCandidates(platform, "Glob")
 	case "grep":
-		return []string{"Grep"}
+		return windowsToolCandidates(platform, "Grep")
 	case "question":
 		return []string{"AskUserQuestion"}
 	case "read":
-		return []string{"Read"}
+		return windowsToolCandidates(platform, "Read")
 	case "skill":
-		return []string{"Skill"}
+		return windowsToolCandidates(platform, "Skill")
 	case "subagent", "task":
 		return []string{"Agent", "Task", "Subagent"}
 	case "todowrite":
-		return []string{"TodoWrite"}
+		return []string{"TodoWrite", "update_plan"}
 	case "webfetch":
-		return []string{"WebFetch"}
+		return windowsToolCandidates(platform, "WebFetch")
 	case "websearch":
-		return []string{"WebSearch"}
+		return windowsToolCandidates(platform, "WebSearch")
 	case "write":
-		return []string{"Write"}
+		return windowsToolCandidates(platform, "Write")
 	case "patch":
 		// Codex declares its patch tool as the custom tool apply_patch, so an
 		// official patch call has to come back under that name.
 		return []string{"Patch", "ApplyPatch", "apply_patch"}
 	default:
 		return nil
+	}
+}
+
+// windowsToolCandidates appends the Codex exec_command fallback when the client
+// runs on Windows, where the synthesized commands can be PowerShell. Other
+// platforms keep only the native client tool names.
+func windowsToolCandidates(platform string, names ...string) []string {
+	if !isWindowsPlatform(platform) {
+		return names
+	}
+	return append(names, "exec_command")
+}
+
+// isWindowsPlatform reports whether the client reported a Windows environment.
+// An unreported platform falls back to the gateway host, which is the client's
+// host when the gateway runs as a local proxy.
+func isWindowsPlatform(platform string) bool {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "windows", "win32", "windows_nt":
+		return true
+	case "", "unknown":
+		return runtime.GOOS == "windows"
+	default:
+		return false
 	}
 }
 
@@ -264,6 +295,13 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			delete(payload, "functions")
 		}
 	}
+	codexClient := false
+	for _, name := range declaredNames {
+		if sameToolName(name, "exec_command") {
+			codexClient = true
+			break
+		}
+	}
 	shaped := make([]any, 0, len(items)+len(officialToolNames(v1)))
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
@@ -276,10 +314,18 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			shaped = append(shaped, item)
 			continue
 		}
+		custom := isCustomToolDefinition(protocol, entry)
+		// Codex clients always declare exec_command. Some bridges render the
+		// freeform apply_patch tool as a plain function, which keeps the name
+		// but loses the custom marker; treat it as custom again so the
+		// official patch call is emitted as a custom tool call.
+		if !custom && codexClient && sameToolName(name, "apply_patch") {
+			custom = true
+		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
 		}
-		if protocol == wire.Responses && jsonutil.StringAt(entry, "type") == "custom" {
+		if custom {
 			renames.MarkCustom(name)
 		}
 		// The free tier also rejects literal wording in client descriptions.
@@ -297,7 +343,8 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 	shaped = append(shaped, officialToolset(protocol, v1, platform)...)
 	payload["tools"] = shaped
 	officialNames := officialToolNames(v1)
-	bindOfficialToolAliases(renames, declaredNames, officialNames)
+	bindOfficialToolAliases(renames, declaredNames, officialNames, platform)
+	bindExecCommandAdapters(renames, platform)
 	declared := make(map[string]string, len(declaredNames))
 	for _, name := range declaredNames {
 		if wireName, ok := renames.Wire(name); ok {
@@ -309,9 +356,9 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 	return renames, true
 }
 
-func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialNames []string) {
+func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialNames []string, platform string) {
 	for _, official := range officialNames {
-		candidates := OfficialToolCandidates(official)
+		candidates := OfficialToolCandidates(official, platform)
 		for _, declared := range declaredNames {
 			if _, exists := renames.Wire(declared); !exists {
 				continue
@@ -327,6 +374,69 @@ func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialN
 			}
 		}
 	}
+	// Codex is the only client with a patch tool, and its shape changed: older
+	// builds declare a freeform apply_patch tool, while 0.17x declares no patch
+	// tool at all and expects the model to run the apply_patch command through
+	// exec_command. A lane whose official set has no patch tool (the 1.x lane)
+	// still has to fold a model's "patch" call back onto whichever tool the
+	// client can handle, so the binding is made for every lane.
+	if _, bound := renames.Official("patch"); !bound {
+		if declared, ok := firstDeclaredTool(renames, declaredNames, OfficialToolCandidates("patch", platform)); ok {
+			renames.BindOfficial("patch", declared)
+		} else if declared, ok := firstDeclaredTool(renames, declaredNames, []string{"exec_command"}); ok {
+			renames.BindOfficial("patch", declared)
+		}
+	}
+}
+
+// firstDeclaredTool returns the declared client tool that the first candidate
+// name resolves to, so a client declaring both apply_patch and exec_command
+// keeps its dedicated patch tool.
+func firstDeclaredTool(renames *wire.ToolRenames, declaredNames, candidates []string) (string, bool) {
+	for _, candidate := range candidates {
+		match := renames.Restore(candidate)
+		for _, declared := range declaredNames {
+			if declared == match {
+				return match, true
+			}
+		}
+	}
+	return "", false
+}
+
+// isCustomToolDefinition reports whether one tool was declared as a freeform
+// custom tool (Codex's apply_patch). Chat and Anthropic carry custom tools as
+// functions with the bridge's single-string input schema; Responses marks them
+// with type "custom".
+func isCustomToolDefinition(protocol wire.Protocol, entry map[string]any) bool {
+	switch protocol {
+	case wire.Responses:
+		return jsonutil.StringAt(entry, "type") == "custom"
+	case wire.Chat:
+		function, _ := entry["function"].(map[string]any)
+		parameters, _ := function["parameters"].(map[string]any)
+		return isCustomToolSchema(parameters)
+	default:
+		return false
+	}
+}
+
+// isCustomToolSchema matches the function schema the bridge renders for a
+// Responses custom tool: exactly one freeform string input.
+func isCustomToolSchema(schema map[string]any) bool {
+	if schema == nil {
+		return false
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	if len(properties) != 1 {
+		return false
+	}
+	input, _ := properties["input"].(map[string]any)
+	if input == nil || jsonutil.StringAt(input, "type") != "string" {
+		return false
+	}
+	required, _ := schema["required"].([]any)
+	return len(required) == 1 && required[0] == "input"
 }
 
 func officialToolNameSet(v1 bool) map[string]bool {
@@ -444,8 +554,10 @@ func sanitizeToolHistory(payload map[string]any, protocol wire.Protocol, declare
 		keptItems := make([]any, 0, len(items))
 		for _, rawItem := range items {
 			item, _ := rawItem.(map[string]any)
-			if jsonutil.StringAt(item, "type") == "function_call_output" && dropped[jsonutil.StringAt(item, "call_id")] {
-				continue
+			if kind := jsonutil.StringAt(item, "type"); kind == "function_call_output" || kind == "custom_tool_call_output" {
+				if dropped[jsonutil.StringAt(item, "call_id")] {
+					continue
+				}
 			}
 			if kind := jsonutil.StringAt(item, "type"); kind == "function_call" || kind == "custom_tool_call" {
 				if _, ok := historyToolWireName(jsonutil.StringAt(item, "name"), declared, renames, laneOfficial); !ok {
