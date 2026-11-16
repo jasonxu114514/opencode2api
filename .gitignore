@@ -13,6 +13,7 @@ opencode/
 coverage.out
 *.test
 *.test.exe
+test/
 
 *.rotation.json
 .rotation-*.tmp

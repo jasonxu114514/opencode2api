@@ -540,7 +540,9 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 						request.System = append(request.System, blocks...)
 					} else if role == "developer" {
 						request.Developer = append(request.Developer, blocks...)
-					} else if role == "user" || role == "assistant" {
+					} else if role == "assistant" {
+						appendBridgeBlock(&request.Messages, role, blocks...)
+					} else if role == "user" {
 						request.Messages = append(request.Messages, bridgeMessage{Role: role, Blocks: blocks})
 					}
 				default:
@@ -659,19 +661,19 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	return request, nil
 }
 
-// appendBridgeBlock adds a block decoded from a standalone Responses item. It
-// joins the previous message when that has the same role and holds only tool
-// calls or results, so consecutive function_call (or function_call_output)
-// items form one turn; otherwise the block starts a new message.
-func appendBridgeBlock(messages *[]bridgeMessage, role string, block bridgeBlock) {
+// appendBridgeBlock adds blocks decoded from a standalone Responses item. It
+// joins adjacent assistant items into one turn, including interleaved text,
+// reasoning and tool calls. Tool results join only a preceding tool-only user
+// message, so results and user input keep assistant turns separate.
+func appendBridgeBlock(messages *[]bridgeMessage, role string, blocks ...bridgeBlock) {
 	if len(*messages) > 0 {
 		last := &(*messages)[len(*messages)-1]
-		if last.Role == role && bridgeBlocksOnlyTools(last.Blocks) {
-			last.Blocks = append(last.Blocks, block)
+		if last.Role == role && (role == "assistant" || bridgeBlocksOnlyTools(last.Blocks)) {
+			last.Blocks = append(last.Blocks, blocks...)
 			return
 		}
 	}
-	*messages = append(*messages, bridgeMessage{Role: role, Blocks: []bridgeBlock{block}})
+	*messages = append(*messages, bridgeMessage{Role: role, Blocks: blocks})
 }
 
 // bridgeBlocksOnlyTools reports whether blocks is non-empty and holds only

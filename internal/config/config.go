@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"opencode2api/internal/jsonutil"
 	wire "opencode2api/internal/protocol"
@@ -133,7 +134,44 @@ type UpstreamConfig struct {
 	// anonymous lane uses only this origin: the v1 /zen fallback is retired for
 	// free models and its call site is commented out. Empty means
 	// https://opencode.ai/inference.
-	Anonymous string `json:"anonymous"`
+	Anonymous         string                   `json:"anonymous"`
+	PromptEnvironment *PromptEnvironmentConfig `json:"prompt_environment,omitempty"`
+}
+
+type PromptEnvironmentConfig struct {
+	WorkingDirectory string `json:"working_directory,omitempty"`
+	WorkspaceRoot    string `json:"workspace_root,omitempty"`
+	Platform         string `json:"platform,omitempty"`
+	IsGitRepo        *bool  `json:"is_git_repo,omitempty"`
+}
+
+func (environment *PromptEnvironmentConfig) Normalize() error {
+	if environment == nil {
+		return nil
+	}
+	for name, value := range map[string]string{
+		"working_directory": environment.WorkingDirectory,
+		"workspace_root":    environment.WorkspaceRoot,
+	} {
+		for _, character := range value {
+			if unicode.IsControl(character) || character == '\u2028' || character == '\u2029' || character == '<' || character == '>' {
+				return fmt.Errorf("upstream.prompt_environment.%s must not contain control characters, line separators, or angle brackets", name)
+			}
+		}
+	}
+	platform := strings.ToLower(strings.TrimSpace(environment.Platform))
+	if platform == "windows" {
+		platform = "win32"
+	}
+	switch platform {
+	case "", "linux", "darwin", "win32":
+	default:
+		return errors.New("upstream.prompt_environment.platform must be linux, darwin, win32, windows, or empty")
+	}
+	environment.WorkingDirectory = strings.TrimSpace(environment.WorkingDirectory)
+	environment.WorkspaceRoot = strings.TrimSpace(environment.WorkspaceRoot)
+	environment.Platform = platform
+	return nil
 }
 
 // RetryConfig bounds the upstream retries. MaxAttempts caps the attempts of a
@@ -344,6 +382,17 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Listen == "" {
 		return Config{}, errors.New("listen must not be empty")
+	}
+	if cfg.Upstream.PromptEnvironment != nil {
+		environment := *cfg.Upstream.PromptEnvironment
+		if err := environment.Normalize(); err != nil {
+			return Config{}, err
+		}
+		if environment.IsGitRepo != nil {
+			isGitRepo := *environment.IsGitRepo
+			environment.IsGitRepo = &isGitRepo
+		}
+		cfg.Upstream.PromptEnvironment = &environment
 	}
 	cfg.Upstream.Zen = strings.TrimSpace(cfg.Upstream.Zen)
 	cfg.Upstream.Go = strings.TrimSpace(cfg.Upstream.Go)
@@ -560,6 +609,14 @@ func Clone(cfg Config) Config {
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)
 	cfg.effectiveProxies = append([]string(nil), cfg.effectiveProxies...)
+	if cfg.Upstream.PromptEnvironment != nil {
+		environment := *cfg.Upstream.PromptEnvironment
+		if environment.IsGitRepo != nil {
+			isGitRepo := *environment.IsGitRepo
+			environment.IsGitRepo = &isGitRepo
+		}
+		cfg.Upstream.PromptEnvironment = &environment
+	}
 	if cfg.Models.Protocols != nil {
 		protocols := make(map[string]string, len(cfg.Models.Protocols))
 		for key, value := range cfg.Models.Protocols {

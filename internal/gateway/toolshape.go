@@ -135,7 +135,7 @@ func officialToolDefinition(name string, v1 bool) (opencodeToolDefinition, bool)
 // officialTool renders one official definition in the wire shape the protocol
 // expects. The 2.x Chat shape marks every tool strict:false, as the client does;
 // the captured 1.x entries carry no strict field and are rendered verbatim.
-func officialTool(protocol wire.Protocol, name string, v1 bool) map[string]any {
+func officialTool(protocol wire.Protocol, name string, v1 bool, platform string) map[string]any {
 	description := "Agent tool " + name
 	parameters := map[string]any{"type": "object", "properties": map[string]any{}}
 	if definition, ok := officialToolDefinition(name, v1); ok {
@@ -146,10 +146,10 @@ func officialTool(protocol wire.Protocol, name string, v1 bool) map[string]any {
 	}
 	if v1 {
 		if name == "bash" {
-			description = v1BashDescription(description)
+			description = v1BashDescription(description, platform)
 		}
 	} else if name == "shell" {
-		description = v2ShellDescription(description)
+		description = v2ShellDescription(description, platform)
 	}
 	switch protocol {
 	case wire.Chat:
@@ -179,39 +179,58 @@ func officialTool(protocol wire.Protocol, name string, v1 bool) map[string]any {
 }
 
 // officialToolset renders the full official set for a lane.
-func officialToolset(protocol wire.Protocol, v1 bool) []any {
+func officialToolset(protocol wire.Protocol, v1 bool, platform string) []any {
 	names := officialToolNames(v1)
 	tools := make([]any, 0, len(names))
 	for _, name := range names {
-		tools = append(tools, officialTool(protocol, name, v1))
+		tools = append(tools, officialTool(protocol, name, v1, platform))
 	}
 	return tools
 }
 
-// v2ShellDescription renders the shell tool description for the host platform.
-// The 2.x client describes the shell it actually has, so a Windows host says
-// powershell where a Unix host says bash.
-func v2ShellDescription(base string) string {
-	if runtime.GOOS != "windows" {
+// v2ShellDescription renders the configured platform's shell description,
+// retaining the host-based behavior when no platform override is supplied.
+func v2ShellDescription(base, platform string) string {
+	if platform == "" {
+		platform = runtime.GOOS
+		if platform != "windows" {
+			return base
+		}
+	}
+	switch platform {
+	case "win32", "windows":
+		return strings.Replace(base, "on Linux using bash", "on Windows using powershell", 1)
+	case "darwin":
+		return strings.Replace(base, "on Linux using bash", "on macOS using bash", 1)
+	default:
 		return base
 	}
-	return strings.Replace(base, "on Linux using bash", "on Windows using powershell", 1)
 }
 
 // v1BashDescription applies the same platform rewrite to the 1.x bash
 // definition, which states its OS and shell inline.
-func v1BashDescription(base string) string {
-	if runtime.GOOS != "windows" {
+func v1BashDescription(base, platform string) string {
+	if platform == "" {
+		platform = runtime.GOOS
+		if platform != "windows" {
+			return base
+		}
+	}
+	switch platform {
+	case "win32", "windows":
+		return strings.Replace(base, "OS: linux, Shell: bash", "OS: windows, Shell: powershell", 1)
+	case "darwin":
+		return strings.Replace(base, "OS: linux, Shell: bash", "OS: darwin, Shell: bash", 1)
+	default:
 		return base
 	}
-	return strings.Replace(base, "OS: linux, Shell: bash", "OS: windows, Shell: powershell", 1)
 }
 
 // renameAndCompleteTools makes the tool list read as an official CLI session:
 // every named client tool is renamed to an opaque wire name, legacy functions
 // arrays are converted, and the full official set for the lane is appended.
 // The returned map restores the client names in the upstream response.
-func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 bool) (*wire.ToolRenames, bool) {
+func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 bool, platform string) (*wire.ToolRenames, bool) {
 	switch protocol {
 	case wire.Chat, wire.Responses, wire.Anthropic:
 	default:
@@ -245,7 +264,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 					}
 				}
 			}
-			items = append(items, convertLegacyFunctions(legacy, protocol, renames, used)...)
+			items = append(items, convertLegacyFunctions(legacy, protocol)...)
 			delete(payload, "functions")
 		}
 	}
@@ -266,7 +285,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 		shaped = append(shaped, entry)
 	}
-	shaped = append(shaped, officialToolset(protocol, v1)...)
+	shaped = append(shaped, officialToolset(protocol, v1, platform)...)
 	payload["tools"] = shaped
 	officialNames := officialToolNames(v1)
 	bindOfficialToolAliases(renames, declaredNames, officialNames)
@@ -558,8 +577,8 @@ func setToolName(protocol wire.Protocol, entry map[string]any, name string) {
 }
 
 // convertLegacyFunctions turns the pre-tools "functions" array into entries of
-// the protocol's tool shape and renames their names.
-func convertLegacyFunctions(entries []any, protocol wire.Protocol, renames *wire.ToolRenames, used map[string]bool) []any {
+// the protocol's tool shape for the shared renaming pass.
+func convertLegacyFunctions(entries []any, protocol wire.Protocol) []any {
 	converted := make([]any, 0, len(entries))
 	for _, raw := range entries {
 		entry, ok := raw.(map[string]any)
@@ -570,12 +589,11 @@ func convertLegacyFunctions(entries []any, protocol wire.Protocol, renames *wire
 		if name == "" {
 			continue
 		}
-		wireName := clientWireName(renames, used, name)
 		description := jsonutil.StringAt(entry, "description")
 		switch protocol {
 		case wire.Chat:
 			function := map[string]any{
-				"name":        wireName,
+				"name":        name,
 				"description": description,
 				"parameters":  legacyParameters(entry),
 			}
@@ -586,7 +604,7 @@ func convertLegacyFunctions(entries []any, protocol wire.Protocol, renames *wire
 		case wire.Responses:
 			tool := map[string]any{
 				"type":        "function",
-				"name":        wireName,
+				"name":        name,
 				"description": description,
 				"parameters":  legacyParameters(entry),
 			}

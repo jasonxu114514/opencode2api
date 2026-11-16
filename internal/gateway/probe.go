@@ -57,7 +57,7 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 // free tier by prepareAnonymousBody. v1 reports whether the probe targets the
 // v1 lane (models.IsV1Upstream), which selects the 1.x toolset instead of the
 // 2.x one.
-func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) ([]byte, error) {
+func probePayload(model string, protocol wire.Protocol, effort string, v1 bool, environment *config.PromptEnvironmentConfig) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
 		return json.Marshal(map[string]any{"model": model, "state": "1 + 1 = 2", "questions": map[string]any{
@@ -76,7 +76,7 @@ func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) 
 	if err != nil {
 		return nil, err
 	}
-	shaped, _ := prepareAnonymousBody(b, protocol, v1)
+	shaped, _ := prepareAnonymousBody(b, protocol, v1, environment)
 	return shaped, nil
 }
 
@@ -224,7 +224,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 // (http_<status>, model_unavailable, probe_timeout, warp_unavailable, ...) and
 // whether the upstream rejected the reasoning effort.
 func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string, overWARP bool) probeResult {
-	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL))
+	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment)
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
 	}

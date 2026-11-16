@@ -226,7 +226,7 @@ func warpProxy(label string) *proxyTransport {
 // proxy. The lane breaker still applies; per-proxy cooldowns and the block
 // cursor do not, because a block is a property of the WARP exit and rotation
 // replaces it.
-func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
+func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (response *http.Response, resultErr error, resultAttempts int) {
 	if !g.anonymous.AllowAttempt() {
 		return nil, errAnonymousLanePaused, 0
 	}
@@ -240,7 +240,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	prepared := make([][]byte, len(upstreams))
 	renames := make([]*wire.ToolRenames, len(upstreams))
 	for index, baseURL := range upstreams {
-		prepared[index], renames[index] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL))
+		prepared[index], renames[index] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment)
 	}
 	// A 429 is scoped to the exit that carried it, so the request keeps
 	// rotating exits until the configured attempt budget is spent; only then
@@ -253,6 +253,11 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	}
 	firstEventTimeout := time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds) * time.Second
 	var lastResponse *http.Response
+	defer func() {
+		if lastResponse != nil && lastResponse != response {
+			httpx.DrainAndClose(lastResponse.Body)
+		}
+	}()
 	var lastErr error
 	blocked, halted := false, false
 	attempts := 0
@@ -265,6 +270,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			break
 		}
 		leaseBlocked := false
+		lastStatus := 0
 		for index, baseURL := range upstreams {
 			if ctx.Err() != nil {
 				break
@@ -275,10 +281,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				meta.Attempts = attemptOffset + attempts
 				meta.Tier = string(config.TierZen)
 			}
-			if lastResponse != nil {
-				httpx.DrainAndClose(lastResponse.Body)
-				lastResponse = nil
-			}
+			bufferRetryResponse(lastResponse)
 			req, err := upstreamRequest(ctx, baseURL, protocol, prepared[index], ids, anonymousZenKey)
 			if err != nil {
 				return nil, err, attempts
@@ -287,21 +290,23 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			started := time.Now()
 			resp, egress, err := g.doWARPAttempt(ctx, req, baseURL, route.ID, firstEventTimeout)
 			duration := time.Since(started)
+			lastResponse = replaceRetryResponse(lastResponse, resp)
 			if ctx.Err() != nil {
-				lastResponse, lastErr = resp, err
+				lastErr = err
 				if lastErr == nil && lastResponse == nil {
 					lastErr = ctx.Err()
 				}
 				break
 			}
 			status := upstreamStatus(resp)
+			lastStatus = status
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, warpProxy(egress), resp, err, duration)
 			if err == nil && status/100 == 2 {
 				g.anonymous.NoteSuccess()
 				g.logger.Debug("anonymous WARP upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "status", status, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
-			lastResponse, lastErr = resp, err
+			lastErr = err
 			if err != nil {
 				g.logger.Debug("anonymous WARP transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "duration_ms", duration.Milliseconds(), "error", err)
 				// A broken tunnel affects both upstream gates; rotate the exit
@@ -335,23 +340,27 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 		if halted || ctx.Err() != nil {
 			break
 		}
-		if status := upstreamStatus(lastResponse); status == http.StatusTooManyRequests {
+		if lastStatus == http.StatusTooManyRequests {
 			if !g.warp.HasUntriedActive(triedEgresses) {
 				break
 			}
 		}
-		if !leaseBlocked && upstreamStatus(lastResponse) != http.StatusTooManyRequests {
+		if !leaseBlocked && lastStatus != http.StatusTooManyRequests {
 			if pause, tripped := g.anonymous.NoteFailure(); tripped {
-				g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", upstreamStatus(lastResponse), "paused_for", pause.String())
+				g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", lastStatus, "paused_for", pause.String())
 				break
 			}
 		}
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err(), attempts
 	}
 	if halted {
 		return lastResponse, errDeterministicClientRejection, attempts
 	}
 	if isTitle {
 		if fallback := titleFallback(g.logger, route.ID, rawBody, lastResponse, lastErr); fallback != nil {
+			lastResponse = nil
 			return fallback, nil, attempts
 		}
 	}

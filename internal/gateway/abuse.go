@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"opencode2api/internal/httpx"
 )
 
 // errFreeTierIPBlocked reports that OpenCode's free gateway refused the request
@@ -90,6 +92,29 @@ func peekResponseBody(resp *http.Response) []byte {
 		return nil
 	}
 	return prefix
+}
+
+// bufferRetryResponse releases a response's transport before the next attempt,
+// retaining at most 64 KiB of its body, including any prefix read before an error.
+func bufferRetryResponse(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+}
+
+// replaceRetryResponse keeps the latest HTTP response across transport failures
+// and closes a superseded response before giving ownership to its replacement.
+func replaceRetryResponse(previous, current *http.Response) *http.Response {
+	if current == nil {
+		return previous
+	}
+	if previous != nil && previous != current {
+		httpx.DrainAndClose(previous.Body)
+	}
+	return current
 }
 
 // peekNetworkAbuseBlock classifies a response without consuming its body.
