@@ -220,6 +220,26 @@ func warpProxy(label string) *proxyTransport {
 	return &proxyTransport{name: label}
 }
 
+// warpRetryIDs refreshes the upstream session and project after a 429. The
+// gateway request ID stays stable so attempts remain traceable in local logs.
+func warpRetryIDs(ids identity.RequestIDs, previous *http.Response) identity.RequestIDs {
+	if upstreamStatus(previous) != http.StatusTooManyRequests {
+		return ids
+	}
+	newSession := func() string {
+		return identity.CanonicalSessionID(identity.RandomID("warp_retry", 16))
+	}
+	ids.Session = newSession()
+	ids.Project = identity.RandomProjectID()
+	if ids.ChildSession != "" {
+		ids.ChildSession = newSession()
+	}
+	if ids.ParentSession != "" {
+		ids.ParentSession = newSession()
+	}
+	return ids
+}
+
 // doWarpAnonymousUpstream is the anonymous lane with WARP as its only egress.
 // It walks the same two upstream gates (v2 /inference first, v1 /zen second)
 // as doAnonymousUpstream, but draws a WARP lease per attempt instead of a
@@ -275,6 +295,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				meta.Attempts = attemptOffset + attempts
 				meta.Tier = string(config.TierZen)
 			}
+			ids = warpRetryIDs(ids, lastResponse)
 			if lastResponse != nil {
 				httpx.DrainAndClose(lastResponse.Body)
 				lastResponse = nil
