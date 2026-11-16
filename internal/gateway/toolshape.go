@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unicode"
 
 	"opencode2api/internal/jsonutil"
 	wire "opencode2api/internal/protocol"
@@ -245,7 +246,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 					}
 				}
 			}
-			items = append(items, convertLegacyFunctions(legacy, protocol, renames, used)...)
+			items = append(items, convertLegacyFunctions(legacy, protocol)...)
 			delete(payload, "functions")
 		}
 	}
@@ -264,6 +265,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
 		}
+		sanitizeClientToolFingerprint(protocol, entry)
 		shaped = append(shaped, entry)
 	}
 	shaped = append(shaped, officialToolset(protocol, v1)...)
@@ -558,8 +560,8 @@ func setToolName(protocol wire.Protocol, entry map[string]any, name string) {
 }
 
 // convertLegacyFunctions turns the pre-tools "functions" array into entries of
-// the protocol's tool shape and renames their names.
-func convertLegacyFunctions(entries []any, protocol wire.Protocol, renames *wire.ToolRenames, used map[string]bool) []any {
+// the protocol's tool shape; the shared shaping loop then renames them.
+func convertLegacyFunctions(entries []any, protocol wire.Protocol) []any {
 	converted := make([]any, 0, len(entries))
 	for _, raw := range entries {
 		entry, ok := raw.(map[string]any)
@@ -570,12 +572,11 @@ func convertLegacyFunctions(entries []any, protocol wire.Protocol, renames *wire
 		if name == "" {
 			continue
 		}
-		wireName := clientWireName(renames, used, name)
 		description := jsonutil.StringAt(entry, "description")
 		switch protocol {
 		case wire.Chat:
 			function := map[string]any{
-				"name":        wireName,
+				"name":        name,
 				"description": description,
 				"parameters":  legacyParameters(entry),
 			}
@@ -586,7 +587,7 @@ func convertLegacyFunctions(entries []any, protocol wire.Protocol, renames *wire
 		case wire.Responses:
 			tool := map[string]any{
 				"type":        "function",
-				"name":        wireName,
+				"name":        name,
 				"description": description,
 				"parameters":  legacyParameters(entry),
 			}
@@ -680,6 +681,99 @@ func rewriteToolReferences(payload map[string]any, protocol wire.Protocol, renam
 					rename(block)
 				}
 			}
+		}
+	}
+}
+
+// obfuscateToolDescription inserts zero-width spaces between prose words.
+// Quoted text and Markdown code spans are kept intact. The operation is
+// idempotent so repeated shaping does not accumulate invisible characters.
+func obfuscateToolDescription(description string) string {
+	runes := []rune(description)
+	var result strings.Builder
+	var quote rune
+	code := false
+	escaped := false
+	for i, r := range runes {
+		if escaped {
+			result.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			result.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if quote == 0 && r == '`' {
+			code = !code
+			result.WriteRune(r)
+			continue
+		}
+		if !code && (r == '"' || r == '\'') {
+			if quote == r {
+				quote = 0
+			} else if quote == 0 && (r != '\'' || i == 0 || !unicode.IsLetter(runes[i-1])) {
+				quote = r
+			}
+			result.WriteRune(r)
+			continue
+		}
+		if !code && quote == 0 && r == ' ' && i > 0 && i+1 < len(runes) && unicode.IsLetter(runes[i-1]) && unicode.IsLetter(runes[i+1]) {
+			result.WriteRune('\u200b')
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
+}
+
+// sanitizeClientToolFingerprint only changes descriptions of client-supplied
+// function tools; property names, defaults, and other schema values stay intact.
+func sanitizeClientToolFingerprint(protocol wire.Protocol, entry map[string]any) {
+	definition := entry
+	if protocol == wire.Chat {
+		function, ok := entry["function"].(map[string]any)
+		if !ok {
+			return
+		}
+		definition = function
+	}
+	if description, ok := definition["description"].(string); ok {
+		definition["description"] = obfuscateToolDescription(description)
+	}
+	schemaKey := "parameters"
+	if protocol == wire.Anthropic {
+		schemaKey = "input_schema"
+	}
+	sanitizeSchemaDescriptions(definition[schemaKey])
+}
+
+// Walk nested schemas, including arrays and composition keywords, without
+// changing strings used as property names, examples, defaults, or enums.
+func sanitizeSchemaDescriptions(value any) {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			if key == "description" {
+				if description, ok := child.(string); ok {
+					node[key] = obfuscateToolDescription(description)
+				}
+				continue
+			}
+			switch key {
+			case "properties", "patternProperties", "$defs", "definitions":
+				if fields, ok := child.(map[string]any); ok {
+					for _, schema := range fields {
+						sanitizeSchemaDescriptions(schema)
+					}
+				}
+			case "items", "additionalProperties", "not", "if", "then", "else", "allOf", "anyOf", "oneOf", "prefixItems":
+				sanitizeSchemaDescriptions(child)
+			}
+		}
+	case []any:
+		for _, child := range node {
+			sanitizeSchemaDescriptions(child)
 		}
 	}
 }
