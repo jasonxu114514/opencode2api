@@ -507,7 +507,7 @@ func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 // that mentions neither a client alias nor a tool-call marker cannot name a
 // tool, so it is handed on without decoding. The markers are the protocol's
 // own spellings; folding an unprefixed official name (todowrite) needs the
-// frame decoded even when no clint_ alias is present.
+// frame decoded even when no wire-name alias is present.
 func mayCarryToolName(body []byte) bool {
 	return bytes.Contains(body, []byte(ClientToolPrefix)) ||
 		bytes.Contains(body, []byte(`"tool_calls"`)) ||
@@ -520,7 +520,7 @@ func mayCarryToolName(body []byte) bool {
 // RenameResponseTool rewrites tool call names that carry a client alias back to
 // the name the client declared, inside a serialized JSON response or SSE event
 // data object for the given protocol. It is the counterpart of the outbound
-// clint_ renaming applied to shaped free-tier requests.
+// wire-name renaming applied to shaped free-tier requests.
 //
 // mayCarryToolName is only a fast path that skips the unmarshal for frames that
 // cannot contain a tool name; every rewrite is a map lookup after decoding.
