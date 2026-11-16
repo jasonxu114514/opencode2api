@@ -48,17 +48,24 @@ go build -trimpath -o opencode2api ./cmd/opencode2api
 
 升级前请备份程序、配置及轮转状态，再停止服务并替换可执行文件。旧版本不认识新增的 `server_key_metadata` 和 `rotation` 字段；回退时应同时恢复旧程序和旧配置。
 
-## SOTA / 甜点模型轮转
+## 模型轮转（内置 + 自定义分组）
 
 管理页：`/#rotation`。调用时继续使用 网关的 Base URL（默认
-`http://127.0.0.1:8080/v1`）和已有 API Key，将 `model` 设为 `sota` 或
-`sweet`。两个别名列入 `/v1/models`，支持 Chat Completions、Responses 和
+`http://127.0.0.1:8080/v1`）和已有 API Key，将 `model` 设为分组别名（如 `sota`
+或 `sweet`）。别名列入 `/v1/models`，支持 Chat Completions、Responses 和
 Messages，以及这三种协议的流式输出。真实模型 ID 的原有调用路径保持不变。
+
+分组同时使用 Zen 与 Go 两个 Key Tier：在两者都提供的模型上遵循 `prefer`
+顺序，仅某一 Tier 提供的模型使用该 Tier 的 Key；轮转不经过匿名通道。内置两个
+分组，并可新增任意数量的自定义分组：
 
 - SOTA 固定成员：`deepseek-v4.1-flash`、`glm-5.3`、`grok-4.6`、`kimi-k3`、
   `qwen3.8-max`，默认按上述顺序。
-- 甜点组包含其余 Go 可用模型，初次以 `glm-5.3-flash` 为首，随后按名称排序。
-  新模型追加在末尾；下架或协议不受支持的模型保留在列表，但不参与调用。
+- 甜点组为兜底分组：`order` 为空时自动纳入其余所有可用 Zen / Go 模型（按名称
+  排序，新模型追加在末尾）；非空时收敛为列出的成员。下架或协议不受支持的模型
+  保留在列表，但不参与调用。
+- 自定义分组仅轮转其 `order` 中列出的模型，成员可来自 Go 或 Zen，不自动扩充，
+  至少需要一个模型。
 - 每组共享一个当前模型。成功后保持位置；失败切换后，下次从新位置开始。
   并发请求通过位置版本号避免旧请求把游标移回去；手动切换不打断在途回答。
 - 普通错误每模型最多 3 次（包含首次），每请求最多消耗 3 个普通错误模型预算。
@@ -78,15 +85,18 @@ Messages，以及这三种协议的流式输出。真实模型 ID 的原有调�
   不记录上游错误正文、请求正文或密钥。最近保留 100 条尝试和每组 30 条切换。
 
 配置保存于 `config.json` 的 `rotation` 字段：`sota` / `sweet` 各有 `alias`
-和 `order`；状态单独原子写入 `config.json.rotation.json`（0600），包括当前
-位置、版本、动态追加的顺序、暂停期限和最近记录。修改 Key 或其他配置时
-沿用同一个轮转状态管理器。页面展示状态写入失败提示，首次无法写入则拒绝启动。
+和 `order`，`custom` 为自定义分组数组（每组含 `alias` 与 `order`）；状态单独
+原子写入 `config.json.rotation.json`（0600），包括当前位置、版本、动态追加的
+顺序、暂停期限和最近记录。修改 Key 或其他配置时沿用同一个轮转状态管理器。
+页面展示状态写入失败提示，首次无法写入则拒绝启动。
 
 管理接口均需要现有管理 Session，写入另需 CSRF：
 
-- `GET /api/rotation`：分组配置、可用状态、暂停期限、切换和尝试记录。
-- `PUT /api/rotation`：提交 `sota` / `sweet` 的 `alias`、完整 `order`，以及
-  `first_output_seconds`；别名不得重复或与真实模型 ID 冲突，成员不得跨组。
+- `GET /api/rotation`：分组配置、可用状态、暂停期限、切换、尝试记录，以及可
+  供自定义分组选择的模型列表 `available_models`。
+- `PUT /api/rotation`：提交 `sota` / `sweet` 的 `alias`、完整 `order`，
+  `custom` 分组数组，以及 `first_output_seconds`；别名不得重复或与真实模型 ID
+  冲突，自定义分组至少一个成员。
 - `POST /api/rotation/current`：`{"group":"sota","model":"glm-5.3"}`；立即
   修改当前模型并解除该模型的临时暂停。
 
