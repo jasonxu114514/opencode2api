@@ -17,6 +17,7 @@ import (
 	"opencode2api/internal/buildinfo"
 	"opencode2api/internal/config"
 	"opencode2api/internal/gateway"
+	"opencode2api/internal/goauth"
 	"opencode2api/internal/httpx"
 	"opencode2api/internal/telemetry"
 	"opencode2api/webui"
@@ -37,6 +38,9 @@ type Server struct {
 	lastInference *DebugInferenceResult
 	quotaMu       sync.Mutex
 	quotaCache    map[string]quotaCacheEntry
+	goAuthMu      sync.Mutex
+	goAuth        map[string]*goAuthAttempt
+	goAuthClient  *goauth.Client
 }
 
 // New returns a Server for manager, reporting to monitor and logs.
@@ -44,6 +48,7 @@ func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *t
 	return &Server{
 		manager: manager, monitor: monitor, logs: logs, logger: logger, sessions: make(map[string]adminSession),
 		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow),
+		goAuth: make(map[string]*goAuthAttempt), goAuthClient: goauth.NewClient(nil),
 	}
 }
 
@@ -72,6 +77,11 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/rotation", a.authenticate(a.csrf(http.HandlerFunc(a.handleSaveRotation))))
 	mux.Handle("POST /api/rotation/current", a.authenticate(a.csrf(http.HandlerFunc(a.handleSelectRotation))))
 	mux.Handle("GET /api/model-quotas", a.authenticate(http.HandlerFunc(a.handleModelQuotas)))
+	mux.Handle("GET /api/go/auth", a.authenticate(http.HandlerFunc(a.handleGoAuthStatus)))
+	mux.Handle("POST /api/go/auth/start", a.authenticate(a.csrf(http.HandlerFunc(a.handleGoAuthStart))))
+	mux.Handle("POST /api/go/auth/poll", a.authenticate(a.csrf(http.HandlerFunc(a.handleGoAuthPoll))))
+	mux.Handle("DELETE /api/go/auth", a.authenticate(a.csrf(http.HandlerFunc(a.handleGoAuthCancel))))
+	mux.Handle("DELETE /api/go/connection", a.authenticate(a.csrf(http.HandlerFunc(a.handleGoDisconnect))))
 	mux.Handle("GET /api/api-keys", a.authenticate(http.HandlerFunc(a.handleListAPIKeys)))
 	mux.Handle("POST /api/api-keys", a.authenticate(a.csrf(http.HandlerFunc(a.handleCreateAPIKey))))
 	mux.Handle("PATCH /api/api-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleUpdateAPIKey))))
@@ -254,13 +264,31 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	candidate := config.Config{
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
+		GoSubscription:    current.GoSubscription,
 		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Warp: update.Warp, Proxies: proxies, ProxyFile: update.ProxyFile,
 		ProxyBindings: proxyBindings,
 		Upstream:      update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
 	}
-	result, err := a.manager.Apply(candidate, true)
+	result, err := a.manager.Update(func(latest *config.Config) error {
+		if !a.goAuthSessionValid(goAuthOwner(r), *latest) {
+			return errors.New("management session is no longer active")
+		}
+		candidate.GoSubscription = latest.GoSubscription
+		candidate.ServerKeyMetadata = latest.ServerKeyMetadata
+		candidate.Rotation = latest.Rotation
+		candidate.WebUI.Username = latest.WebUI.Username
+		candidate.WebUI.PasswordHash = latest.WebUI.PasswordHash
+		if update.Reasoning == nil {
+			candidate.Reasoning = latest.Reasoning
+		}
+		if update.ProxyBindings == nil {
+			candidate.ProxyBindings = latest.ProxyBindings
+		}
+		*latest = candidate
+		return nil
+	})
 	if err != nil {
 		a.logger.Warn("configuration update rejected", "component", "config", "event", "config_rejected", "error", err)
 		writeAdminError(w, http.StatusBadRequest, "configuration_rejected", err.Error())

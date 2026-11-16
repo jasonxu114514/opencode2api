@@ -176,7 +176,12 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); zen = g.refreshZen(ctx) }()
-	go func() { defer wg.Done(); goModels = g.refreshTier(ctx, g.cfg.Upstream.Go, g.goNodes) }()
+	go func() {
+		defer wg.Done()
+		if g.cfg.GoSubscription == nil {
+			goModels = g.refreshTier(ctx, g.cfg.Upstream.Go, g.goNodes)
+		}
+	}()
 	go func() {
 		defer wg.Done()
 		capabilityCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -189,6 +194,9 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) {
 	}
 	if capabilitiesErr != nil {
 		g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
+	}
+	if g.cfg.GoSubscription != nil {
+		goModels = g.seedGoSubscriptionCatalog(&capabilities)
 	}
 	if zen != nil || goModels != nil {
 		g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)

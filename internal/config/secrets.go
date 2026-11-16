@@ -66,6 +66,12 @@ func (r *Redactor) Replace(cfg Config) {
 	values = append(values, cfg.ServerKeys...)
 	values = append(values, cfg.ZenKeys...)
 	values = append(values, cfg.GoKeys...)
+	if cfg.GoSubscription != nil {
+		values = append(values, cfg.GoSubscription.Credential.AccessToken, cfg.GoSubscription.Credential.RefreshToken)
+		if cfg.GoSubscription.Proxy != "" {
+			values = append(values, cfg.GoSubscription.Proxy)
+		}
+	}
 	if cfg.WebUI.Password != "" {
 		values = append(values, cfg.WebUI.Password)
 	}

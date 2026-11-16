@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"opencode2api/internal/goauth"
 	"opencode2api/internal/jsonutil"
 	wire "opencode2api/internal/protocol"
 	"opencode2api/internal/warp"
@@ -33,6 +34,7 @@ type Config struct {
 	ServerKeyMetadata map[string]ServerKeyMetadata `json:"server_key_metadata,omitempty"`
 	ZenKeys           []string                     `json:"zen_keys"`
 	GoKeys            []string                     `json:"go_keys"`
+	GoSubscription    *goauth.Connection           `json:"go_subscription,omitempty"`
 	Anonymous         bool                         `json:"anonymous"`
 	Warp              WarpConfig                   `json:"warp"`
 	Proxies           []string                     `json:"proxies"`
@@ -377,6 +379,26 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if err := resolveProxyFiles(path, &cfg); err != nil {
 		return Config{}, err
 	}
+	if cfg.GoSubscription != nil {
+		connection := cloneGoSubscription(cfg.GoSubscription)
+		if err := connection.Validate(); err != nil {
+			return Config{}, errors.New("go_subscription contains an invalid credential or unsupported subscription route")
+		}
+		connection.Proxy = strings.TrimSpace(connection.Proxy)
+		if connection.Proxy != "" {
+			matched := false
+			for _, proxy := range cfg.RuntimeProxies() {
+				if proxy == connection.Proxy {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return Config{}, errors.New("go_subscription.proxy must name a configured proxy")
+			}
+		}
+		cfg.GoSubscription = connection
+	}
 	if cfg.Prefer != TierZen && cfg.Prefer != TierGo {
 		return Config{}, errors.New("prefer must be \"zen\" or \"go\"")
 	}
@@ -412,7 +434,7 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if cfg.FirstEnabledServerKey() == "" {
 		return Config{}, errors.New("at least one server key must remain enabled")
 	}
-	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 {
+	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 && cfg.GoSubscription == nil {
 		return Config{}, errors.New("zen_keys or go_keys must contain at least one upstream key unless anonymous is enabled")
 	}
 	if cfg.Retry.MaxAttempts < 1 {
@@ -607,6 +629,7 @@ func Clone(cfg Config) Config {
 	cfg.ServerKeyMetadata = metadata
 	cfg.ZenKeys = append([]string(nil), cfg.ZenKeys...)
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
+	cfg.GoSubscription = cloneGoSubscription(cfg.GoSubscription)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)
 	cfg.effectiveProxies = append([]string(nil), cfg.effectiveProxies...)
 	if cfg.Upstream.PromptEnvironment != nil {
@@ -639,6 +662,18 @@ func Clone(cfg Config) Config {
 		cfg.ProxyBindings = bindings
 	}
 	return cfg
+}
+
+func cloneGoSubscription(source *goauth.Connection) *goauth.Connection {
+	if source == nil {
+		return nil
+	}
+	connection := *source
+	connection.Routes = make(map[string]goauth.Route, len(source.Routes))
+	for model, route := range source.Routes {
+		connection.Routes[model] = route
+	}
+	return &connection
 }
 
 // normalizeProxyBindings validates and canonicalizes explicit per-key proxy

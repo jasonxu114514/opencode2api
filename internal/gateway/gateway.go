@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/goauth"
 	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
@@ -95,7 +96,9 @@ type Gateway struct {
 	// anonymous cursor. Zero uses freeTierBlockTTL.
 	freeTierBlock time.Duration
 	// refreshMu prevents overlapping catalog refreshes across concurrent or scheduled callers.
-	refreshMu sync.Mutex
+	refreshMu                    sync.Mutex
+	resolveGoSubscription        func(context.Context) (*goauth.Connection, error)
+	onGoSubscriptionUnauthorized func(context.Context, goauth.Credential)
 }
 
 // New builds a Gateway for cfg: one proxy transport per runtime proxy (a
@@ -121,14 +124,18 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
 	}
-	goNodes, err := nodePool(cfg.GoKeys, transports, cooldown, cfg.ProxyBindings)
+	goKeys := cfg.GoKeys
+	if cfg.GoSubscription != nil {
+		goKeys = nil
+	}
+	goNodes, err := nodePool(goKeys, transports, cooldown, cfg.ProxyBindings)
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}
 	catalog := models.Catalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
-	return &Gateway{
+	gateway := &Gateway{
 		cfg:            cfg,
 		rotation:       rotationManager,
 		logger:         logger,
@@ -141,7 +148,9 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 		monitor:        monitor,
 		attemptTimeout: attemptDeadline(cfg),
 		freeTierBlock:  time.Duration(cfg.Performance.FreeTierBlockSeconds) * time.Second,
-	}, nil
+	}
+	gateway.restoreGoSubscriptionCatalog()
+	return gateway, nil
 }
 
 // anonymousBackoffFromConfig converts the configured hours into the breaker's
@@ -276,7 +285,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			g.handleRotation(w, r, external, payload, id, model)
 			return
 		}
-		if !g.catalog.Supported(model) {
+		subscriptionModel := false
+		if g.cfg.GoSubscription != nil {
+			_, subscriptionModel = g.cfg.GoSubscription.Routes[model]
+		}
+		if !subscriptionModel && !g.catalog.Supported(model) {
 			// A model the catalog has never heard of is a bad model NAME: 404
 			// tells a client to pick a different model. A model the catalog
 			// knows but cannot serve is a capability or routing problem, and
@@ -292,13 +305,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			}
 			return
 		}
-		route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+		route, err := g.routeForModel(model, "")
 		if override, selected := debugKeyOverrideFrom(r.Context()); selected {
 			// A per-key diagnostic must not silently be served by another key,
 			// another tier or the anonymous lane.
-			route, err = g.catalog.RouteForTier(model, override.Tier, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0)
+			route, err = g.routeForModel(model, override.Tier)
 		}
 		if err != nil {
+			var oauthError *goauth.OAuthError
+			if errors.As(err, &oauthError) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "subscription_auth_error", "")
+				return
+			}
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 			return
 		}
@@ -379,6 +397,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				// slow, which is not the client's fault, and stays a 504.
 				status, message, code := timeoutStatus(err, requestCtx.Err() == nil)
 				wire.WriteError(w, external, status, message, code, ids.Request)
+				return
+			}
+			var subscriptionError *goauth.OAuthError
+			if errors.As(err, &subscriptionError) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, subscriptionError.Error(), "subscription_auth_error", ids.Request)
 				return
 			}
 			// Every exit this request could use is under the free tier's IP
@@ -515,7 +538,7 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+	route, err := g.routeForModel(model, "")
 	if err != nil {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 		return
@@ -649,6 +672,13 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		baseURL := g.cfg.Upstream.Zen
 		if tier == config.TierGo {
 			baseURL = g.cfg.Upstream.Go
+			if g.cfg.GoSubscription != nil {
+				subscriptionRoute, ok := g.cfg.GoSubscription.Routes[route.ID]
+				if !ok {
+					return nil, errors.New("model is not included in the connected Go subscription")
+				}
+				baseURL = subscriptionRoute.BaseURL
+			}
 		}
 		upstreamPayload, err := wire.PrepareRequest(from, protocol, input, baseURL)
 		if err != nil {

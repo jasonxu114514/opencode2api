@@ -70,6 +70,9 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, models := g.availableModels()
 	proxyTotal, proxyHealthy := g.transports.healthCounts()
 	zenKeys, goKeys := g.zenNodes.Len(), g.goNodes.Len()
+	if g.cfg.GoSubscription != nil {
+		goKeys = 1
+	}
 	staleAfter := max(2*time.Duration(g.cfg.Models.RefreshSeconds)*time.Second, time.Minute)
 	var warpStatus *healthWarp
 	warpActive := 0
@@ -93,6 +96,9 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	modelStatus := "ready"
 	var lastRefresh *time.Time
 	issues := make([]string, 0, 3)
+	if g.cfg.GoSubscription != nil && g.cfg.GoSubscription.NeedsLogin {
+		issues = append(issues, "go_subscription_authorization_required")
+	}
 	if models.UpdatedAt.IsZero() {
 		modelStatus = "pending"
 		issues = append(issues, "model_catalog_pending")
@@ -161,7 +167,29 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (g *Gateway) availableModels() ([]modelcatalog.Route, modelcatalog.CatalogSnapshot) {
-	return g.catalog.AvailableModels(g.zenNodes.Len() > 0, g.goNodes.Len() > 0, g.cfg.Anonymous)
+	if g.cfg.GoSubscription == nil {
+		return g.catalog.AvailableModels(g.zenNodes.Len() > 0, g.goNodes.Len() > 0, g.cfg.Anonymous)
+	}
+	modelIDs := g.catalog.List()
+	seen := make(map[string]bool, len(modelIDs)+len(g.cfg.GoSubscription.Routes))
+	for _, model := range modelIDs {
+		seen[model] = true
+	}
+	for model := range g.cfg.GoSubscription.Routes {
+		if !seen[model] {
+			modelIDs = append(modelIDs, model)
+		}
+	}
+	slices.Sort(modelIDs)
+	routes := make([]modelcatalog.Route, 0, len(modelIDs))
+	for _, model := range modelIDs {
+		if route, err := g.routeForModel(model, ""); err == nil {
+			routes = append(routes, route)
+		}
+	}
+	snapshot := g.catalog.Snapshot()
+	snapshot.Exposed = len(routes)
+	return routes, snapshot
 }
 
 // reasoningLevels are the effort values the gateway accepts and forwards, from
@@ -256,12 +284,12 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		data = append(data, entry)
 	}
 	for _, group := range g.rotation.Snapshot().Groups {
-		if g.goNodes.Len() == 0 {
+		if !g.goAvailable() {
 			continue
 		}
 		available := false
 		for _, model := range group.Order {
-			if route, err := g.catalog.RouteForTier(model, config.TierGo, false, true); err == nil && route.Protocol != wire.SystemOne {
+			if route, err := g.routeForModel(model, config.TierGo); err == nil && route.Protocol != wire.SystemOne {
 				available = true
 				break
 			}

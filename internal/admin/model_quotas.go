@@ -147,16 +147,28 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	cfg := a.manager.Config()
 	endpoint := strings.TrimRight(cfg.Upstream.Go, "/") + "/v1/usage"
 	accounts := make([]quotaAccount, len(cfg.GoKeys))
+	if connection := cfg.GoSubscription; connection != nil {
+		accounts = []quotaAccount{{
+			ID:      config.Fingerprint(connection.Credential.AccountID + "\x00" + connection.Credential.OrganizationID),
+			Display: "Go subscription (OAuth)", Status: "unavailable", CheckedAt: time.Now().UTC(),
+			Error: "OpenCode 未提供已验证的 OAuth 订阅额度接口，额度保持未知。",
+		}}
+		endpoint = ""
+	}
 	// Coalesce refreshes from multiple browser tabs; at most four upstream
 	// queries run at a time.
 	a.quotaMu.Lock()
 	if a.quotaCache == nil {
 		a.quotaCache = map[string]quotaCacheEntry{}
 	}
-	entries := make([]quotaCacheEntry, len(cfg.GoKeys))
+	keys := cfg.GoKeys
+	if cfg.GoSubscription != nil {
+		keys = nil
+	}
+	entries := make([]quotaCacheEntry, len(keys))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
-	for i, key := range cfg.GoKeys {
+	for i, key := range keys {
 		cacheID := endpoint + "|" + config.Fingerprint(key)
 		previous := a.quotaCache[cacheID]
 		if time.Now().Before(previous.Expires) {
@@ -178,7 +190,7 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	cache := map[string]quotaCacheEntry{}
-	for i, key := range cfg.GoKeys {
+	for i, key := range keys {
 		cache[endpoint+"|"+config.Fingerprint(key)] = entries[i]
 		accounts[i] = entries[i].Account
 	}
@@ -196,9 +208,13 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 			models = append(models, modelView{ID: model.Model, Protocol: string(protocol)})
 		}
 	}
+	note := "OpenCode 返回套餐共享额度，未提供逐模型独立余额；多个 Go Key 可能属于同一套餐，不能相加。百分比由上游取整。"
+	if cfg.GoSubscription != nil {
+		note = "OAuth 订阅使用官方 Go 推理路由；未提供已验证的订阅额度接口，不查询手动 Go Key 或按量计费余额。"
+	}
 	httpx.WriteJSON(w, 200, map[string]any{
 		"models": models, "accounts": accounts, "scope": "shared_subscription", "source": endpoint,
 		"cache_seconds": 60, "catalog": a.manager.Resources().Models,
-		"note": "OpenCode 返回套餐共享额度，未提供逐模型独立余额；多个 Go Key 可能属于同一套餐，不能相加。百分比由上游取整。",
+		"note": note,
 	})
 }

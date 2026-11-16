@@ -480,6 +480,16 @@ Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP �
 
 执行后，管理接口返回 HTTP 200，实际结果位于 `ok`、`http_status`、`request_id`、`route` 和 `response`。指定 Key 时还返回 `selected_key` 与 `key_test`，其值包括 `usable`、`rejected`、`rate_limited`、`transport_error`、`upstream_error`、`request_error`、`unavailable`。管理请求格式、认证、CSRF 和限速错误仍返回各自对应的 HTTP 状态。
 
+### Go 订阅登录
+
+在「模型与额度」页面（`/#model-quotas`）点击「浏览器登录 Go 订阅」，打开页面显示的 OpenCode 官方 Device OAuth 链接，输入显示的 `user_code`。确认这是自己发起的授权后完成登录；WebUI 按间隔请求后端轮询并完成授权交换，无需手贴 Token、导入本机凭证文件或提交回调 URL。账号关联多个组织时，在 WebUI 选择 Go 订阅所在的组织。
+
+- 后端按需自动刷新访问凭证，并将连接保存到本地配置的 `go_subscription`。其中包含访问和刷新凭证，属于敏感信息，请保护配置文件及备份；WebUI 不接收这些凭证。
+- 「断开 Go 订阅登录」仅移除网关保存的连接，不撤销 OpenCode 官方会话。手动配置的 `go_keys` 仍保留，但 OAuth 连接期间不作备用通道；断开后恢复原有手动 Key 路由。登录失效时应重新登录，而非依赖手动 Key 回退。
+- OAuth 只使用已确认的官方 Go 订阅路由，不回退到按量付费（PAYG）通道。OAuth 额度当前显示为「未知」，不根据模型或请求结果推算；手动 Go Key 仍可使用原有额度查询接口。
+
+实现参考上游源码快照：[v2 `4617210822bdbb31e5749751afbfb4584ccedac8`](https://github.com/anomalyco/opencode/tree/4617210822bdbb31e5749751afbfb4584ccedac8)、[dev `7745079647b65036fe142e09ccd8623b25be1878`](https://github.com/anomalyco/opencode/tree/7745079647b65036fe142e09ccd8623b25be1878)。源码对比和本地检查不代表已通过真实订阅登录验证，上游授权或路由仍可能变化。生命周期和管理接口见[管理控制台说明](docs/management.zh-CN.md)。
+
 ### 界面语言
 
 WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English**、**Tiếng Việt** 和 **Italiano**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。

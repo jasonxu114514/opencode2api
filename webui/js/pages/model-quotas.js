@@ -1,6 +1,7 @@
 // Page: 模型与额度 — Go quota windows and free model availability.
 import { api, hasSession } from "../api.js";
 import { loadDebugModels } from "../data.js";
+import * as goAuth from "../go-auth.js";
 import { t, onChange } from "../i18n.js";
 import { $, bindTabs, copyText, el, emptyRow, localTime, toast } from "../ui.js";
 
@@ -14,36 +15,44 @@ let data = null;
 let timer = null;
 let loading = false;
 let activeTab = "quota";
+let generation = 0;
 
 async function load() {
   if (loading) return;
+  const operation = generation;
   loading = true;
   $("#quota-refresh").disabled = true;
   $("#quota-refresh").textContent = t("读取中…", "quotas.loading");
   try {
     const value = await api("/api/model-quotas");
-    if (!hasSession()) return;
+    if (operation !== generation || !hasSession()) return;
     data = value;
     const select = $("#quota-account");
     const selected = select.value;
     select.replaceChildren();
     for (const account of value.accounts || []) {
-      select.append(el("option", { value: account.id, text: `Go Key ${account.display}` }));
+      select.append(el("option", {
+        value: account.id,
+        text: value.source === "" ? account.display : `Go Key ${account.display}`,
+      }));
     }
     if ([...select.options].some((option) => option.value === selected)) select.value = selected;
     if (!select.options.length)
       select.append(el("option", { value: "", text: t("尚未配置 Go Key", "quotas.noKey") }));
     render();
   } catch (error) {
+    if (operation !== generation || !hasSession()) return;
     $("#quota-status").textContent = t(
       `查询失败：${error.message}。已有显示仅为上次查询结果。`,
       "quotas.queryFailed",
       error.message,
     );
   } finally {
-    loading = false;
-    $("#quota-refresh").disabled = false;
-    $("#quota-refresh").textContent = t("刷新额度", "quotas.refresh");
+    if (operation === generation) {
+      loading = false;
+      $("#quota-refresh").disabled = false;
+      $("#quota-refresh").textContent = t("刷新额度", "quotas.refresh");
+    }
   }
 }
 
@@ -258,12 +267,15 @@ export default {
   title: "模型与额度",
   sub: "共享套餐额度与免费模型探测状态。",
   init() {
+    goAuth.init(load);
     bindTabs($("#page-model-quotas"), (id) => {
       activeTab = id;
       if (id === "quota") {
+        goAuth.show();
         load();
         startPolling();
       } else {
+        goAuth.hide();
         stopPolling();
         loadAvailability();
       }
@@ -284,6 +296,7 @@ export default {
   },
   show() {
     if (activeTab === "quota") {
+      goAuth.show();
       load();
       startPolling();
     } else {
@@ -291,10 +304,29 @@ export default {
     }
   },
   hide() {
+    goAuth.hide();
     stopPolling();
   },
   refresh() {
-    if (activeTab === "quota") load();
-    else loadAvailability();
+    if (activeTab === "quota") {
+      goAuth.refresh();
+      load();
+    } else loadAvailability();
+  },
+  reset() {
+    generation++;
+    data = null;
+    loading = false;
+    stopPolling();
+    goAuth.reset();
+    $("#quota-account").replaceChildren();
+    $("#quota-cards").replaceChildren();
+    $("#quota-models").replaceChildren();
+    $("#quota-updated").textContent = "";
+    $("#quota-catalog-status").textContent = "";
+    $("#quota-model-count").textContent = "";
+    $("#quota-refresh").disabled = false;
+    $("#quota-refresh").textContent = t("刷新额度", "quotas.refresh");
+    $("#quota-status").textContent = t("进入页面后读取额度。", "quotas.pending");
   },
 };

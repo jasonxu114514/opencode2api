@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -105,6 +106,7 @@ func (a *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		delete(a.sessions, tokenDigest(cookie.Value))
 		a.mu.Unlock()
+		a.cancelGoAuth(tokenDigest(cookie.Value))
 	}
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1, Secure: requestIsSecure(r)})
 	w.WriteHeader(http.StatusNoContent)
@@ -194,19 +196,26 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusForbidden, "verification_failed", "current password is incorrect")
 		return
 	}
-	if username := strings.TrimSpace(input.Username); username != "" {
-		cfg.WebUI.Username = username
-	}
-	if input.NewPassword != "" {
-		cfg.WebUI.Password = input.NewPassword
-	}
-	if _, err := a.manager.Apply(cfg, true); err != nil {
+	_, err := a.manager.Update(func(latest *config.Config) error {
+		if !a.goAuthSessionValid(goAuthOwner(r), *latest) || !config.VerifyPassword(latest.WebUI.PasswordHash, input.CurrentPassword) {
+			return errors.New("management account changed; sign in again")
+		}
+		if username := strings.TrimSpace(input.Username); username != "" {
+			latest.WebUI.Username = username
+		}
+		if input.NewPassword != "" {
+			latest.WebUI.Password = input.NewPassword
+		}
+		return nil
+	})
+	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, "account_update_failed", err.Error())
 		return
 	}
 	a.mu.Lock()
 	a.sessions = make(map[string]adminSession)
 	a.mu.Unlock()
+	a.cancelGoAuth("")
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1, Secure: requestIsSecure(r)})
 	a.logger.Info("admin account updated", "component", "auth", "event", "account_updated", "client_ip", clientIP(r))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"updated": true, "reauthenticate": true})

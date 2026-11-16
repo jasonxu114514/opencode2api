@@ -486,6 +486,16 @@ The server forces `stream: false`. Use `{"mode":"selected","tier":"zen","id":"KE
 
 After execution, the management endpoint returns HTTP 200 with the actual result in `ok`, `http_status`, `request_id`, `route`, and `response`. Selected-key results also include `selected_key` and `key_test`: `usable`, `rejected`, `rate_limited`, `transport_error`, `upstream_error`, `request_error`, or `unavailable`. Invalid management input, authentication, CSRF, and throttling retain their own HTTP error statuses.
 
+### Go subscription sign-in
+
+In **Models & Quota** (`/#model-quotas`), select **Sign in to Go in your browser**, open the displayed official OpenCode Device OAuth link, and enter the displayed `user_code`. Authorize the request you initiated; the WebUI schedules backend polling to complete sign-in. No token pasting, local credential-file import, or callback URL submission is required. If the account has multiple organizations, select the organization with the Go subscription in the WebUI.
+
+- The backend refreshes access credentials when needed and persists the connection in the local configuration (`go_subscription`). This includes access and refresh secrets: protect the configuration and its backups. These credentials are not sent to the WebUI.
+- **Disconnect** removes the gateway's saved connection, not the official OpenCode session. Manually configured `go_keys` are retained but are not fallback routes while OAuth is connected; disconnecting restores their existing routing. If sign-in becomes invalid, reconnect rather than relying on those keys as a fallback.
+- OAuth uses only confirmed official Go subscription routes, never a pay-as-you-go route as fallback. OAuth quota is currently shown as **unknown**; the gateway does not infer remaining allowance from models or request results. The existing usage endpoint remains available for manually configured Go keys.
+
+The implementation follows the upstream source snapshots [v2 `4617210822bdbb31e5749751afbfb4584ccedac8`](https://github.com/anomalyco/opencode/tree/4617210822bdbb31e5749751afbfb4584ccedac8) and [dev `7745079647b65036fe142e09ccd8623b25be1878`](https://github.com/anomalyco/opencode/tree/7745079647b65036fe142e09ccd8623b25be1878). Source compatibility and local checks are not a claim of live subscription validation; upstream authorization and routing can change. See the [management guide](docs/management.zh-CN.md) for lifecycle and management endpoints.
+
 ### Interface language
 
 The WebUI loads its translations from `webui/js/i18n.js`. It ships with **简体中文** (default), **English**, **Tiếng Việt**, and **Italiano**. The original Simplified Chinese copy lives in `index.html` and `webui/js/` and stays the fallback for every string without a translation, so adding a language never rewrites the original.

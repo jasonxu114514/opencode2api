@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/goauth"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	"opencode2api/internal/models"
@@ -26,7 +27,7 @@ import (
 func (g *Gateway) syncRotation() {
 	available := map[string]bool{}
 	for _, model := range g.catalog.List() {
-		if route, err := g.catalog.RouteForTier(model, config.TierGo, false, g.goNodes.Len() > 0); err == nil && route.Protocol != wire.SystemOne {
+		if route, err := g.routeForModel(model, config.TierGo); err == nil && route.Protocol != wire.SystemOne {
 			available[model] = true
 		}
 	}
@@ -101,6 +102,10 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 		meta.Session = ids.Session
 		meta.ModelAlias = alias
 	}
+	if g.cfg.GoSubscription != nil && g.cfg.GoSubscription.NeedsLogin {
+		wire.WriteError(w, external, http.StatusServiceUnavailable, (&goauth.OAuthError{Code: "invalid_grant"}).Error(), "subscription_auth_error", ids.Request)
+		return
+	}
 	visited := map[string]bool{}
 	ordinaryModels, total := 0, 0
 	for ctx.Err() == nil {
@@ -109,8 +114,13 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 			break
 		}
 		visited[token.Model] = true
-		route, err := g.catalog.RouteForTier(token.Model, config.TierGo, false, g.goNodes.Len() > 0)
+		route, err := g.routeForModel(token.Model, config.TierGo)
 		if err != nil {
+			var oauthError *goauth.OAuthError
+			if errors.As(err, &oauthError) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "subscription_auth_error", ids.Request)
+				return
+			}
 			continue
 		}
 		counted := false
@@ -146,6 +156,14 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 				return
 			}
 			if result.err == nil {
+				return
+			}
+			var oauthError *goauth.OAuthError
+			if errors.As(result.err, &oauthError) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "subscription_auth_error", ids.Request)
+				return
+			}
+			if g.cfg.GoSubscription != nil && result.reason == "subscription_auth_error" {
 				return
 			}
 			if result.committed {
@@ -214,56 +232,73 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.reason = "request_conversion_error"
 		return result
 	}
-	body, toolRenames, shaped := g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
-	setRequestShape(parent, shaped, toolRenames)
-	cursor := g.goNodes.CursorFor(ids.Session)
-	var node *upstreamNode
-	// Each group attempt is exactly one HTTP call. Key selection may change,
-	// but there is no nested retry, stale-reasoning replay, or model-wide key ban.
-	for n := 0; n < attempt; n++ {
-		node = cursor.Next()
+	var resp *http.Response
+	var toolRenames *wire.ToolRenames
+	shaped := false
+	if g.cfg.GoSubscription != nil {
+		resp, err = g.goSubscriptionAttempt(ctx, route, bodies[config.TierGo], ids, attempt, attempt-1, 0)
+	} else {
+		var body []byte
+		body, toolRenames, shaped = g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
+		setRequestShape(parent, shaped, toolRenames)
+		cursor := g.goNodes.CursorFor(ids.Session)
+		var node *upstreamNode
+		for selection := 0; selection < attempt; selection++ {
+			node = cursor.Next()
+		}
+		if node == nil {
+			result.err = errors.New("no Go key")
+			return result
+		}
+		proxy := g.goNodes.Proxy(node)
+		if proxy == nil {
+			result.err = errors.New("no proxy")
+			return result
+		}
+		req, requestErr := upstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
+		if requestErr != nil {
+			result.err = requestErr
+			return result
+		}
+		req.GetBody = nil
+		client := *proxy.client
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
+		started := time.Now()
+		if proxy.pool {
+			req.Close = true
+		}
+		resp, err = doInferenceAttempt(&client, req, 0, g.attemptTimeout)
+		if err != nil && ctx.Err() != nil && parent.Err() == nil && !isProxyFailure(err) {
+			err = errFirstEventTimeout
+		}
+		g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
+		if parent.Err() == nil {
+			g.observeKeyResult(parent, g.goNodes, node, proxy, resp, err)
+		}
 	}
-	if node == nil {
-		result.err = errors.New("no Go key")
-		return result
-	}
-	proxy := g.goNodes.Proxy(node)
-	if proxy == nil {
-		result.err = errors.New("no proxy")
-		return result
-	}
-	req, err := upstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
-	if err != nil {
-		result.err = err
-		return result
-	}
-	// A reused connection must not cause net/http to implicitly replay POSTs.
-	req.GetBody = nil
-	client := *proxy.client
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
-	started := time.Now()
-	if proxy.pool {
-		req.Close = true
-	}
-	resp, err := doInferenceAttempt(&client, req, 0, g.attemptTimeout)
 	if err != nil && ctx.Err() != nil && parent.Err() == nil && !isProxyFailure(err) {
-		// The rotation-specific first-output deadline is not evidence that the
-		// proxy route failed. It still counts as a failed key attempt.
 		err = errFirstEventTimeout
 	}
-	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
 	if resp != nil {
 		defer resp.Body.Close()
 	}
-	if parent.Err() == nil {
-		g.observeKeyResult(parent, g.goNodes, node, proxy, resp, err)
-	}
 	if err != nil {
 		result.err = err
-		if errors.Is(err, errFirstEventTimeout) || ctx.Err() != nil {
+		var oauthError *goauth.OAuthError
+		if errors.As(err, &oauthError) {
+			result.reason = "subscription_auth_error"
+		} else if errors.Is(err, errFirstEventTimeout) || ctx.Err() != nil {
 			result.reason = "first_output_timeout"
 		}
+		return result
+	}
+	if g.cfg.GoSubscription != nil && resp.StatusCode == http.StatusUnauthorized {
+		w.Header().Set("x-request-id", ids.Request)
+		copyErrorResponse(w, external, resp, ids.Request)
+		result.err = errors.New("Go subscription authorization was rejected")
+		result.reason = "subscription_auth_error"
+		result.committed = true
 		return result
 	}
 	retryAfter := resp.Header.Get("Retry-After")

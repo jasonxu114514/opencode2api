@@ -650,6 +650,22 @@
               <section class="section">
                 <div class="section-head">
                   <div>
+                    <h2 class="section-title" data-i18n="goAuth.title">Go 订阅登录</h2>
+                    <p class="section-caption" data-i18n="goAuth.caption">通过 OpenCode 官方页面授权，无需复制凭证。手动 Go Key 仍保留，订阅连接期间不作备用通道，断开后恢复原有路由。</p>
+                  </div>
+                  <button id="go-auth-refresh" type="button" class="btn btn-sm" data-i18n="goAuth.refresh">刷新登录状态</button>
+                </div>
+                <div id="go-auth-content" class="stack" role="status" aria-live="polite"></div>
+                <div class="key-actions">
+                  <button id="go-auth-start" type="button" class="btn btn-sm btn-primary" data-i18n="goAuth.start">浏览器登录 Go 订阅</button>
+                  <button id="go-auth-cancel" type="button" class="btn btn-sm hidden" data-i18n="goAuth.cancel">取消本次登录</button>
+                  <button id="go-auth-disconnect" type="button" class="btn btn-sm btn-danger hidden" data-i18n="goAuth.disconnect">断开 Go 订阅登录</button>
+                </div>
+                <p class="section-caption" data-i18n="goAuth.notice">只接入已确认的 Go 订阅路由，不自动改用余额通道。OAuth 订阅额度查询不可用时显示未知，不推算剩余额度。</p>
+              </section>
+              <section class="section">
+                <div class="section-head">
+                  <div>
                     <h2 class="section-title" data-i18n="quotas.title">OpenCode Go 套餐额度</h2>
                     <p class="section-caption" data-i18n="quotas.caption">所有模型共享套餐窗口，百分比由上游取整。</p>
                   </div>
