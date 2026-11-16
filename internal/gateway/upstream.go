@@ -703,7 +703,7 @@ func (g *Gateway) inferenceClient(proxy *proxyTransport, baseURL, model string) 
 // tools are renamed and completed for the lane v1 selects; an unchanged body is
 // returned as is.
 //
-// Every named client tool becomes an opaque clint_<digest> (see
+// Every named client tool becomes an opaque wire name (see
 // protocol.ClientToolWireName: a client tool name that survives on the wire is
 // what the free tier refuses) and the full official set for the lane is
 // appended, so the request looks like an official CLI session on both the v1

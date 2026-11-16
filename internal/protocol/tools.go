@@ -12,7 +12,14 @@ import (
 // OpenCode set the gateway appends, and lets responses be restored to the names
 // the client declared. What follows it is a digest, never the client name: the
 // free tier refuses bodies that still read as another client's session.
-const ClientToolPrefix = "clint_"
+//
+// The free tier refuses the literal "clint_" (case-insensitively) in a tool
+// name while serving any other prefix, so this must stay a plain namespace a
+// tool name could carry. mcp_ also prefixes MCP clients' mcp__<server>__<tool>
+// names, so refusing it would refuse their traffic too.
+// shortcut: upstream may learn mcp_ as well; rotate this value when 429s return
+// only on tool-bearing requests.
+const ClientToolPrefix = "mcp_"
 
 // clientToolDigestLength is how many hex characters of the client name digest
 // a wire name carries. Twelve is far past the collision point for the handful
@@ -184,7 +191,7 @@ func (r *ToolRenames) HasLongerPrefix(prefix string) bool {
 // Resolve maps a tool name the upstream reported back to the name the client
 // declared. It is the response-side counterpart of the wire rename: an exact
 // wire name restores, an official alias maps to the matching client tool, a
-// clint_ prefix is stripped as a best-effort recovery (for example after a
+// wire-name prefix is stripped as a best-effort recovery (for example after a
 // configuration reload mid-stream), and a name that
 // differs from exactly one declared client tool only in case, or else only in
 // case and separators (todowrite → todo_write), is folded onto that tool. A

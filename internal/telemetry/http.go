@@ -44,7 +44,7 @@ type RequestMeta struct {
 	// and must be collapsed like anonymous ones.
 	Shaped bool
 	// ToolRenames counts the client tools the free-tier shaper renamed with
-	// the clint_ prefix. The upstream response is rewritten back to the
+	// the wire-name prefix. The upstream response is rewritten back to the
 	// client's names before it is returned.
 	ToolRenames    int
 	Usage          protocol.Usage
