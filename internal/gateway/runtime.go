@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/freequota"
 	modelcatalog "opencode2api/internal/models"
 	"opencode2api/internal/oauth"
 	"opencode2api/internal/protocol"
@@ -78,6 +79,9 @@ type RuntimeController struct {
 	// and stack are unchanged. warpKey is the identity used for that reuse.
 	warpPool *warp.Pool
 	warpKey  string
+	// freeQuota counts free-model usage across runtime rebuilds, so a config
+	// reload keeps today's counters.
+	freeQuota *freequota.Tracker
 }
 
 // EffectiveListeners are the listener settings the running process actually
@@ -100,6 +104,11 @@ func RuntimeManager(root context.Context, configPath string, cfg config.Config, 
 		effective: EffectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
 	manager.metadata = modelcatalog.PricingStore(configPath, logger)
+	freeQuotaPath := ""
+	if configPath != "" {
+		freeQuotaPath = configPath + ".freequota.json"
+	}
+	manager.freeQuota = freequota.Open(freeQuotaPath, freeQuotaOptions(cfg.FreeQuota))
 	// OpenCode metadata refreshes ride the active runtime's healthy proxy
 	// transports and fall back to the registry's direct client when none are
 	// available.
@@ -229,6 +238,9 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 			return nil, errors.New("Zen OAuth proxy configuration changed; retry with the current configuration")
 		}
 		return connection, nil
+	}
+	if m.freeQuota != nil {
+		gateway.freeQuota = m.freeQuota
 	}
 	availabilityPath := ""
 	if m.configPath != "" {
@@ -420,6 +432,9 @@ func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (
 			return ApplyResult{}, err
 		}
 	}
+	if m.freeQuota != nil {
+		m.freeQuota.Configure(freeQuotaOptions(normalized.FreeQuota))
+	}
 
 	result := ApplyResult{Applied: true}
 	if normalized.Listen != m.effective.API {
@@ -492,6 +507,18 @@ func (m *RuntimeController) Shutdown() {
 		m.warpPool = nil
 		m.warpKey = ""
 	}
+	if m.freeQuota != nil {
+		m.freeQuota.Close()
+	}
+}
+
+// FreeQuotas reports the current UTC day's free-model usage estimate.
+func (m *RuntimeController) FreeQuotas() freequota.Snapshot {
+	return m.freeQuota.Snapshot()
+}
+
+func freeQuotaOptions(cfg config.FreeQuotaConfig) freequota.Options {
+	return freequota.Options{AssumedDailyLimit: cfg.AssumedLimit()}
 }
 
 // ResourceSnapshot is the operator view of the current runtime's models, keys,

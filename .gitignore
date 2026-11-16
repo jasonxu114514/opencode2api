@@ -17,6 +17,8 @@ test/
 
 *.rotation.json
 .rotation-*.tmp
+*.freequota.json
+.freequota-*.tmp
 
 # Local credentials, deployment backups, and verification artifacts
 .local/

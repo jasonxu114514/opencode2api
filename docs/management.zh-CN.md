@@ -79,6 +79,17 @@ Key、代理、上游、超时、模型、偏好、reasoning 和日志设置热�
 | `logging.dump_request_bodies` | `false`；还需 debug 才输出，每个准备好的请求体最多 64 KiB。 |
 | `models.active_probes` | `false`；真实流量提供默认可用性观察。 |
 
+### 免费模型用量估算
+
+「免费模型」标签页还显示当天（UTC）按出口统计的免费模型请求，数据来自 `GET /api/free-quotas`。
+
+- 只统计客户端请求中上游返回 2xx 的响应；重试按每次真实请求分别计数，可用性探测不计入。
+- 出口为代理 URL、`direct` 或 WARP 出口网段。
+- 额度是估计值：只有当某个出口当天已经产生用量，并且收到的 `FreeUsageLimitError` 带有指向下一个 UTC 零点的 `Retry-After` 时，才把当时的用量记为该出口的下限。请求形状拒绝和短暂节流不会改变估计；学到的下限只属于该出口，跨 UTC 日保留。
+- `free_quota.assumed_daily_limit`（默认 200，`0` 表示未知）用于尚未学到下限的出口。该字段只能在 `config.json` 中修改，管理页面保存其他配置时会保留它。
+- 本地计数在 UTC 零点重置；上游是否同时重置未经验证。已用尽的出口不会在零点立即重新列出，而是在新一天的首个 2xx 请求后重新出现，且只反映本网关的观测。
+- 状态保存在配置文件旁的 `config.json.freequota.json`；文件缺失或损坏只会清空估计。
+
 ## Go OAuth 与 Zen PAYG OAuth
 
 「模型与额度」有两个独立面板。Go 使用订阅路由；Zen 使用 Console 工作区按量计费（PAYG），**推理会消耗该工作区 credits**。Go 登录不代表获得 Zen 权限或余额，不会自动连接 PAYG。

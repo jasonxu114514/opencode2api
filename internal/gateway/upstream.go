@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/freequota"
 	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
@@ -1292,6 +1293,21 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 			leg += "@" + config.RedactURL(proxy.name)
 		}
 		meta.Legs = append(meta.Legs, leg)
+	}
+	if g.freeQuota != nil && g.catalog.IsFreeModel(route.ID) {
+		// The free quota is scoped to the egress block, so the tracker keys on
+		// the same label the request log uses: a proxy URL, "direct", or the
+		// rotated WARP exit's block.
+		egress := "direct"
+		if proxy != nil {
+			egress = config.RedactURL(proxy.name)
+		}
+		event := freequota.Event{Time: time.Now().UTC(), Egress: egress, Status: status, TransportError: err != nil}
+		if resp != nil && status == http.StatusTooManyRequests {
+			event.Body = peekResponseBody(resp)
+			event.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		}
+		g.freeQuota.Record(event)
 	}
 	if g.monitor == nil {
 		return
