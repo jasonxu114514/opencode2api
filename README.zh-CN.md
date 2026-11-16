@@ -11,7 +11,7 @@ WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
 - 三种推理协议之间的普通 JSON 响应与 SSE 流式转换。
 - 文本、图片、reasoning、函数工具、工具调用和工具结果；目标协议允许时支持文件内容转换。
 - 独立的 Zen / Go Key 池，可配置优先级、重试和会话亲和性。
-- 使用 OpenCode `public` 凭证的可选 Zen 匿名通道。
+- 使用 OpenCode `public` 凭证的可选 Zen 匿名通道，默认关闭，上游封堵可能使其不可用。
 - 可选的用户态 Cloudflare WARP 出口，免费模型流量无需 TUN 或 root 权限。
 - 直连、HTTP、HTTPS、SOCKS5、SOCKS5H 连接，以及代理文件。
 - 动态模型发现、原生协议与能力信息、磁盘缓存。
@@ -53,8 +53,10 @@ go build -o opencode2api ./cmd/opencode2api
 启动前编辑 `config.json`：
 
 1. 将 `server_keys` 替换为自己的本地 API Key。
-2. 可选：填入 Zen 或 Go Key；示例已启用匿名通道，并清空两个上游 Key 数组。
+2. 在 `zen_keys` 填入 Zen API Key（推荐），或在 `go_keys` 填入 Go Key。示例关闭匿名通道，且两个上游 Key 数组为空，必须先配置上游凭证才能启动；已有的 Go 订阅连接也满足此要求。
 3. 替换 `webui.password`。示例配置启用了 WebUI，用户名为 `admin`。
+
+**匿名通道可能已被上游重点封堵，优先使用 Zen API Key。** 配置与 WebUI 默认关闭匿名访问；已有配置中明确设置的 `anonymous: true` 不会被自动改为关闭。只有接受免费请求仍可能失败时，才主动开启。
 
 ```bash
 ./opencode2api -config config.json
@@ -223,6 +225,8 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 ### 匿名通道与回退
 
+**匿名通道可能已被上游重点封堵，优先使用 Zen API Key。** 内置默认值与示例均为 `anonymous: false`，WebUI 不自动启用匿名通道，也不修改已有配置中明确设置的 `true`。
+
 启用 `anonymous: true` 后，满足以下任一条件的模型可以进入 Zen 匿名通道：
 
 - 模型 ID 包含 `free`，不区分大小写。
@@ -232,7 +236,7 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 路由顺序：
 
-1. 符合条件的模型最多尝试 `performance.max_anonymous_exits` 个可用匿名代理，每个代理一次；每个代理先走 v2 `/inference`，再走 v1 `/zen`。
+1. 符合条件的模型最多尝试 `performance.max_anonymous_exits` 个可用匿名代理，每个代理一次；仅使用 v2 `/inference`，免费模型的 v1 `/zen` 回退已停用。
 2. 按 `prefer` 顺序尝试认证通道，仅包含已配置 Key 且可以提供该模型的 Tier。
 3. 每个认证 Tier 分别使用 `retry.max_attempts` 预算。
 
@@ -248,7 +252,7 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 只有匿名通道可用时，`/v1/models` 仅展示符合匿名条件的模型。
 
-免费模型不需要 Zen Key：启用 `anonymous: true` 后由匿名通道提供，已配置的 Key 只作为回退。如果想保留 Key 但只暴露免费模型，设置 `models.free_only: true`：付费模型不再出现在 `/v1/models`，直接请求会被拒绝，轮转别名只保留免费成员；免费模型仍可回退到已配置的 Key。
+只有明确启用匿名通道后，符合条件的免费模型才可尝试不使用 Zen Key，但这不保证上游允许访问。如果想保留认证 Key 但只暴露免费模型，设置 `models.free_only: true`：付费模型不再出现在 `/v1/models`，直接请求会被拒绝，轮转别名只保留免费成员；匿名关闭时免费模型使用已配置的 Key，开启时也可回退到这些 Key。
 
 ### 免费模型 WARP 出口
 
@@ -319,7 +323,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 
 ## 配置参考
 
-完整起始配置见 [config.example.json](config.example.json)。配置支持 `//` 和 `/* ... */` 注释，未知字段和无效取值会被拒绝。
+起始配置见 [config.example.json](config.example.json)，启动前须添加上游凭证。配置文件读取器支持非标准 JSON 的 `//` 和 `/* ... */` 注释；管理接口请求体仍须使用标准 JSON。未知字段（包括 `_comment`）和无效取值会被拒绝。
 
 ### Key、监听地址与路由
 
@@ -327,8 +331,8 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | --------------------------- | ------------------------------------------------------------------------------------- |
 | `listen`                    | `127.0.0.1:8080`。                                                                    |
 | `server_keys`               | 至少一个本地 Key。                                                                    |
-| `zen_keys`、`go_keys`       | 未启用匿名模式时，至少需要一个上游 Key。                                              |
-| `anonymous`                 | `false`。                                                                             |
+| `zen_keys`、`go_keys`       | 未明确启用匿名模式时，至少需要一个上游 Key 或已有的 `go_subscription` 连接。           |
+| `anonymous`                 | `false`；须主动开启，上游封堵可能使其不可用，优先使用 Zen API Key。                    |
 | `warp.enabled`              | `false`；免费通道流量通过 Cloudflare WARP 出口，不使用代理。                          |
 | `warp.pool_size`            | `2`；WARP 出口上限（后台预注册一半，活跃出口按并发调整），1–32。                    |
 | `warp.stack`                | `ipv6`；可选 `ipv6`、`ipv4`、`dual`。                                                 |
@@ -336,7 +340,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `prefer`                    | `go`；可选 `go`、`zen`。                                                              |
 | `upstream.zen`              | `https://opencode.ai/zen`。                                                           |
 | `upstream.go`               | `https://opencode.ai/zen/go`。                                                        |
-| `upstream.anonymous`        | `https://opencode.ai/inference`；匿名通道优先使用，失败后回退到 `/zen`。             |
+| `upstream.anonymous`        | `https://opencode.ai/inference`；匿名通道仅使用此地址，已停用 v1 `/zen` 回退。          |
 | `proxies`                   | 两个代理来源都为空时，使用 `["direct"]`。                                             |
 | `proxyfile`                 | 可选；相对路径基于配置文件所在目录解析。                                              |
 | `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
@@ -459,6 +463,7 @@ pool+http://127.0.0.1:7891
 | `GET /api/monitor`                               | 请求、Token、上游和资源统计。                   |
 | `GET /api/debug/models`                          | 模型路由、Key 指纹和 metadata 诊断。            |
 | `POST /api/debug/inference`                      | 执行 Playground 请求。                          |
+| `POST /api/proxies/check`                        | 检查一个已保存或草稿代理到 Zen 上游的连通性。     |
 | `GET /api/logs`、`GET /api/logs/stream`          | 最近日志或 SSE 实时订阅。                       |
 
 Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP 每分钟最多 12 次：
@@ -479,6 +484,16 @@ Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP �
 **自动模式和指定 Key 模式都不会改变生产 Key 的冷却、失败次数，以及代理的健康状态和绑定关系。** 诊断仍会真实访问上游，可能消耗供应商配额，并会计入监控。
 
 执行后，管理接口返回 HTTP 200，实际结果位于 `ok`、`http_status`、`request_id`、`route` 和 `response`。指定 Key 时还返回 `selected_key` 与 `key_test`，其值包括 `usable`、`rejected`、`rate_limited`、`transport_error`、`upstream_error`、`request_error`、`unavailable`。管理请求格式、认证、CSRF 和限速错误仍返回各自对应的 HTTP 状态。
+
+### 批量代理管理
+
+WebUI 支持批量导入内联代理、检查选中条目和暂存批量移除。检查逐条调用 `POST /api/proxies/check`，需要管理登录和 `X-CSRF-Token`；请求体二选一：`{"id":"SAVED_PROXY_ID"}`（`GET /api/config` 返回的已保存代理 ID）或 `{"value":"https://proxy.example:8443"}`（草稿地址）。前端最多四个并发，后端最多八个，超出立即拒绝、不排队；每次检查限时 20 秒。
+
+**仅检查代理到 Zen 的连通性，不验证推理、Key 或额度。** 请求通过指定代理的独立 Bun 客户端向配置的 `upstream.zen` 加 `/v1/models` 发送无认证 GET，不带 Zen/Go Key、`public` 或 OAuth 凭证，不发推理、不跟随重定向、不走 WARP，也不修改正式健康、冷却或绑定状态。`anonymous: false` 时仍可检查，不会擅自启用匿名推理。
+
+成功执行检查后返回 HTTP 200，结果包含 `ok`、`state`、`reason`，以及可用时的 `status`、`latency_ms`。`available` 表示上游返回 200–399 或 401（401 仅表示到站后需要认证）；`unavailable` 仅限本次确认的代理端拒绝连接、DNS 失败或代理 407；429 为 `limited`，上游 403 等错误为 `rejected`，超时及其他不能定位的错误为 `inconclusive`。后三种状态不得当作确认损坏代理批量清理；本次不可用也不代表永久故障。
+
+移除只暂存在页面中，仍须通过 `PUT /api/config` 保存完整配置后才生效，检查本身不会删除代理。`proxyfile` 提供的代理在来源文件管理，不加入内联代理表格。
 
 ### Go 订阅登录
 

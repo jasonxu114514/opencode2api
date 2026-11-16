@@ -35,6 +35,23 @@ func ParseProxyEntry(raw string) (clean string, pool bool) {
 	return trimmed, pool
 }
 
+func ValidateProxyEntry(raw string) error {
+	if raw == "direct" {
+		return nil
+	}
+	clean, _ := ParseProxyEntry(raw)
+	parsed, err := url.Parse(clean)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
+		return fmt.Errorf("invalid proxy URL %q", RedactURL(raw))
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+		return nil
+	default:
+		return fmt.Errorf("unsupported proxy scheme %q", parsed.Scheme)
+	}
+}
+
 // resolveProxyFiles trims cfg.Proxies in place and stores the runtime proxy
 // list: those proxies followed by the entries of cfg.ProxyFile (resolved
 // against the directory of configPath when relative), deduplicated, or

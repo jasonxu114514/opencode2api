@@ -3,7 +3,8 @@
   "server_keys": ["change-this-local-key"],
   "zen_keys": [],
   "go_keys": [],
-  "anonymous": true,
+  // Anonymous traffic may be heavily blocked upstream. Prefer a Zen API Key.
+  "anonymous": false,
   "warp": {
     "enabled": false,
     "pool_size": 2,

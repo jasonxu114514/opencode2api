@@ -55,7 +55,7 @@ go build -o opencode2api ./cmd/opencode2api
 Trước khi khởi động, hãy sửa `config.json`:
 
 1. Thay `server_keys` bằng API key cục bộ của bạn.
-2. Tùy chọn: thêm key Zen hoặc Go; ví dụ đã bật làn ẩn danh và để trống cả hai mảng key thượng nguồn.
+2. Điền Zen API Key (khuyến nghị) vào `zen_keys` hoặc Go key vào `go_keys` trước khi khởi động. Cấu hình mẫu tắt truy cập ẩn danh (`anonymous: false`) và để trống cả hai mảng key; một kết nối thuê bao Go đã lưu cũng đáp ứng yêu cầu này. Làn ẩn danh có thể bị chặn mạnh ở thượng nguồn, nên ưu tiên Zen API Key.
 3. Thay `webui.password`. File mẫu bật WebUI với tài khoản `admin`.
 
 ```bash

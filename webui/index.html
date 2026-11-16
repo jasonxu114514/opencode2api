@@ -877,6 +877,7 @@
                         <input id="c-anonymous" type="checkbox" />
                         <span data-i18n="config.secrets.anonymous">启用 Zen 匿名通道</span>
                       </label>
+                      <p class="config-warning" data-i18n="config.secrets.anonymousWarning">匿名通道默认关闭，可能已被上游重点封堵。建议优先配置 Zen API Key；启用匿名不保证可用，也不会自动修改当前设置。</p>
                     </div>
                     <div class="field full">
                       <label for="server_keys-new">Server Keys</label>
@@ -916,7 +917,43 @@
                       <h2 class="section-title" data-i18n="config.proxy.title">Proxy 节点</h2>
                     </div>
                   </div>
-                  <div id="proxies-chips" class="chips"></div>
+                  <p class="config-warning" data-i18n="config.proxy.warning">仅检查指定代理到 Zen 的无认证连通性，不发模型推理、不验证额度、不使用上游 Key，也不依赖匿名通道开关。401 表示已到达上游且需认证；上游拒绝或限流不代表代理永久损坏，只有确认代理故障才会进入「选中确认故障」。</p>
+                  <p class="section-caption" data-i18n="config.proxy.scope">检查与移除仅管理下列内联代理和新增草稿；proxyfile 条目请在文件中管理。移除需保存后生效，绑定验证失败时不会自动删除绑定。</p>
+                  <div class="proxy-actions">
+                    <button id="proxies-check-filtered" type="button" class="btn btn-sm" data-i18n="config.proxy.checkFiltered">检查筛选结果</button>
+                    <button id="proxies-check-selected" type="button" class="btn btn-sm" data-i18n="config.proxy.checkSelected">检查所选</button>
+                    <button id="proxies-stop" type="button" class="btn btn-sm hidden" data-i18n="config.proxy.stop">停止检查</button>
+                    <button id="proxies-select-filtered" type="button" class="btn btn-sm btn-ghost" data-i18n="config.proxy.selectFiltered">全选筛选结果</button>
+                    <button id="proxies-select-unavailable" type="button" class="btn btn-sm btn-ghost" data-i18n="config.proxy.selectUnavailable">选中确认故障</button>
+                    <button id="proxies-clear-selection" type="button" class="btn btn-sm btn-ghost" data-i18n="config.proxy.clearSelection">取消选择</button>
+                    <button id="proxies-delete-selected" type="button" class="btn btn-sm btn-danger" data-i18n="config.proxy.deleteSelected">移除所选代理</button>
+                  </div>
+                  <div class="field proxy-search">
+                    <label for="proxies-search" data-i18n="config.proxy.search">搜索代理地址（不搜索认证信息）</label>
+                    <input id="proxies-search" type="search" autocomplete="off" />
+                  </div>
+                  <p id="proxies-summary" class="section-caption" role="status" aria-live="polite"></p>
+                  <p id="proxies-progress" class="section-caption" role="status" aria-live="polite"></p>
+                  <div class="table-wrap proxy-table-wrap">
+                    <table id="proxies-table" class="table proxy-table">
+                      <thead>
+                        <tr>
+                          <th><label class="proxy-page-select"><input id="proxies-select-page" type="checkbox" /><span data-i18n="config.proxy.selectPage">本页</span></label></th>
+                          <th data-i18n="config.proxy.address">代理地址</th>
+                          <th data-i18n="config.proxy.result">检查结果</th>
+                          <th data-i18n="config.proxy.response">上游响应</th>
+                          <th data-i18n="config.proxy.latency">耗时</th>
+                          <th data-i18n="config.proxy.actions">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody id="proxies-rows"></tbody>
+                    </table>
+                  </div>
+                  <div class="proxy-pager">
+                    <button id="proxies-prev" type="button" class="btn btn-sm" data-i18n="diag.pager.prev">上一页</button>
+                    <span id="proxies-page" class="section-caption"></span>
+                    <button id="proxies-next" type="button" class="btn btn-sm" data-i18n="diag.pager.next">下一页</button>
+                  </div>
                   <div class="form-grid">
                     <div class="field">
                       <label for="proxies-new" data-i18n="config.proxy.add">新增 Proxy（每行一个）</label>

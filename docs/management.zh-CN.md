@@ -1,6 +1,38 @@
-# 管理控制台：模型轮转、Go 额度与 API Key
+# 管理控制台：模型轮转、Go 额度、API Key 与代理
 
-本文说明三个新增管理页面的使用方式、配置和错误处理。
+本文说明管理页面的使用方式、配置和错误处理。
+
+## 匿名通道默认关闭
+
+**匿名通道可能已被上游重点封堵，优先使用 Zen API Key。** 配置和 WebUI 默认 `anonymous: false`；已有配置中明确设置的 `true` 保持不变，不会被自动关闭。示例的上游 Key 数组为空，启动前应先填入 Zen API Key（推荐）或 Go Key；已有的 Go 订阅连接也可满足上游凭证要求。不要为了检查代理而开启匿名推理。
+
+## 批量代理管理
+
+「Proxy 节点」页可批量导入内联代理、检查选中条目和暂存批量移除。代理文件 `proxyfile` 的条目在来源文件管理，不加入内联代理表格。移除不会立即修改运行时，仍需保存完整配置（`PUT /api/config`）；检查本身不删除任何条目。
+
+检查接口为 `POST /api/proxies/check`，需要管理 Session 与 `X-CSRF-Token`，请求体二选一：
+
+```json
+{"id":"SAVED_PROXY_ID"}
+```
+
+```json
+{"value":"https://proxy.example:8443"}
+```
+
+`id` 使用 `GET /api/config` 返回的已保存代理 ID；`value` 用于草稿地址。前端最多四个并发，服务端最多八个，超出立即拒绝、不排队；单次检查限时 20 秒。检查正常执行时返回 HTTP 200，包含 `ok`、`state`、`reason` 及可用时的 `status`、`latency_ms`；请求格式、认证、CSRF 和并发限制错误使用各自的 HTTP 错误状态。
+
+**只检查代理到配置的 Zen 上游的连通性，不验证推理、Key 或额度。** 独立 Bun 客户端仅通过选中代理向 `upstream.zen` 加 `/v1/models` 发送无认证 GET，不带任何 Zen/Go Key、`public` 或 OAuth 凭证，不发推理、不跟随重定向、不走 WARP，也不改变正式代理健康、Key 冷却或绑定。匿名关闭时仍可检查，不会私自启用匿名推理。
+
+| `state` | 含义与清理建议 |
+| ------- | -------------- |
+| `available` | 上游返回 200–399 或 401。401 的 `authentication_required` 表示已到站、需要认证，不代表验证了 Key。 |
+| `unavailable` | 仅本次可确认的代理端拒绝连接、DNS 失败（`proxy_unreachable`）或代理 407（`proxy_authentication_required`），可加入不可用筛选，不代表永久故障。 |
+| `limited` | 上游返回 429，不等于代理损坏。 |
+| `rejected` | 上游返回 403 等错误，不等于代理损坏。 |
+| `inconclusive` | 超时、其他不能定位的传输错误或检查前提不满足，不能确认代理损坏。 |
+
+只允许将 `unavailable` 作为本次确认不可用的清理筛选；不要把 `limited`、`rejected` 或 `inconclusive` 一并选为损坏代理。正式推理仍可能因模型、凭证、额度或上游策略失败。
 
 ## 模型与额度
 

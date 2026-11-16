@@ -1,15 +1,16 @@
 // Page: 配置中心 — masked config editing with validation, hot reload and reveal.
-import { api } from "../api.js";
-import { loadConfig, loadDebugModels } from "../data.js";
+import { api, hasSession } from "../api.js";
 import * as store from "../store.js";
 import { t, onChange } from "../i18n.js";
 import { $, $$, bindTabs, el, openDialog, toast } from "../ui.js";
+import { fillProxies, initProxies, lockProxies, proxyInputs, resetProxies, stopChecks } from "./proxies.js";
 
 // A long proxy list is rendered collapsed: the first CHIP_RENDER_LIMIT chips
 // plus a toggle. A single flex-wrap row with thousands of chips is what froze
 // the config page on large pools.
 const CHIP_RENDER_LIMIT = 100;
 const expandedChips = new Set();
+let mutation = null;
 
 function renderChips(name) {
   const host = $(`#${name}-chips`);
@@ -61,6 +62,7 @@ function renderRestartNotice(value) {
 }
 
 function secretInputs(name) {
+  if (name === "proxies") return proxyInputs();
   const kept = [...$(`#${name}-chips`).children]
     .filter((node) => node.dataset.id !== undefined)
     .map((node) => ({ id: node.dataset.id }));
@@ -110,14 +112,34 @@ function fillConfig(value) {
   $("#c-level").value = value.logging.level;
   $("#c-ring").value = value.logging.ring_size;
   $("#c-dump-bodies").checked = !!value.logging.dump_request_bodies;
-  ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(renderChips);
+  ["server_keys", "zen_keys", "go_keys"].forEach(renderChips);
+  fillProxies(value.proxies || []);
   renderRestartNotice(value);
+}
+
+function lockConfig(value) {
+  lockProxies(value);
+  $$("#config-form .sticky-actions button").forEach((button) => (button.disabled = value));
+}
+
+function currentMutation(operation) {
+  return mutation === operation && hasSession();
+}
+
+async function refreshDebug(operation) {
+  const value = await api("/api/debug/models", { signal: operation.controller.signal });
+  if (!currentMutation(operation)) return;
+  if (value.last_inference) store.set("lastPlayground", value.last_inference);
+  store.set("debug", value);
 }
 
 async function save(event) {
   event.preventDefault();
   const current = store.get("config");
-  if (!current) return;
+  if (!current || mutation || !hasSession()) return;
+  const operation = { controller: new AbortController() };
+  mutation = operation;
+  lockConfig(true);
   try {
     const update = {
       listen: $("#c-listen").value,
@@ -168,12 +190,17 @@ async function save(event) {
         session_ttl_minutes: numberValue("#c-session"),
       },
     };
-    const result = await api("/api/config", { method: "PUT", body: JSON.stringify(update) });
+    const result = await api("/api/config", {
+      method: "PUT", body: JSON.stringify(update), signal: operation.controller.signal,
+    });
+    if (!currentMutation(operation)) return;
+    fillProxies(result.config.proxies || [], true);
     store.set("config", result.config);
-    ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(
+    ["server_keys", "zen_keys", "go_keys"].forEach(
       (name) => ($(`#${name}-new`).value = ""),
     );
-    await loadDebugModels();
+    await refreshDebug(operation);
+    if (!currentMutation(operation)) return;
     toast(
       result.result.restart_required
         ? t(
@@ -184,22 +211,43 @@ async function save(event) {
         : t("配置已保存并立即应用", "toast.config.saved"),
     );
   } catch (error) {
-    toast(error.message, true);
+    if (currentMutation(operation) && error.name !== "AbortError") toast(error.message, true);
+  } finally {
+    if (mutation === operation) {
+      mutation = null;
+      lockConfig(false);
+    }
   }
 }
 
 async function reload() {
+  if (mutation || !hasSession()) return;
+  const operation = { controller: new AbortController() };
+  mutation = operation;
+  lockConfig(true);
   try {
-    const result = await api("/api/config/reload", { method: "POST", body: "{}" });
-    await loadConfig();
-    await loadDebugModels();
+    const result = await api("/api/config/reload", {
+      method: "POST", body: "{}", signal: operation.controller.signal,
+    });
+    if (!currentMutation(operation)) return;
+    const value = await api("/api/config", { signal: operation.controller.signal });
+    if (!currentMutation(operation)) return;
+    fillProxies(value.proxies || [], true);
+    store.set("config", value);
+    await refreshDebug(operation);
+    if (!currentMutation(operation)) return;
     toast(
       result.restart_required
         ? t("磁盘配置已重载，监听字段需重启", "toast.config.reloadedRestart")
         : t("磁盘配置已重载", "toast.config.reloaded"),
     );
   } catch (error) {
-    toast(error.message, true);
+    if (currentMutation(operation) && error.name !== "AbortError") toast(error.message, true);
+  } finally {
+    if (mutation === operation) {
+      mutation = null;
+      lockConfig(false);
+    }
   }
 }
 
@@ -245,9 +293,17 @@ export default {
   id: "config",
   title: "配置中心",
   sub: "验证后原子保存，并热应用可变字段。",
+  hide: stopChecks,
+  reset() {
+    mutation?.controller.abort();
+    mutation = null;
+    lockConfig(false);
+    resetProxies();
+  },
   init() {
     store.on("config", fillConfig);
-    bindTabs($("#page-config"));
+    initProxies();
+    bindTabs($("#page-config"), (id) => { if (id !== "proxies") stopChecks(); });
     $("#config-form").addEventListener("submit", save);
     $("#reload-config").addEventListener("click", reload);
     $("#reveal").addEventListener("click", reveal);

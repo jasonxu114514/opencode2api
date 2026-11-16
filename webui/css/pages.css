@@ -1,4 +1,40 @@
 /* Page layouts: login, dashboards, charts, logs, playground and rotation. */
+.config-warning {
+  padding: var(--sp-3);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: var(--fs-sm);
+}
+
+.proxy-actions,
+.proxy-pager,
+.proxy-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-block: var(--sp-3);
+}
+
+.proxy-row-actions { flex-wrap: nowrap; margin: 0; }
+.proxy-search { max-width: 460px; }
+.proxy-table-wrap { max-height: 60vh; overflow: auto; margin-block: var(--sp-3); }
+.proxy-table { min-width: 820px; table-layout: fixed; }
+.proxy-table thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+.proxy-table th:first-child { width: 70px; }
+.proxy-table th:nth-child(2) { width: 25%; }
+.proxy-table th:nth-child(3) { width: 29%; }
+.proxy-table th:nth-child(4) { width: 18%; }
+.proxy-table th:nth-child(5) { width: 80px; }
+.proxy-table th:last-child { width: 120px; }
+.proxy-table td { vertical-align: middle; }
+.proxy-address { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proxy-reason { color: var(--text-2); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.proxy-page-select { display: inline-flex; align-items: center; gap: var(--sp-1); }
+.proxy-table input[type="checkbox"] { width: auto; margin: 0; }
+
 .login-view {
   min-height: 100vh;
   display: grid;

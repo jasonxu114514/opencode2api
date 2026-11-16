@@ -23,6 +23,14 @@ import (
 // http.DefaultTransport.
 const bunHandshakeTimeout = 10 * time.Second
 
+type ProxyConnectError struct {
+	StatusCode int
+}
+
+func (err *ProxyConnectError) Error() string {
+	return fmt.Sprintf("proxy refused CONNECT: HTTP %d", err.StatusCode)
+}
+
 // bunClientHello returns the ClientHello of Bun's fetch, captured from Bun
 // 1.4.3. Bun links its own BoringSSL, so the hello is the same on every
 // platform: JA4 t13d1713h1, no GREASE, no padding, http/1.1 as the only ALPN
@@ -189,7 +197,7 @@ func httpConnect(conn net.Conn, user *url.Userinfo, addr string) (net.Conn, erro
 		return conn, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return conn, fmt.Errorf("proxy refused CONNECT: %s", resp.Status)
+		return conn, &ProxyConnectError{StatusCode: resp.StatusCode}
 	}
 	if reader.Buffered() > 0 {
 		return &bufferedConn{Conn: conn, reader: reader}, nil

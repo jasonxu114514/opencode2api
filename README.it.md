@@ -53,7 +53,7 @@ go build -o opencode2api ./cmd/opencode2api
 Prima di avviare il servizio, modifica `config.json`:
 
 1. Sostituisci `server_keys` con una tua API key locale.
-2. Configura le chiavi Zen o Go. In alternativa, imposta `anonymous: true` e lascia vuoti entrambi gli array delle chiavi upstream.
+2. Prima dell'avvio, inserisci una Zen API Key (consigliata) in `zen_keys` oppure una chiave Go in `go_keys`. L'esempio disabilita l'accesso anonimo (`anonymous: false`) e lascia vuoti entrambi gli array; anche una connessione Go in abbonamento già salvata soddisfa il requisito. Il canale anonimo potrebbe essere fortemente bloccato a monte: preferisci una Zen API Key.
 3. Sostituisci `webui.password`. La configurazione di esempio abilita la WebUI con l'utente `admin`.
 
 ```bash

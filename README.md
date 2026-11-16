@@ -11,7 +11,7 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 - JSON and SSE responses across all three inference protocols.
 - Text, images, reasoning, function tools, tool calls, and tool results; file content where the target protocol can represent it.
 - Separate Zen and Go key pools, configurable tier preference, retries, and session affinity.
-- Optional anonymous Zen access with the OpenCode `public` credential.
+- Opt-in anonymous Zen access with the OpenCode `public` credential; disabled by default because upstream blocking can make it unavailable.
 - Optional userspace Cloudflare WARP egress for free-model traffic, without TUN or root.
 - Direct, HTTP, HTTPS, SOCKS5, and SOCKS5H connections, including a proxy file.
 - Dynamic model discovery, native protocol metadata, and disk caches.
@@ -53,8 +53,10 @@ go build -o opencode2api ./cmd/opencode2api
 Before starting, edit `config.json`:
 
 1. Replace `server_keys` with your own local API key.
-2. Optionally supply Zen or Go keys. The example enables the anonymous free lane and leaves both upstream key arrays empty.
+2. Supply a Zen API Key in `zen_keys` (recommended), or a Go key in `go_keys`. The example leaves both arrays empty and disables anonymous access, so configure an upstream credential before starting. An existing Go subscription connection also satisfies this requirement.
 3. Replace `webui.password`. The example enables the WebUI with username `admin`.
+
+**Anonymous traffic may be heavily blocked upstream. Prefer a Zen API Key.** Anonymous access is off by default in the configuration and WebUI; existing configurations that explicitly set `anonymous: true` keep that choice. Enable it deliberately only if you accept that free requests may still fail.
 
 ```bash
 ./opencode2api -config config.json
@@ -223,6 +225,8 @@ Each `/v1/models` entry also carries `cost` (USD per million tokens: `input`, `o
 
 ### Anonymous access and fallback
 
+**Anonymous traffic may be heavily blocked upstream. Prefer a Zen API Key.** The built-in default and example configuration set `anonymous: false`; the WebUI does not opt you in automatically or change an existing explicit `true` value.
+
 With `anonymous: true`, either condition makes a model eligible for the anonymous Zen lane:
 
 - Its ID contains `free`, case-insensitively.
@@ -248,7 +252,7 @@ Known OpenCode title requests are identified before prompt and message shaping, 
 
 When only anonymous access is configured, `/v1/models` exposes only models eligible for that lane.
 
-Free models never need a Zen key: with `anonymous: true` they are served by the public lane, and a configured key is only their fallback. To keep keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models may still fall back to the configured keys.
+An eligible free model can be attempted without a Zen key only when anonymous access is explicitly enabled; eligibility does not guarantee upstream access. To keep authenticated keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models use the configured keys when anonymous access is off, or may fall back to them when it is on.
 
 ### WARP egress for free models
 
@@ -319,7 +323,7 @@ Cooldowns grow exponentially up to eight times `performance.failure_cooldown_sec
 
 ## Configuration reference
 
-See [config.example.json](config.example.json) for a complete starting configuration. JSON supports `//` and `/* ... */` comments; unknown fields and invalid values are rejected.
+See [config.example.json](config.example.json) for a starting configuration; add an upstream credential before starting. The configuration-file loader supports `//` and `/* ... */` comments, which are not part of standard JSON; management API bodies must be standard JSON. Unknown fields, including `_comment`, and invalid values are rejected.
 
 ### Keys, listeners, and routing
 
@@ -327,8 +331,8 @@ See [config.example.json](config.example.json) for a complete starting configura
 | --------------------------- | --------------------------------------------------------------------------- |
 | `listen`                    | `127.0.0.1:8080`.                                                           |
 | `server_keys`               | At least one local key is required.                                         |
-| `zen_keys`, `go_keys`       | At least one upstream key is required unless anonymous access is enabled.   |
-| `anonymous`                 | `false`.                                                                    |
+| `zen_keys`, `go_keys`       | At least one upstream key or saved `go_subscription` connection is required unless anonymous access is explicitly enabled. |
+| `anonymous`                 | `false`; opt-in only. Upstream blocking may make this lane unavailable; prefer a Zen API Key. |
 | `warp.enabled`              | `false`; free-lane traffic leaves through Cloudflare WARP and no proxy.    |
 | `warp.pool_size`            | `2`; upper bound on WARP exits (half pre-registered in the background; the active ring follows concurrency), 1–32. |
 | `warp.stack`                | `ipv6`; `ipv6`, `ipv4`, or `dual`.                                          |
@@ -465,6 +469,7 @@ The management listener serves the UI and `/api/*` routes. Authentication uses o
 | `GET /api/monitor`                               | Request, token, upstream, and resource statistics.                    |
 | `GET /api/debug/models`                          | Model routes, key fingerprints, and metadata diagnostics.             |
 | `POST /api/debug/inference`                      | Run a Playground request.                                             |
+| `POST /api/proxies/check`                        | Check one saved or draft proxy's connectivity to the configured Zen upstream. |
 | `GET /api/logs`, `GET /api/logs/stream`          | Recent logs or a live SSE subscription.                               |
 
 Playground requests require a session and `X-CSRF-Token` and are limited to 12 per minute per client IP:
@@ -485,6 +490,34 @@ The server forces `stream: false`. Use `{"mode":"selected","tier":"zen","id":"KE
 **Both automatic and selected diagnostics preserve production key cooldowns, failure counts, proxy health, and bindings.** They still make real upstream requests, can consume provider quota, and appear in monitoring.
 
 After execution, the management endpoint returns HTTP 200 with the actual result in `ok`, `http_status`, `request_id`, `route`, and `response`. Selected-key results also include `selected_key` and `key_test`: `usable`, `rejected`, `rate_limited`, `transport_error`, `upstream_error`, `request_error`, or `unavailable`. Invalid management input, authentication, CSRF, and throttling retain their own HTTP error statuses.
+
+### Bulk proxy management
+
+The WebUI can import multiple inline proxies, check selected entries, and stage selected entries for removal. Checks call `POST /api/proxies/check` once per proxy, with a login session, `X-CSRF-Token`, and exactly one of these standard JSON bodies:
+
+```json
+{"id":"SAVED_PROXY_ID"}
+```
+
+```json
+{"value":"https://proxy.example:8443"}
+```
+
+Use the masked entry ID from `GET /api/config` for an existing proxy, or `value` for an unsaved draft. Results return HTTP 200 with `ok`, `state`, and `reason`; `latency_ms` and upstream `status` may also be present. Invalid management requests, authentication, CSRF, and concurrency limits use their own HTTP error statuses. Each check has a 20-second timeout. The WebUI runs at most four checks concurrently; the server accepts at most eight and rejects excess checks without queuing.
+
+**This checks only proxy-to-Zen connectivity, not inference, key validity, or quota.** It sends an unauthenticated `GET` to the configured `upstream.zen` URL plus `/v1/models` through an isolated Bun client using only the selected proxy. No Zen/Go key, anonymous `public` credential, or OAuth token is sent, no inference is performed, redirects are not followed, and WARP is not used. It works with `anonymous: false` without enabling anonymous access.
+
+| `state` | Meaning / cleanup guidance |
+| ------- | -------------------------- |
+| `available` | The upstream responded with HTTP 200–399 or 401. A 401 means the endpoint was reached but requires authentication (`authentication_required`), not that a key was validated. |
+| `unavailable` | A confirmed proxy-side connection refusal or DNS failure (`proxy_unreachable`), or proxy CONNECT HTTP 407 (`proxy_authentication_required`); eligible for unavailable-only selection for this check, not proof of permanent failure. |
+| `limited` | The upstream returned 429; this is not evidence that the proxy is broken. |
+| `rejected` | The upstream responded with 403 or another error status, excluding 401 and 429 (`upstream_responded`), or the proxy rejected the tunnel (`proxy_tunnel_rejected`); this is not evidence that the proxy is broken. An origin HTTP 407 is not classified as proxy authentication failure. |
+| `inconclusive` | A timeout, other transport failure, or unavailable check prerequisite; do not treat this as a confirmed broken proxy. |
+
+Checks do not change production proxy health, key cooldowns, or bindings. A result describes this connection attempt, not permanent proxy health; upstream rejection, rate limiting, and timeouts must not be selected for cleanup as confirmed proxy failures.
+
+Removal is staged in the WebUI and takes effect only after saving the full configuration through `PUT /api/config`; checking does not delete anything. Proxies supplied by `proxyfile` are managed in that source file, not in the inline-proxy table.
 
 ### Go subscription sign-in
 

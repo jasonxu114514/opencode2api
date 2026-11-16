@@ -336,6 +336,7 @@ func Load(path string) (Config, error) {
 	}
 	cfg := Config{
 		Listen:      "127.0.0.1:8080",
+		Anonymous:   false,
 		Warp:        WarpConfig{PoolSize: 2, Stack: string(warp.DefaultStack)},
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
@@ -435,7 +436,7 @@ func Normalize(path string, cfg Config) (Config, error) {
 		return Config{}, errors.New("at least one server key must remain enabled")
 	}
 	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 && cfg.GoSubscription == nil {
-		return Config{}, errors.New("zen_keys or go_keys must contain at least one upstream key unless anonymous is enabled")
+		return Config{}, errors.New("configure a Zen API Key (zen_keys), a Go key (go_keys), or a Go subscription (go_subscription); anonymous access is disabled by default and may be blocked upstream")
 	}
 	if cfg.Retry.MaxAttempts < 1 {
 		return Config{}, errors.New("retry.max_attempts must be at least 1")
@@ -487,18 +488,8 @@ func Normalize(path string, cfg Config) (Config, error) {
 		}
 	}
 	for _, raw := range cfg.RuntimeProxies() {
-		if raw == "direct" {
-			continue
-		}
-		clean, _ := ParseProxyEntry(raw)
-		u, err := url.Parse(clean)
-		if err != nil || u.Host == "" {
-			return Config{}, fmt.Errorf("invalid proxy URL %q", RedactURL(raw))
-		}
-		switch strings.ToLower(u.Scheme) {
-		case "http", "https", "socks5", "socks5h":
-		default:
-			return Config{}, fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
+		if err := ValidateProxyEntry(raw); err != nil {
+			return Config{}, err
 		}
 	}
 	if err := cfg.Models.AnonymousBackoff.Normalize(); err != nil {
