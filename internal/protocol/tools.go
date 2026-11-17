@@ -121,6 +121,18 @@ func (r *ToolRenames) Add(client, wire string) {
 	if _, taken := r.toClient[wire]; taken {
 		return
 	}
+	if r.toWire == nil {
+		r.toWire = map[string]string{}
+	}
+	if r.toClient == nil {
+		r.toClient = map[string]string{}
+	}
+	if r.byCase == nil {
+		r.byCase = map[string]string{}
+	}
+	if r.byShape == nil {
+		r.byShape = map[string]string{}
+	}
 	r.toWire[client] = wire
 	r.toClient[wire] = client
 	r.bindFolded(r.byCase, strings.ToLower(client), client)

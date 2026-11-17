@@ -310,8 +310,13 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	if !result.success {
 		result.reason = "invalid_or_incomplete_response"
 		if err != nil {
-			result.effortRejected = isEffortRejection(400, err.Error())
-			if IsModelUnavailable(400, err.Error()) {
+			message := err.Error()
+			var failure *wire.StreamFailure
+			if errors.As(err, &failure) {
+				message = failure.Type + " " + failure.Message
+			}
+			result.effortRejected = isEffortRejection(400, message)
+			if IsModelUnavailable(400, message) {
 				result.reason = "model_unavailable"
 			}
 		}

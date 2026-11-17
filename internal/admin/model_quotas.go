@@ -147,10 +147,10 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	cfg := a.manager.Config()
 	endpoint := strings.TrimRight(cfg.Upstream.Go, "/") + "/v1/usage"
 	accounts := make([]quotaAccount, len(cfg.GoKeys))
-	if connection := cfg.GoSubscription; connection != nil {
+	if connection := cfg.GoOAuth; connection != nil {
 		accounts = []quotaAccount{{
 			ID:      config.Fingerprint(connection.Credential.AccountID + "\x00" + connection.Credential.OrganizationID),
-			Display: "Go subscription (OAuth)", Status: "unavailable", CheckedAt: time.Now().UTC(),
+			Display: "Go OAuth", Status: "unavailable", CheckedAt: time.Now().UTC(),
 			Error: "OpenCode 未提供已验证的 OAuth 订阅额度接口，额度保持未知。",
 		}}
 		endpoint = ""
@@ -162,7 +162,7 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 		a.quotaCache = map[string]quotaCacheEntry{}
 	}
 	keys := cfg.GoKeys
-	if cfg.GoSubscription != nil {
+	if cfg.GoOAuth != nil {
 		keys = nil
 	}
 	entries := make([]quotaCacheEntry, len(keys))
@@ -209,7 +209,7 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	note := "OpenCode 返回套餐共享额度，未提供逐模型独立余额；多个 Go Key 可能属于同一套餐，不能相加。百分比由上游取整。"
-	if cfg.GoSubscription != nil {
+	if cfg.GoOAuth != nil {
 		note = "OAuth 订阅使用官方 Go 推理路由；未提供已验证的订阅额度接口，不查询手动 Go Key 或按量计费余额。"
 	}
 	httpx.WriteJSON(w, 200, map[string]any{

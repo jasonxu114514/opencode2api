@@ -5,23 +5,29 @@ import { t, onChange } from "../i18n.js";
 import { $, $$, bindTabs, el, openDialog, toast } from "../ui.js";
 import { fillProxies, initProxies, lockProxies, proxyInputs, resetProxies, stopChecks } from "./proxies.js";
 
-// A long proxy list is rendered collapsed: the first CHIP_RENDER_LIMIT chips
+// A long key list is rendered collapsed: the first CHIP_RENDER_LIMIT chips
 // plus a toggle. A single flex-wrap row with thousands of chips is what froze
 // the config page on large pools.
 const CHIP_RENDER_LIMIT = 100;
 const expandedChips = new Set();
+const removedChips = new Map();
 let mutation = null;
+let revealOperation = null;
 
 function renderChips(name) {
   const host = $(`#${name}-chips`);
   host.replaceChildren();
-  const items = store.get("config")?.[name] || [];
+  const items = (store.get("config")?.[name] || []).filter((item) => !removedChips.get(name)?.has(item.id));
   const expanded = expandedChips.has(name);
   const visible = expanded ? items : items.slice(0, CHIP_RENDER_LIMIT);
   visible.forEach((item) => {
     const remove = el("button", { type: "button", title: t("移除", "common.remove"), text: "×" });
     const chip = el("span", { class: "chip", dataset: { id: item.id } });
-    remove.addEventListener("click", () => chip.remove());
+    remove.addEventListener("click", () => {
+      if (!removedChips.has(name)) removedChips.set(name, new Set());
+      removedChips.get(name).add(item.id);
+      renderChips(name);
+    });
     chip.append(el("span", { text: item.display }), remove);
     host.append(chip);
   });
@@ -63,9 +69,11 @@ function renderRestartNotice(value) {
 
 function secretInputs(name) {
   if (name === "proxies") return proxyInputs();
-  const kept = [...$(`#${name}-chips`).children]
-    .filter((node) => node.dataset.id !== undefined)
-    .map((node) => ({ id: node.dataset.id }));
+  // Collapsed chips are only a view; keys outside the rendered page must
+  // survive saving, expanding, and collapsing the list.
+  const kept = (store.get("config")?.[name] || [])
+    .filter((item) => !removedChips.get(name)?.has(item.id))
+    .map((item) => ({ id: item.id }));
   const added = $(`#${name}-new`)
     .value.split(/\r?\n/)
     .map((value) => value.trim())
@@ -159,6 +167,7 @@ async function save(event) {
       upstream: { ...current.upstream, zen: $("#c-up-zen").value, go: $("#c-up-go").value },
       retry: { max_attempts: numberValue("#c-attempts"), timeout_seconds: numberValue("#c-timeout") },
       models: {
+        ...current.models,
         refresh_seconds: numberValue("#c-refresh"),
         protocols: JSON.parse($("#c-protocols").value || "{}"),
         free_only: $("#c-free-only").checked,
@@ -169,6 +178,7 @@ async function save(event) {
         effort_by_model: JSON.parse($("#c-reasoning-by-model").value || "{}"),
       },
       performance: {
+        ...current.performance,
         max_idle_conns: numberValue("#c-idle"),
         max_idle_conns_per_host: numberValue("#c-idle-host"),
         max_conns_per_host: numberValue("#c-max-host"),
@@ -195,6 +205,7 @@ async function save(event) {
     });
     if (!currentMutation(operation)) return;
     fillProxies(result.config.proxies || [], true);
+    removedChips.clear();
     store.set("config", result.config);
     ["server_keys", "zen_keys", "go_keys"].forEach(
       (name) => ($(`#${name}-new`).value = ""),
@@ -233,6 +244,7 @@ async function reload() {
     const value = await api("/api/config", { signal: operation.controller.signal });
     if (!currentMutation(operation)) return;
     fillProxies(value.proxies || [], true);
+    removedChips.clear();
     store.set("config", value);
     await refreshDebug(operation);
     if (!currentMutation(operation)) return;
@@ -252,13 +264,20 @@ async function reload() {
 }
 
 function reveal() {
+  if (revealOperation || !hasSession()) return;
+  const operation = { controller: new AbortController(), busy: false };
+  revealOperation = operation;
   const input = el("input", { type: "password", autocomplete: "current-password" });
   const submit = async (close) => {
+    if (revealOperation !== operation || operation.busy || !hasSession()) return;
+    operation.busy = true;
     try {
       const values = await api("/api/config/reveal", {
         method: "POST",
         body: JSON.stringify({ password: input.value }),
+        signal: operation.controller.signal,
       });
+      if (revealOperation !== operation || !hasSession()) return;
       close();
       openDialog({
         title: t("敏感配置", "modal.title"),
@@ -267,7 +286,9 @@ function reveal() {
         actions: [{ label: t("关闭", "modal.close") }],
       });
     } catch (error) {
-      toast(error.message, true);
+      if (revealOperation === operation && error.name !== "AbortError") toast(error.message, true);
+    } finally {
+      operation.busy = false;
     }
   };
   const dialog = openDialog({
@@ -276,6 +297,11 @@ function reveal() {
       el("label", { text: t("请再次输入管理密码", "config.revealPrompt") }),
       input,
     ]),
+    onClose: () => {
+      input.value = "";
+      operation.controller.abort();
+      if (revealOperation === operation) revealOperation = null;
+    },
     actions: [
       { label: t("取消", "common.cancel") },
       { label: t("查看", "common.view"), kind: "btn-primary", onClick: submit },
@@ -297,6 +323,11 @@ export default {
   reset() {
     mutation?.controller.abort();
     mutation = null;
+    revealOperation?.controller.abort();
+    revealOperation = null;
+    removedChips.clear();
+    expandedChips.clear();
+    ["server_keys", "zen_keys", "go_keys"].forEach((name) => ($(`#${name}-new`).value = ""));
     lockConfig(false);
     resetProxies();
   },

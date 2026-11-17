@@ -26,6 +26,10 @@ var errStreamNormalTermination = errors.New("upstream stream terminated normally
 // errSSEUnexpectedEOF reports a stream that ended without a terminal event.
 var errSSEUnexpectedEOF = errors.New("unexpected end of SSE stream")
 
+const maxSSEFrameBytes = 16 << 20
+
+var errSSEFrameTooLarge = errors.New("upstream SSE event exceeds 16 MiB")
+
 // streamTermination records how a transcoded stream ended, so the code after
 // readSSE can tell a normal terminal event from an upstream error.
 type streamTermination uint8
@@ -91,7 +95,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		events, err := parser.Parse(eventName, data)
 		if err != nil {
 			termination = streamErrorTermination
-			if emitErr := emitter.Emit(bridgeStreamEvent{Kind: "error", Error: err.Error(), ErrorType: "upstream_error"}); emitErr != nil {
+			if emitErr := emitter.Emit(bridgeStreamEvent{Kind: "error", Error: "upstream SSE event could not be decoded", ErrorType: "upstream_error"}); emitErr != nil {
 				return emitErr
 			}
 			return errStreamUpstreamFailure
@@ -102,6 +106,8 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 				termination = streamNormalTermination
 			case "error":
 				termination = streamErrorTermination
+				event.Error = "upstream stream failed"
+				event.ErrorType = "upstream_error"
 			}
 			if err := emitter.Emit(event); err != nil {
 				return err
@@ -147,7 +153,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 func emitUnexpectedStreamError(emitter *bridgeStreamEncoder, cause error) error {
 	message := "upstream SSE stream ended before a terminal event"
 	if cause != nil && !errors.Is(cause, errSSEUnexpectedEOF) {
-		message = fmt.Sprintf("upstream SSE stream failed: %v", cause)
+		message = "upstream SSE stream failed"
 	}
 	err := emitter.Emit(bridgeStreamEvent{Kind: "error", Error: message, ErrorType: "upstream_error"})
 	if errors.Is(err, errStreamUpstreamFailure) {
@@ -165,52 +171,44 @@ func ClientCanceled(ctx context.Context, streamErr error) bool {
 	return ctx != nil && ctx.Err() != nil
 }
 
-// sseFlushWriter preserves an upstream SSE byte stream while making each
-// successful write visible to the client immediately. io.Copy is free to
-// choose large writes, so flushing in Write is the only reliable place to
-// keep same-protocol streams live.
-type sseFlushWriter struct {
-	writer  io.Writer
-	flusher http.Flusher
-}
-
-func (writer *sseFlushWriter) Write(data []byte) (int, error) {
-	n, err := writer.writer.Write(data)
-	if n > 0 {
-		writer.flusher.Flush()
-	}
-	return n, err
-}
-
-// ForwardStream relays a same-protocol upstream stream to the client byte for
-// byte, flushing each write, while a usage tracker reads the same bytes
-// through a TeeReader. It returns the tracked usage and whether the upstream
-// reported any, plus an error: the copy error, if any, for a normal
-// termination that parsed cleanly; otherwise errStreamUpstreamFailure when an
-// upstream error event was relayed, the copy error, or the parse error (or
-// errSSEUnexpectedEOF) after an error event was emitted for a stream that
-// ended early. A canceled client gets no synthetic error event.
+// ForwardStream relays complete, valid same-protocol SSE frames unchanged and
+// flushes each one while tracking usage. Error frames are replaced with a
+// generic failure because upstream errors may echo credentials. A malformed,
+// oversized or unterminated frame is never written downstream. Before the
+// first frame a failure is a JSON 502; later failures are SSE error events.
+// A canceled client gets no synthetic error event.
 func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := streamUsageObserver(protocol)
-	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
-	usage := observer.Finish()
-	if observer.ErrorTermination() {
-		if copyErr != nil {
-			return usage, observer.Reported(), copyErr
+	committed := false
+	observer.forward = func(frame []byte) error {
+		committed = true
+		written, err := w.Write(frame)
+		if err == nil && written != len(frame) {
+			err = io.ErrShortWrite
 		}
-		return usage, observer.Reported(), errStreamUpstreamFailure
+		if err != nil {
+			return &ClientWriteError{Err: err}
+		}
+		flusher.Flush()
+		return nil
 	}
-	if observer.NormalTermination() && observer.ParseError() == nil {
-		return usage, observer.Reported(), copyErr
+	_, copyErr := io.Copy(observer, reader)
+	usage := observer.Finish()
+	if errors.Is(copyErr, errStreamNormalTermination) {
+		return usage, observer.Reported(), nil
 	}
 	if ClientCanceled(ctx, copyErr) {
 		if copyErr == nil {
 			copyErr = ctx.Err()
 		}
+		return usage, observer.Reported(), copyErr
+	}
+	var writeErr *ClientWriteError
+	if errors.As(copyErr, &writeErr) {
 		return usage, observer.Reported(), copyErr
 	}
 	cause := observer.ParseError()
@@ -219,6 +217,11 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	}
 	if cause == nil {
 		cause = errSSEUnexpectedEOF
+	}
+	if !committed {
+		w.Header().Del("X-Accel-Buffering")
+		WriteError(w, protocol, http.StatusBadGateway, "upstream SSE stream failed", "upstream_error", "")
+		return usage, observer.Reported(), cause
 	}
 	emitter := bridgeStreamEmitter(w, flusher, protocol, model)
 	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
@@ -261,11 +264,21 @@ func (reader *renameStreamReader) Read(data []byte) (int, error) {
 		if reader.err != nil {
 			return 0, reader.err
 		}
-		// ReadString either returns a non-empty chunk with a nil error or
-		// returns the trailing chunk together with EOF, so one iteration
-		// always either fills pending or reports the error below; the loop
-		// condition only guards the entry.
-		line, err := reader.buffer.ReadString('\n')
+		var lineBytes []byte
+		var err error
+		for {
+			var part []byte
+			part, err = reader.buffer.ReadSlice('\n')
+			if len(lineBytes)+len(part) > maxSSEFrameBytes {
+				reader.err = errSSEFrameTooLarge
+				return 0, reader.err
+			}
+			lineBytes = append(lineBytes, part...)
+			if !errors.Is(err, bufio.ErrBufferFull) {
+				break
+			}
+		}
+		line := string(lineBytes)
 		if len(line) > 0 {
 			reader.pending = reader.rewriteLine(line)
 		}
@@ -398,7 +411,9 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 				if function == nil {
 					continue
 				}
-				key := fmt.Sprint(jsonutil.FirstAny(call["index"], jsonutil.StringAt(call, "id"), callIndex))
+				// Tool indices restart at zero in each choice. Keeping the choice
+				// in the key prevents one completion from consuming another's name.
+				key := fmt.Sprint(choiceIndex) + "\x00" + fmt.Sprint(jsonutil.FirstAny(call["index"], jsonutil.StringAt(call, "id"), callIndex))
 				state := renamer.toolState(key)
 				state.callIndex = jsonutil.FirstAny(call["index"], callIndex)
 				state.choiceIndex = choiceIndex
@@ -632,6 +647,7 @@ func (renamer *streamToolRenamer) toolState(key string) *streamToolRenameState {
 // modifies the bytes it is given.
 type streamUsageTracker struct {
 	parser   *bridgeStreamParser
+	forward  func([]byte) error
 	buffer   []byte
 	usage    Usage
 	reported bool
@@ -649,18 +665,51 @@ func streamUsageObserver(protocol Protocol) *streamUsageTracker {
 	}}
 }
 
-// Write buffers the relayed bytes and consumes every complete SSE frame they
-// contain, keeping the incomplete tail for the next call. It never fails.
+// Write validates each complete frame before passing its original bytes to
+// forward. The bounded tail is retained until a delimiter arrives; errors and
+// the terminal event stop copying before any later bytes can be forwarded.
 func (observer *streamUsageTracker) Write(data []byte) (int, error) {
-	observer.buffer = append(observer.buffer, data...)
-	for {
-		index, width := nextSSEBoundary(observer.buffer)
-		if index < 0 {
-			break
+	if observer.parseErr != nil {
+		return 0, observer.parseErr
+	}
+	remaining := data
+	for len(remaining) > 0 {
+		count := min(len(remaining), maxSSEFrameBytes+1-len(observer.buffer))
+		observer.buffer = append(observer.buffer, remaining[:count]...)
+		remaining = remaining[count:]
+		for {
+			index, width := nextSSEBoundary(observer.buffer)
+			if index < 0 {
+				break
+			}
+			if index+width > maxSSEFrameBytes {
+				observer.parseErr = errSSEFrameTooLarge
+				break
+			}
+			observer.consume(observer.buffer[:index+width])
+			if observer.parseErr != nil {
+				return len(data) - len(remaining), observer.parseErr
+			}
+			if observer.error {
+				return len(data) - len(remaining), errStreamUpstreamFailure
+			}
+			if observer.forward != nil {
+				if err := observer.forward(observer.buffer[:index+width]); err != nil {
+					return len(data) - len(remaining), err
+				}
+			}
+			observer.buffer = observer.buffer[index+width:]
+			if observer.normal {
+				return len(data) - len(remaining), errStreamNormalTermination
+			}
 		}
-		frame := append([]byte(nil), observer.buffer[:index+width]...)
-		observer.buffer = observer.buffer[index+width:]
-		observer.consume(frame)
+		if len(observer.buffer) > maxSSEFrameBytes {
+			observer.parseErr = errSSEFrameTooLarge
+		}
+		if observer.parseErr != nil {
+			observer.buffer = nil
+			return len(data) - len(remaining), observer.parseErr
+		}
 	}
 	return len(data), nil
 }
@@ -675,17 +724,12 @@ func (observer *streamUsageTracker) Finish() Usage {
 
 func (observer *streamUsageTracker) Reported() bool { return observer.reported }
 
-func (observer *streamUsageTracker) NormalTermination() bool { return observer.normal }
-
-func (observer *streamUsageTracker) ErrorTermination() bool { return observer.error }
-
 func (observer *streamUsageTracker) ParseError() error { return observer.parseErr }
 
-// consume parses one complete SSE frame and records its terminal events and
-// usage. A parse error is remembered but not propagated, because the relay
-// must keep copying bytes.
+// consume parses one complete SSE frame and records its terminal events,
+// usage and parse error before Write decides whether the frame can be relayed.
 func (observer *streamUsageTracker) consume(frame []byte) {
-	_ = readSSE(strings.NewReader(string(frame)), func(eventName, data string) error {
+	err := readSSE(bytes.NewReader(frame), func(eventName, data string) error {
 		events, err := observer.parser.Parse(eventName, data)
 		if err != nil {
 			if observer.parseErr == nil {
@@ -707,6 +751,9 @@ func (observer *streamUsageTracker) consume(frame []byte) {
 		}
 		return nil
 	})
+	if err != nil && observer.parseErr == nil {
+		observer.parseErr = err
+	}
 }
 
 // nextSSEBoundary finds the end of the first complete SSE frame in data: it
@@ -736,9 +783,10 @@ func nextSSEBoundary(data []byte) (int, int) {
 // errors, and errors returned by handler, end the read.
 func readSSE(reader io.Reader, handler func(eventName, data string) error) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	scanner.Buffer(make([]byte, 64<<10), maxSSEFrameBytes)
 	var eventName string
 	var dataLines []string
+	frameBytes := 0
 	flush := func() error {
 		if len(dataLines) == 0 {
 			eventName = ""
@@ -751,10 +799,15 @@ func readSSE(reader io.Reader, handler func(eventName, data string) error) error
 	}
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
+		frameBytes += len(line) + 1
+		if frameBytes > maxSSEFrameBytes {
+			return errSSEFrameTooLarge
+		}
 		if line == "" {
 			if err := flush(); err != nil {
 				return err
 			}
+			frameBytes = 0
 			continue
 		}
 		if strings.HasPrefix(line, ":") {

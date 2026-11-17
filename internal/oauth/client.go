@@ -1,4 +1,4 @@
-package goauth
+package oauth
 
 import (
 	"bytes"
@@ -22,6 +22,13 @@ const (
 	requestTimeout   = 15 * time.Second
 	responseLimit    = 2 << 20
 	maximumTokenSize = 16 << 10
+)
+
+type Plan string
+
+const (
+	PlanGo  Plan = "go"
+	PlanZen Plan = "zen"
 )
 
 type Credential struct {
@@ -90,12 +97,16 @@ func (err *OAuthError) Error() string {
 		return "OpenCode sign-in is no longer authorized; sign in again"
 	case "sso_required":
 		return "OpenCode workspace requires a new SSO sign-in"
-	case "no_go_subscription":
-		return "OpenCode did not provide a supported Go subscription route"
+	case "no_go_oauth":
+		return "OpenCode did not provide a supported Go OAuth route"
+	case "no_zen_oauth":
+		return "OpenCode did not provide a supported Zen OAuth pay-as-you-go route"
+	case "invalid_plan":
+		return "OpenCode authorization plan is invalid"
 	case "rate_limited":
 		return "OpenCode authorization service is rate limited; try again later"
 	case "invalid_credential":
-		return "OpenCode subscription credential is invalid"
+		return "OpenCode OAuth credential is invalid"
 	case "invalid_response":
 		return "OpenCode authorization service returned an invalid response"
 	case "request_timeout":
@@ -112,15 +123,17 @@ type Client struct {
 }
 
 func NewClient(client *http.Client) *Client {
-	transport := http.Client{}
+	httpClient := http.Client{}
 	if client != nil {
-		transport = *client
+		httpClient = *client
 	}
-	if transport.Timeout <= 0 || transport.Timeout > requestTimeout {
-		transport.Timeout = requestTimeout
+	if httpClient.Timeout <= 0 || httpClient.Timeout > requestTimeout {
+		httpClient.Timeout = requestTimeout
 	}
-	transport.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{http: &transport}
+	// Credentials and device codes must never follow a redirect to another
+	// origin, including redirects supplied by the official service.
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{http: &httpClient}
 }
 
 func (credential Credential) Validate() error {
@@ -137,6 +150,13 @@ func (credential Credential) Validate() error {
 }
 
 func (connection Connection) Validate() error {
+	return connection.ValidateForPlan(PlanGo)
+}
+
+func (connection Connection) ValidateForPlan(plan Plan) error {
+	if !validPlan(plan) {
+		return &OAuthError{Code: "invalid_plan"}
+	}
 	if err := connection.Credential.Validate(); err != nil {
 		return err
 	}
@@ -144,10 +164,10 @@ func (connection Connection) Validate() error {
 		return &OAuthError{Code: "invalid_credential"}
 	}
 	if len(connection.Routes) == 0 {
-		return &OAuthError{Code: "no_go_subscription"}
+		return noRoutesError(plan)
 	}
 	for model, route := range connection.Routes {
-		base, ok := normalizeBase(route.BaseURL, route.Protocol)
+		base, ok := normalizeBaseForPlan(route.BaseURL, route.Protocol, plan)
 		if !validOpaque(model, 1024) || !validOpaque(route.ModelID, 1024) || !ok || base != route.BaseURL {
 			return &OAuthError{Code: "invalid_credential"}
 		}
@@ -318,11 +338,11 @@ func (client *Client) request(ctx context.Context, method, path string, payload 
 			request.Header.Set("x-org-id", credential.OrganizationID)
 		}
 	}
-	transport := client
-	if transport == nil || transport.http == nil {
-		transport = NewClient(nil)
+	requestClient := client
+	if requestClient == nil || requestClient.http == nil {
+		requestClient = NewClient(nil)
 	}
-	response, err := transport.http.Do(request)
+	response, err := requestClient.http.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

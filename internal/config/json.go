@@ -2,8 +2,63 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 )
+
+// migrateOAuthFields preserves legacy account settings while rejecting
+// aliases that would otherwise overwrite each other during JSON decoding.
+func migrateOAuthFields(data []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, errors.New("configuration must be a JSON object")
+	}
+	fields := make(map[string]json.RawMessage)
+	seen := make(map[string]bool)
+	changed := false
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return nil, errors.New("invalid configuration JSON")
+		}
+		folded := strings.ToLower(name)
+		if seen[folded] {
+			return nil, errors.New("configuration fields must not be repeated")
+		}
+		seen[folded] = true
+		canonical := name
+		for _, names := range [][2]string{{"go_subscription", "go_oauth"}, {"zen_subscription", "zen_oauth"}} {
+			if strings.EqualFold(name, names[0]) || strings.EqualFold(name, names[1]) {
+				canonical = names[1]
+				changed = changed || canonical != name
+				break
+			}
+		}
+		if _, exists := fields[canonical]; exists {
+			return nil, errors.New("legacy and current OAuth configuration fields must not be combined")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errors.New("invalid configuration JSON")
+		}
+		fields[canonical] = value
+	}
+	if closing, err := decoder.Token(); err != nil || closing != json.Delim('}') {
+		return nil, errors.New("invalid configuration JSON")
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return nil, errors.New("configuration must contain one JSON object")
+	}
+	if !changed {
+		return data, nil
+	}
+	return json.Marshal(fields)
+}
 
 // stripJSONComments removes // and /* */ comments by overwriting each comment
 // byte with a space but keeping newlines, so a position in the result is on

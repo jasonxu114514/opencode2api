@@ -32,7 +32,7 @@ type adminSession struct {
 }
 
 // loginWindow is a fixed-window counter for one client: Started is when the
-// window opened and Count the events in it. Login failures use a five-minute
+// window opened and Count the events in it. Login attempts use a five-minute
 // window, Playground requests a one-minute one.
 type loginWindow struct {
 	Started time.Time
@@ -44,10 +44,6 @@ type loginWindow struct {
 // cookie. A successful login clears that client's failure window.
 func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	client := clientIP(r)
-	if !a.allowLogin(client) {
-		writeAdminError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts; try again later")
-		return
-	}
 	var input struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -56,11 +52,15 @@ func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if !a.reserveLoginCheck(client) {
+		writeAdminError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts; try again later")
+		return
+	}
+	defer a.releaseLoginCheck()
 	cfg := a.manager.Config()
 	usernameMatch := len(input.Username) == len(cfg.WebUI.Username) && subtle.ConstantTimeCompare([]byte(input.Username), []byte(cfg.WebUI.Username)) == 1
 	passwordMatch := config.VerifyPassword(cfg.WebUI.PasswordHash, input.Password)
 	if !usernameMatch || !passwordMatch {
-		a.recordLoginFailure(client)
 		a.logger.Warn("admin login failed", "component", "auth", "event", "login_failed", "client_ip", client)
 		writeAdminError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
 		return
@@ -106,7 +106,7 @@ func (a *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		delete(a.sessions, tokenDigest(cookie.Value))
 		a.mu.Unlock()
-		a.cancelGoAuth(tokenDigest(cookie.Value))
+		a.cancelOAuth(tokenDigest(cookie.Value))
 	}
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1, Secure: requestIsSecure(r)})
 	w.WriteHeader(http.StatusNoContent)
@@ -197,7 +197,7 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err := a.manager.Update(func(latest *config.Config) error {
-		if !a.goAuthSessionValid(goAuthOwner(r), *latest) || !config.VerifyPassword(latest.WebUI.PasswordHash, input.CurrentPassword) {
+		if !a.sessionValid(sessionID(r), *latest) || !config.VerifyPassword(latest.WebUI.PasswordHash, input.CurrentPassword) {
 			return errors.New("management account changed; sign in again")
 		}
 		if username := strings.TrimSpace(input.Username); username != "" {
@@ -215,18 +215,22 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.sessions = make(map[string]adminSession)
 	a.mu.Unlock()
-	a.cancelGoAuth("")
+	a.cancelOAuth("")
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1, Secure: requestIsSecure(r)})
 	a.logger.Info("admin account updated", "component", "auth", "event", "account_updated", "client_ip", clientIP(r))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"updated": true, "reauthenticate": true})
 }
 
-// allowLogin reports whether client may try to log in: at most five failures
-// per five-minute window. Once more than 1024 clients are tracked it also
-// drops windows older than five minutes and evicts the oldest window at capacity.
-func (a *Server) allowLogin(client string) bool {
+// reserveLoginCheck counts an attempt before password verification, so
+// concurrent requests cannot all pass the same failure count. Four active
+// checks bound the memory used by the deliberately expensive Argon2 hashes;
+// each client gets at most five attempts until a successful login clears them.
+func (a *Server) reserveLoginCheck(client string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.loginChecks >= 4 {
+		return false
+	}
 	now := time.Now()
 	if len(a.attempts) > 1024 {
 		for address, candidate := range a.attempts {
@@ -235,31 +239,26 @@ func (a *Server) allowLogin(client string) bool {
 			}
 		}
 	}
-	if _, exists := a.attempts[client]; !exists && len(a.attempts) >= 4096 {
-		a.removeOldestLoginWindowLocked()
-	}
-	window := a.attempts[client]
-	if window.Started.IsZero() || now.Sub(window.Started) > 5*time.Minute {
-		return true
-	}
-	return window.Count < 5
-}
-
-// recordLoginFailure adds one failure for client, starting a new window when
-// the previous one is older than five minutes.
-func (a *Server) recordLoginFailure(client string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := time.Now()
 	window := a.attempts[client]
 	if window.Started.IsZero() || now.Sub(window.Started) > 5*time.Minute {
 		window = loginWindow{Started: now}
+	}
+	if window.Count >= 5 {
+		return false
 	}
 	if _, exists := a.attempts[client]; !exists && len(a.attempts) >= 4096 {
 		a.removeOldestLoginWindowLocked()
 	}
 	window.Count++
 	a.attempts[client] = window
+	a.loginChecks++
+	return true
+}
+
+func (a *Server) releaseLoginCheck() {
+	a.mu.Lock()
+	a.loginChecks--
+	a.mu.Unlock()
 }
 
 // removeOldestLoginWindowLocked evicts one window so inserting a new client
@@ -316,6 +315,23 @@ func randomToken(length int) (string, error) {
 func tokenDigest(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+func sessionID(r *http.Request) string {
+	cookie, err := r.Cookie(adminCookieName)
+	if err != nil || cookie.Value == "" {
+		return ""
+	}
+	return tokenDigest(cookie.Value)
+}
+
+// sessionValid checks the current account as well as the expiry, so requests
+// waiting on upstream work cannot persist changes after a password change.
+func (a *Server) sessionValid(id string, cfg config.Config) bool {
+	a.mu.Lock()
+	session, ok := a.sessions[id]
+	a.mu.Unlock()
+	return ok && time.Now().Before(session.Expires) && session.Username == cfg.WebUI.Username && session.AuthVersion == config.Fingerprint(cfg.WebUI.PasswordHash)
 }
 
 // clientIP returns the IP address of the direct peer, without the port. It

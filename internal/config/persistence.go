@@ -10,8 +10,8 @@ import (
 	"runtime"
 )
 
-// SaveAtomic writes cfg to path as indented JSON, after clearing the resolved
-// proxy list (see PasswordForSave). It does not normalize cfg; callers pass a
+// SaveAtomic writes cfg to path as indented JSON. The unexported runtime proxy
+// list is never encoded. It does not normalize cfg; callers pass a
 // config that Normalize already accepted. An existing file is kept as
 // path+".bak".
 //
@@ -23,7 +23,6 @@ import (
 // replacement is renamed into place. If the replacement fails, the original
 // is restored and both replacement and rollback errors are returned.
 func SaveAtomic(path string, cfg Config) error {
-	cfg.PasswordForSave()
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)

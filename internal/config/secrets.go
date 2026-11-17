@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+
+	"opencode2api/internal/oauth"
 )
 
 // MaskValue hides a secret for display: "••••" followed by its last five
@@ -44,14 +46,14 @@ func RedactURL(raw string) string {
 // messages. It is safe for concurrent use: Replace swaps the whole secret set
 // atomically.
 type Redactor struct {
-	values atomic.Value
+	replacer atomic.Value
 }
 
 // SecretRedactor returns a Redactor with no secrets loaded; Replace loads
 // them.
 func SecretRedactor() *Redactor {
 	r := &Redactor{}
-	r.values.Store([]string(nil))
+	r.replacer.Store(strings.NewReplacer())
 	return r
 }
 
@@ -66,10 +68,13 @@ func (r *Redactor) Replace(cfg Config) {
 	values = append(values, cfg.ServerKeys...)
 	values = append(values, cfg.ZenKeys...)
 	values = append(values, cfg.GoKeys...)
-	if cfg.GoSubscription != nil {
-		values = append(values, cfg.GoSubscription.Credential.AccessToken, cfg.GoSubscription.Credential.RefreshToken)
-		if cfg.GoSubscription.Proxy != "" {
-			values = append(values, cfg.GoSubscription.Proxy)
+	for _, connection := range []*oauth.Connection{cfg.GoOAuth, cfg.ZenOAuth} {
+		if connection == nil {
+			continue
+		}
+		values = append(values, connection.Credential.AccessToken, connection.Credential.RefreshToken)
+		if connection.Proxy != "" {
+			values = append(values, connection.Proxy)
 		}
 	}
 	if cfg.WebUI.Password != "" {
@@ -96,18 +101,26 @@ func (r *Redactor) Replace(cfg Config) {
 		}
 	}
 	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
-	r.values.Store(values)
+	replacements := make([]string, 0, 2*len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		replacements = append(replacements, value, "***")
+	}
+	r.replacer.Store(strings.NewReplacer(replacements...))
 }
 
-// String returns value with every loaded secret of at least four bytes
-// replaced by "***".
+// String replaces every non-empty configured secret. One pass prevents a
+// short secret from rewriting masking text produced for another secret.
 func (r *Redactor) String(value string) string {
-	for _, secret := range r.values.Load().([]string) {
-		if len(secret) >= 4 {
-			value = strings.ReplaceAll(value, secret, "***")
-		}
+	replacer, _ := r.replacer.Load().(*strings.Replacer)
+	if replacer == nil {
+		return value
 	}
-	return value
+	return replacer.Replace(value)
 }
 
 // Fingerprint returns the first 16 hex digits of the SHA-256 of value. It is
@@ -120,14 +133,15 @@ func Fingerprint(value string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// KeyDisplayID returns the last five characters of value, or the whole value
-// when it has five characters or fewer. It is intentionally separate from
+// KeyDisplayID returns the last five characters of value, or its fingerprint
+// when it has five characters or fewer so a short key is never disclosed in
+// full. It is intentionally separate from
 // Fingerprint: it is meant to be read by a person, and it is the key_id of an
 // upstream key in logs, request telemetry and the key status list.
 func KeyDisplayID(value string) string {
 	runes := []rune(value)
 	if len(runes) <= 5 {
-		return string(runes)
+		return Fingerprint(value)
 	}
 	return string(runes[len(runes)-5:])
 }

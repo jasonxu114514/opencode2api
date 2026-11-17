@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"time"
 )
@@ -43,7 +42,7 @@ func CollapseStream(reader io.Reader, protocol Protocol, model string) ([]byte, 
 				terminated = true
 				return errStreamNormalTermination
 			case "error":
-				streamErr = fmt.Errorf("%s", firstNonEmpty(event.Error, "upstream stream failed"))
+				streamErr = &StreamFailure{Message: event.Error, Type: event.ErrorType}
 				return errStreamUpstreamFailure
 			default:
 				acc.apply(event)
@@ -148,14 +147,4 @@ func (acc *collapseAccumulator) toolBlock(key, id, name string) *bridgeBlock {
 	acc.response.Tools = append(acc.response.Tools, bridgeBlock{Kind: "tool_call", ID: id, Name: name})
 	acc.tools[key] = len(acc.response.Tools) - 1
 	return &acc.response.Tools[len(acc.response.Tools)-1]
-}
-
-// firstNonEmpty returns the first non-empty string, or "".
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

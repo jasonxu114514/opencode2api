@@ -1,7 +1,7 @@
 // Page: 模型与额度 — Go quota windows and free model availability.
 import { api, hasSession } from "../api.js";
 import { loadDebugModels } from "../data.js";
-import * as goAuth from "../go-auth.js";
+import * as oauth from "../oauth.js";
 import { t, onChange } from "../i18n.js";
 import { $, bindTabs, copyText, el, emptyRow, localTime, toast } from "../ui.js";
 
@@ -267,15 +267,15 @@ export default {
   title: "模型与额度",
   sub: "共享套餐额度与免费模型探测状态。",
   init() {
-    goAuth.init(load);
+    oauth.init(load);
     bindTabs($("#page-model-quotas"), (id) => {
       activeTab = id;
       if (id === "quota") {
-        goAuth.show();
+        oauth.show();
         load();
         startPolling();
       } else {
-        goAuth.hide();
+        oauth.hide();
         stopPolling();
         loadAvailability();
       }
@@ -296,7 +296,7 @@ export default {
   },
   show() {
     if (activeTab === "quota") {
-      goAuth.show();
+      oauth.show();
       load();
       startPolling();
     } else {
@@ -304,12 +304,12 @@ export default {
     }
   },
   hide() {
-    goAuth.hide();
+    oauth.hide();
     stopPolling();
   },
   refresh() {
     if (activeTab === "quota") {
-      goAuth.refresh();
+      oauth.refresh();
       load();
     } else loadAvailability();
   },
@@ -318,7 +318,7 @@ export default {
     data = null;
     loading = false;
     stopPolling();
-    goAuth.reset();
+    oauth.reset();
     $("#quota-account").replaceChildren();
     $("#quota-cards").replaceChildren();
     $("#quota-models").replaceChildren();

@@ -2,9 +2,7 @@ package gateway
 
 import (
 	"context"
-
 	"errors"
-
 	"time"
 
 	"opencode2api/internal/models"

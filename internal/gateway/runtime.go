@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
-	"opencode2api/internal/goauth"
 	modelcatalog "opencode2api/internal/models"
+	"opencode2api/internal/oauth"
 	"opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
 	"opencode2api/internal/telemetry"
@@ -64,9 +64,10 @@ type RuntimeController struct {
 	level              *slog.LevelVar
 	current            atomic.Pointer[gatewayRuntime]
 	updateMu           sync.Mutex
-	goSubscriptionMu   sync.Mutex
-	goAuthClient       *goauth.Client
-	goRefresh          *goSubscriptionRefresh
+	oauthMu            sync.Mutex
+	oauthClient        *oauth.Client
+	goRefresh          *oauthRefresh
+	zenRefresh         *oauthRefresh
 	effective          EffectiveListeners
 	metadata           *modelcatalog.PricingRegistry
 	availabilityCancel context.CancelFunc
@@ -144,7 +145,7 @@ func RuntimeManager(root context.Context, configPath string, cfg config.Config, 
 			manager.logger.Warn("model catalog cache ignored", "component", "models", "event", "catalog_cache_load_failed", "path", modelcatalog.CatalogCachePath(configPath), "error", err)
 		}
 	}
-	runtime.gateway.restoreGoSubscriptionCatalog()
+	runtime.gateway.restoreOAuthCatalog()
 	if err := cfg.Rotation.Validate(runtime.gateway.catalog.List()); err != nil {
 		if runtime.warpCreated && runtime.warpPool != nil {
 			runtime.warpPool.Close()
@@ -203,14 +204,29 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 		return nil, err
 	}
 	gateway.rotation = m.rotation
-	gateway.onGoSubscriptionUnauthorized = m.invalidateGoSubscription
-	gateway.resolveGoSubscription = func(ctx context.Context) (*goauth.Connection, error) {
-		connection, err := m.ResolveGoSubscription(ctx)
+	gateway.onGoOAuthUnauthorized = func(ctx context.Context, credential oauth.Credential) {
+		m.invalidateOAuth(ctx, credential)
+	}
+	gateway.resolveGoOAuth = func(ctx context.Context) (*oauth.Connection, error) {
+		connection, err := m.ResolveOAuth(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if !slices.Equal(cfg.RuntimeProxies(), m.Config().RuntimeProxies()) {
-			return nil, errors.New("Go subscription proxy configuration changed; retry with the current configuration")
+			return nil, errors.New("Go OAuth proxy configuration changed; retry with the current configuration")
+		}
+		return connection, nil
+	}
+	gateway.onZenOAuthUnauthorized = func(ctx context.Context, credential oauth.Credential) {
+		m.invalidateOAuth(ctx, credential, config.TierZen)
+	}
+	gateway.resolveZenOAuth = func(ctx context.Context) (*oauth.Connection, error) {
+		connection, err := m.ResolveOAuth(ctx, config.TierZen)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Equal(cfg.RuntimeProxies(), m.Config().RuntimeProxies()) {
+			return nil, errors.New("Zen OAuth proxy configuration changed; retry with the current configuration")
 		}
 		return connection, nil
 	}
@@ -388,7 +404,7 @@ func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (
 	if current != nil {
 		next.gateway.catalog.CopyState(current.gateway.catalog)
 	}
-	next.gateway.restoreGoSubscriptionCatalog()
+	next.gateway.restoreOAuthCatalog()
 	if err := normalized.Rotation.Validate(next.gateway.catalog.List()); err != nil {
 		if next.warpCreated && next.warpPool != nil {
 			next.warpPool.Close()
@@ -540,8 +556,8 @@ func (m *RuntimeController) Resources() ResourceSnapshot {
 	result := ResourceSnapshot{Models: models, Anonymous: gateway.cfg.Anonymous}
 	result.Metadata = gateway.catalog.MetadataSnapshot()
 	result.Keys = append(result.Keys, keyStatuses("zen", gateway.zenNodes)...)
-	if connection := gateway.cfg.GoSubscription; connection != nil {
-		status := KeyStatus{ID: subscriptionAccountID(connection), Tier: string(config.TierGo), ProxyIndex: -1, Bound: connection.Proxy != ""}
+	if connection := gateway.cfg.GoOAuth; connection != nil {
+		status := KeyStatus{ID: oauthAccountID(connection), Tier: string(config.TierGo), ProxyIndex: -1, Bound: connection.Proxy != ""}
 		for _, proxy := range gateway.transports.items {
 			if connection.Proxy != "" && proxy.name == connection.Proxy {
 				status.ProxyIndex = proxy.index
@@ -551,6 +567,16 @@ func (m *RuntimeController) Resources() ResourceSnapshot {
 		result.Keys = append(result.Keys, status)
 	} else {
 		result.Keys = append(result.Keys, keyStatuses("go", gateway.goNodes)...)
+	}
+	if connection := gateway.cfg.ZenOAuth; connection != nil {
+		status := KeyStatus{ID: oauthAccountID(connection), Tier: string(config.TierZen), ProxyIndex: -1, Bound: connection.Proxy != ""}
+		for _, proxy := range gateway.transports.items {
+			if connection.Proxy != "" && proxy.name == connection.Proxy {
+				status.ProxyIndex = proxy.index
+				break
+			}
+		}
+		result.Keys = append(result.Keys, status)
 	}
 	gateway.zenNodes.bindingsMu.Lock()
 	zenBindings := append([]int(nil), gateway.zenNodes.bindingCount...)
@@ -566,8 +592,11 @@ func (m *RuntimeController) Resources() ResourceSnapshot {
 		if proxy.index < len(goBindings) {
 			status.GoKeys = goBindings[proxy.index]
 		}
-		if gateway.cfg.GoSubscription != nil && gateway.cfg.GoSubscription.Proxy == proxy.name {
+		if gateway.cfg.GoOAuth != nil && gateway.cfg.GoOAuth.Proxy == proxy.name {
 			status.GoKeys = 1
+		}
+		if gateway.cfg.ZenOAuth != nil && gateway.cfg.ZenOAuth.Proxy == proxy.name {
+			status.ZenKeys = 1
 		}
 		result.Proxies = append(result.Proxies, status)
 	}
@@ -651,9 +680,13 @@ func (m *RuntimeController) DebugKeys() map[string][]DebugKeyView {
 			result[string(tier)] = append(result[string(tier)], view)
 		}
 	}
-	appendKeys(config.TierZen, runtime.gateway.zenNodes.nodes)
-	if connection := runtime.config.GoSubscription; connection != nil {
-		result["go"] = append(result["go"], DebugKeyView{ID: subscriptionAccountID(connection), Tier: config.TierGo, Display: "Go subscription"})
+	if connection := runtime.config.ZenOAuth; connection != nil {
+		result["zen"] = append(result["zen"], DebugKeyView{ID: oauthAccountID(connection), Tier: config.TierZen, Display: "Zen PAYG (OAuth)"})
+	} else {
+		appendKeys(config.TierZen, runtime.gateway.zenNodes.nodes)
+	}
+	if connection := runtime.config.GoOAuth; connection != nil {
+		result["go"] = append(result["go"], DebugKeyView{ID: oauthAccountID(connection), Tier: config.TierGo, Display: "Go OAuth"})
 	} else {
 		appendKeys(config.TierGo, runtime.gateway.goNodes.nodes)
 	}
@@ -689,9 +722,12 @@ func (m *RuntimeController) DebugRouteForTier(model string, tier config.Tier) (m
 	diagnostic.Tier, diagnostic.Anonymous = route.Tier, false
 	diagnostic.KeyTiers = []config.Tier{tier}
 	diagnostic.NativeProtocol, diagnostic.NativeProtocols = route.Protocol, route.Protocols
-	if tier != config.TierGo {
+	if connection := gateway.tierOAuth(tier); connection != nil {
+		diagnostic.ProtocolSource = string(tier) + "_oauth"
+		diagnostic.Channel, diagnostic.KeyID = "oauth", oauthAccountID(connection)
+	} else {
 		diagnostic.Channel, diagnostic.KeyID = "", ""
-		if diagnostic.ProtocolSource == "go_subscription" {
+		if diagnostic.ProtocolSource == "go_oauth" || diagnostic.ProtocolSource == "zen_oauth" {
 			diagnostic.ProtocolSource = "upstream"
 		}
 	}

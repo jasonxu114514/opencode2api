@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
-	"opencode2api/internal/goauth"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	"opencode2api/internal/models"
+	"opencode2api/internal/oauth"
 	wire "opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
 	"opencode2api/internal/telemetry"
@@ -102,8 +102,8 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 		meta.Session = ids.Session
 		meta.ModelAlias = alias
 	}
-	if g.cfg.GoSubscription != nil && g.cfg.GoSubscription.NeedsLogin {
-		wire.WriteError(w, external, http.StatusServiceUnavailable, (&goauth.OAuthError{Code: "invalid_grant"}).Error(), "subscription_auth_error", ids.Request)
+	if g.cfg.GoOAuth != nil && g.cfg.GoOAuth.NeedsLogin {
+		wire.WriteError(w, external, http.StatusServiceUnavailable, (&oauth.OAuthError{Code: "invalid_grant"}).Error(), "oauth_auth_error", ids.Request)
 		return
 	}
 	visited := map[string]bool{}
@@ -116,9 +116,9 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 		visited[token.Model] = true
 		route, err := g.routeForModel(token.Model, config.TierGo)
 		if err != nil {
-			var oauthError *goauth.OAuthError
+			var oauthError *oauth.OAuthError
 			if errors.As(err, &oauthError) {
-				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "subscription_auth_error", ids.Request)
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "oauth_auth_error", ids.Request)
 				return
 			}
 			continue
@@ -158,12 +158,12 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 			if result.err == nil {
 				return
 			}
-			var oauthError *goauth.OAuthError
+			var oauthError *oauth.OAuthError
 			if errors.As(result.err, &oauthError) {
-				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "subscription_auth_error", ids.Request)
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "oauth_auth_error", ids.Request)
 				return
 			}
-			if g.cfg.GoSubscription != nil && result.reason == "subscription_auth_error" {
+			if g.cfg.GoOAuth != nil && result.reason == "oauth_auth_error" {
 				return
 			}
 			if result.committed {
@@ -235,8 +235,8 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	var resp *http.Response
 	var toolRenames *wire.ToolRenames
 	shaped := false
-	if g.cfg.GoSubscription != nil {
-		resp, err = g.goSubscriptionAttempt(ctx, route, bodies[config.TierGo], ids, attempt, attempt-1, 0)
+	if g.cfg.GoOAuth != nil {
+		resp, err = g.oauthAttempt(ctx, route, bodies[config.TierGo], ids, attempt, attempt-1, 0)
 	} else {
 		var body []byte
 		body, toolRenames, shaped = g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
@@ -285,19 +285,19 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	}
 	if err != nil {
 		result.err = err
-		var oauthError *goauth.OAuthError
+		var oauthError *oauth.OAuthError
 		if errors.As(err, &oauthError) {
-			result.reason = "subscription_auth_error"
+			result.reason = "oauth_auth_error"
 		} else if errors.Is(err, errFirstEventTimeout) || ctx.Err() != nil {
 			result.reason = "first_output_timeout"
 		}
 		return result
 	}
-	if g.cfg.GoSubscription != nil && resp.StatusCode == http.StatusUnauthorized {
+	if g.cfg.GoOAuth != nil && resp.StatusCode == http.StatusUnauthorized {
 		w.Header().Set("x-request-id", ids.Request)
-		copyErrorResponse(w, external, resp, ids.Request)
-		result.err = errors.New("Go subscription authorization was rejected")
-		result.reason = "subscription_auth_error"
+		g.copyErrorResponse(w, external, resp, ids.Request)
+		result.err = errors.New("Go OAuth authorization was rejected")
+		result.reason = "oauth_auth_error"
 		result.committed = true
 		return result
 	}

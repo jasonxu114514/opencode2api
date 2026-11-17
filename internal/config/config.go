@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode"
 
-	"opencode2api/internal/goauth"
 	"opencode2api/internal/jsonutil"
+	"opencode2api/internal/oauth"
 	wire "opencode2api/internal/protocol"
 	"opencode2api/internal/warp"
 )
@@ -34,7 +34,8 @@ type Config struct {
 	ServerKeyMetadata map[string]ServerKeyMetadata `json:"server_key_metadata,omitempty"`
 	ZenKeys           []string                     `json:"zen_keys"`
 	GoKeys            []string                     `json:"go_keys"`
-	GoSubscription    *goauth.Connection           `json:"go_subscription,omitempty"`
+	GoOAuth           *oauth.Connection            `json:"go_oauth,omitempty"`
+	ZenOAuth          *oauth.Connection            `json:"zen_oauth,omitempty"`
 	Anonymous         bool                         `json:"anonymous"`
 	Warp              WarpConfig                   `json:"warp"`
 	Proxies           []string                     `json:"proxies"`
@@ -334,6 +335,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	data, err = migrateOAuthFields(data)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	cfg := Config{
 		Listen:      "127.0.0.1:8080",
 		Anonymous:   false,
@@ -380,10 +385,20 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if err := resolveProxyFiles(path, &cfg); err != nil {
 		return Config{}, err
 	}
-	if cfg.GoSubscription != nil {
-		connection := cloneGoSubscription(cfg.GoSubscription)
-		if err := connection.Validate(); err != nil {
-			return Config{}, errors.New("go_subscription contains an invalid credential or unsupported subscription route")
+	for _, account := range []struct {
+		name       string
+		plan       oauth.Plan
+		connection **oauth.Connection
+	}{
+		{"go_oauth", oauth.PlanGo, &cfg.GoOAuth},
+		{"zen_oauth", oauth.PlanZen, &cfg.ZenOAuth},
+	} {
+		if *account.connection == nil {
+			continue
+		}
+		connection := cloneOAuth(*account.connection)
+		if err := connection.ValidateForPlan(account.plan); err != nil {
+			return Config{}, fmt.Errorf("%s contains an invalid credential or unsupported OAuth route", account.name)
 		}
 		connection.Proxy = strings.TrimSpace(connection.Proxy)
 		if connection.Proxy != "" {
@@ -395,10 +410,10 @@ func Normalize(path string, cfg Config) (Config, error) {
 				}
 			}
 			if !matched {
-				return Config{}, errors.New("go_subscription.proxy must name a configured proxy")
+				return Config{}, fmt.Errorf("%s.proxy must name a configured proxy", account.name)
 			}
 		}
-		cfg.GoSubscription = connection
+		*account.connection = connection
 	}
 	if cfg.Prefer != TierZen && cfg.Prefer != TierGo {
 		return Config{}, errors.New("prefer must be \"zen\" or \"go\"")
@@ -435,8 +450,8 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if cfg.FirstEnabledServerKey() == "" {
 		return Config{}, errors.New("at least one server key must remain enabled")
 	}
-	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 && cfg.GoSubscription == nil {
-		return Config{}, errors.New("configure a Zen API Key (zen_keys), a Go key (go_keys), or a Go subscription (go_subscription); anonymous access is disabled by default and may be blocked upstream")
+	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 && cfg.GoOAuth == nil && cfg.ZenOAuth == nil {
+		return Config{}, errors.New("configure a Zen API Key (zen_keys), a Go key (go_keys), or a saved Go/Zen OAuth connection; anonymous access is disabled by default and may be blocked upstream")
 	}
 	if cfg.Retry.MaxAttempts < 1 {
 		return Config{}, errors.New("retry.max_attempts must be at least 1")
@@ -556,6 +571,9 @@ func normalizeReasoning(cfg *Config) error {
 		if err := validateEffort(fmt.Sprintf("reasoning.effort_by_model[%q]", key), level); err != nil {
 			return err
 		}
+		if existing, exists := normalized[key]; exists && existing != level {
+			return errors.New("reasoning.effort_by_model contains conflicting entries for the same model ID")
+		}
 		normalized[key] = level
 	}
 	cfg.Reasoning.EffortByModel = normalized
@@ -598,15 +616,6 @@ func (cfg Config) RuntimeProxies() []string {
 	return []string{"direct"}
 }
 
-// PasswordForSave clears the resolved proxy list (the proxies plus proxyfile
-// entries that RuntimeProxies returns), leaving only Config.Proxies; despite
-// its name it does not touch the WebUI password. SaveAtomic calls it on its
-// own copy before encoding. The field is unexported and so never encoded
-// anyway, which makes the call a guard rather than a requirement.
-func (cfg *Config) PasswordForSave() {
-	cfg.effectiveProxies = nil
-}
-
 // Clone returns a copy of cfg whose slices and maps, including the rotation
 // orders and the resolved proxy list, no longer share storage with cfg.
 func Clone(cfg Config) Config {
@@ -620,7 +629,8 @@ func Clone(cfg Config) Config {
 	cfg.ServerKeyMetadata = metadata
 	cfg.ZenKeys = append([]string(nil), cfg.ZenKeys...)
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
-	cfg.GoSubscription = cloneGoSubscription(cfg.GoSubscription)
+	cfg.GoOAuth = cloneOAuth(cfg.GoOAuth)
+	cfg.ZenOAuth = cloneOAuth(cfg.ZenOAuth)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)
 	cfg.effectiveProxies = append([]string(nil), cfg.effectiveProxies...)
 	if cfg.Upstream.PromptEnvironment != nil {
@@ -655,12 +665,12 @@ func Clone(cfg Config) Config {
 	return cfg
 }
 
-func cloneGoSubscription(source *goauth.Connection) *goauth.Connection {
+func cloneOAuth(source *oauth.Connection) *oauth.Connection {
 	if source == nil {
 		return nil
 	}
 	connection := *source
-	connection.Routes = make(map[string]goauth.Route, len(source.Routes))
+	connection.Routes = make(map[string]oauth.Route, len(source.Routes))
 	for model, route := range source.Routes {
 		connection.Routes[model] = route
 	}
@@ -680,24 +690,27 @@ func normalizeProxyBindings(cfg *Config) error {
 		return nil
 	}
 	keyMap := make(map[string]string, len(cfg.ZenKeys)+len(cfg.GoKeys))
-	for _, k := range cfg.ZenKeys {
-		fp := Fingerprint(k)
-		keyMap[k] = fp
-		keyMap[fp] = fp
+	for _, key := range cfg.ZenKeys {
+		fingerprint := Fingerprint(key)
+		keyMap[key] = fingerprint
+		keyMap[fingerprint] = fingerprint
 	}
-	for _, k := range cfg.GoKeys {
-		fp := Fingerprint(k)
-		keyMap[k] = fp
-		keyMap[fp] = fp
+	for _, key := range cfg.GoKeys {
+		fingerprint := Fingerprint(key)
+		keyMap[key] = fingerprint
+		keyMap[fingerprint] = fingerprint
 	}
 
 	knownProxies := make(map[string]string)
 	for _, raw := range cfg.RuntimeProxies() {
-		clean, _ := ParseProxyEntry(raw)
 		knownProxies[raw] = raw
-		knownProxies[clean] = raw
-		if clean == "direct" {
-			knownProxies["direct"] = "direct"
+	}
+	for _, raw := range cfg.RuntimeProxies() {
+		clean, _ := ParseProxyEntry(raw)
+		// An explicitly configured static route wins over the clean alias of
+		// a pool route that happens to dial the same endpoint.
+		if _, exists := knownProxies[clean]; !exists {
+			knownProxies[clean] = raw
 		}
 	}
 
@@ -705,7 +718,7 @@ func normalizeProxyBindings(cfg *Config) error {
 	for keyRef, proxyRef := range cfg.ProxyBindings {
 		trimmedKey := strings.TrimSpace(keyRef)
 		trimmedProxy := strings.TrimSpace(proxyRef)
-		fp, ok := keyMap[trimmedKey]
+		fingerprint, ok := keyMap[trimmedKey]
 		if !ok {
 			return fmt.Errorf("proxy_bindings contains reference to unknown key %q", MaskValue(trimmedKey))
 		}
@@ -713,7 +726,10 @@ func normalizeProxyBindings(cfg *Config) error {
 		if !ok {
 			return fmt.Errorf("proxy_bindings references unknown proxy %q", RedactURL(trimmedProxy))
 		}
-		normalized[fp] = canonicalProxy
+		if existing, exists := normalized[fingerprint]; exists && existing != canonicalProxy {
+			return errors.New("proxy_bindings contains conflicting entries for the same key")
+		}
+		normalized[fingerprint] = canonicalProxy
 	}
 	cfg.ProxyBindings = normalized
 	return nil

@@ -53,8 +53,8 @@ type BunOptions struct {
 // Idle connections are pooled per host, up to MaxIdleConnsPerHost, until
 // IdleConnTimeout. A pooled connection the server closes is dropped while it
 // is idle, and a reused connection the server drops before answering is
-// retried once on a fresh one. Unlike http.Transport it does not cap the
-// connections per host.
+// retried once on a fresh one when the request is safe to replay. Unlike
+// http.Transport it does not cap the connections per host.
 type BunTransport struct {
 	proxy                 *url.URL
 	dialContext           func(context.Context, string, string) (net.Conn, error)
@@ -149,11 +149,24 @@ func (t *BunTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err == nil {
 			return resp, nil
 		}
-		if info.Reused && dropped && !retried && ctx.Err() == nil {
+		if info.Reused && dropped && !retried && ctx.Err() == nil && bunReplayable(req, body) {
 			continue
 		}
 		return nil, bunContextError(ctx, err)
 	}
+}
+
+func bunReplayable(req *http.Request, body []byte) bool {
+	if body != nil && req.GetBody == nil {
+		return false
+	}
+	switch req.Method {
+	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	}
+	// A lost response does not prove that the server ignored a POST. Require
+	// the caller to opt into duplicate suppression before replaying one.
+	return req.Header.Get("Idempotency-Key") != "" || req.Header.Get("X-Idempotency-Key") != ""
 }
 
 // readRequestBody reads and closes the body of req. It returns nil for a
@@ -413,6 +426,7 @@ func isBunEncoding(encoding string) bool {
 // bunDecoder decompresses a response body. The decoder is built on the first
 // Read, so RoundTrip never waits for a compression header.
 type bunDecoder struct {
+	mu       sync.Mutex
 	body     *bunBody
 	encoding string
 	reader   io.Reader
@@ -421,11 +435,14 @@ type bunDecoder struct {
 }
 
 func (d *bunDecoder) Read(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.err != nil {
 		return 0, d.err
 	}
 	if d.reader == nil {
 		if d.reader, d.release, d.err = newBunDecoder(d.encoding, d.body); d.err != nil {
+			_ = d.body.Close()
 			return 0, d.err
 		}
 	}
@@ -434,6 +451,7 @@ func (d *bunDecoder) Read(p []byte) (int, error) {
 		d.err = err
 		if d.release != nil {
 			d.release()
+			d.release = nil
 		}
 		if err == io.EOF {
 			// A decoder can stop at the end of its own stream and leave the
@@ -446,7 +464,17 @@ func (d *bunDecoder) Read(p []byte) (int, error) {
 }
 
 func (d *bunDecoder) Close() error {
-	return d.body.Close()
+	err := d.body.Close()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.release != nil {
+		d.release()
+		d.release = nil
+	}
+	if d.err == nil {
+		d.err = http.ErrBodyReadAfterClose
+	}
+	return err
 }
 
 // newBunDecoder returns a reader decoding r for encoding and, when the
@@ -464,9 +492,13 @@ func newBunDecoder(encoding string, r io.Reader) (io.Reader, func(), error) {
 		}
 		if header[0]&0x0f == 8 && (uint16(header[0])<<8|uint16(header[1]))%31 == 0 {
 			decoder, err := zlib.NewReader(reader)
-			return decoder, nil, err
+			if err != nil {
+				return nil, nil, err
+			}
+			return decoder, func() { _ = decoder.Close() }, nil
 		}
-		return flate.NewReader(reader), nil, nil
+		decoder := flate.NewReader(reader)
+		return decoder, func() { _ = decoder.Close() }, nil
 	case "br":
 		return brotli.NewReader(r), nil, nil
 	case "zstd":
@@ -479,7 +511,10 @@ func newBunDecoder(encoding string, r io.Reader) (io.Reader, func(), error) {
 		return decoder, decoder.Close, nil
 	default:
 		decoder, err := gzip.NewReader(r)
-		return decoder, nil, err
+		if err != nil {
+			return nil, nil, err
+		}
+		return decoder, func() { _ = decoder.Close() }, nil
 	}
 }
 
@@ -536,8 +571,24 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	if method == "" {
 		method = http.MethodGet
 	}
+	if !validHeaderField(method, "") {
+		return nil, false, errors.New("bun transport: invalid request method")
+	}
+	requestURI := req.URL.RequestURI()
+	for index := range len(requestURI) {
+		if requestURI[index] <= ' ' || requestURI[index] == 0x7f {
+			return nil, false, errors.New("bun transport: invalid request URI")
+		}
+	}
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
+	}
+	if host == "" || !validHeaderField("Host", host) || strings.ContainsAny(host, " \t/\\#?@") {
+		return nil, false, errors.New("bun transport: invalid request host")
+	}
 	var head strings.Builder
-	head.WriteString(method + " " + req.URL.RequestURI() + " HTTP/1.1\r\n")
+	head.WriteString(method + " " + requestURI + " HTTP/1.1\r\n")
 	// fetch computes Content-Length itself when it has a body, so it appears in
 	// the common-header block instead of trailing the request. Header order is
 	// part of what a fingerprint sees, so it belongs where the runtime puts it.
@@ -566,10 +617,6 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 		head.WriteString("Accept: */*\r\n")
 	}
 	// fetch takes Host from the parsed URL, which omits a default port.
-	host := req.Host
-	if host == "" {
-		host = req.URL.Host
-	}
 	if req.URL.Scheme == "https" {
 		host = strings.TrimSuffix(host, ":443")
 	} else {

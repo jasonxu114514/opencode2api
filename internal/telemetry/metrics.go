@@ -320,6 +320,7 @@ var latencyBounds = [...]uint64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 3000
 // request was routed to a tier, and a request that carries a request ID and a
 // model joins the recent requests.
 func (m *Metrics) Record(endpoint string, status int, duration time.Duration, meta *RequestMeta) {
+	endpoint = metricEndpoint(endpoint)
 	success := requestSucceeded(status, meta)
 	m.total.Add(1)
 	if success {
@@ -397,6 +398,17 @@ func (m *Metrics) Record(endpoint string, status int, duration time.Duration, me
 		}
 	}
 	m.mu.Unlock()
+}
+
+// metricEndpoint bounds label cardinality before authentication or routing.
+// Arbitrary 404 paths must not allocate a new counter on every request.
+func metricEndpoint(path string) string {
+	switch path {
+	case "/healthz", "/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/systemone":
+		return path
+	default:
+		return "other"
+	}
 }
 
 // requestSucceeded reports whether a request counts as a success: a 2xx or 3xx

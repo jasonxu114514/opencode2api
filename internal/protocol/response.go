@@ -29,7 +29,7 @@ func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
 		return nil, err
 	}
 	if response.Error != "" || response.Stop == "error" {
-		return nil, fmt.Errorf("upstream response failed: %s", jsonutil.FirstString(response.Error, "upstream response failed"))
+		return nil, &StreamFailure{Message: response.Error, Type: "upstream_error"}
 	}
 	return json.Marshal(encodeBridgeResponse(to, response))
 }

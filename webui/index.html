@@ -13,16 +13,7 @@
     <link rel="stylesheet" href="/css/base.css" />
     <link rel="stylesheet" href="/css/components.css" />
     <link rel="stylesheet" href="/css/pages.css" />
-    <script>
-      // Apply the stored theme before first paint; theme.js owns every change.
-      try {
-        var opencodeTheme = localStorage.getItem("opencode2api.ui.theme") || "auto";
-        var opencodeDark =
-          opencodeTheme === "dark" ||
-          (opencodeTheme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.setAttribute("data-theme", opencodeDark ? "dark" : "light");
-      } catch (_) {}
-    </script>
+    <script src="/js/theme-init.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main" data-i18n="a11y.skip">跳到主要内容</a>
@@ -650,18 +641,35 @@
               <section class="section">
                 <div class="section-head">
                   <div>
-                    <h2 class="section-title" data-i18n="goAuth.title">Go 订阅登录</h2>
-                    <p class="section-caption" data-i18n="goAuth.caption">通过 OpenCode 官方页面授权，无需复制凭证。手动 Go Key 仍保留，订阅连接期间不作备用通道，断开后恢复原有路由。</p>
+                    <h2 class="section-title" data-i18n="goOAuth.title">Go OAuth 登录</h2>
+                    <p class="section-caption" data-i18n="goOAuth.caption">通过 OpenCode 官方页面完成 Go OAuth 授权，无需复制凭证。手动 Go Key 仍保留，Go OAuth 连接期间不作备用通道，断开后恢复原有路由。</p>
                   </div>
-                  <button id="go-auth-refresh" type="button" class="btn btn-sm" data-i18n="goAuth.refresh">刷新登录状态</button>
+                  <button id="go-oauth-refresh" type="button" class="btn btn-sm" data-i18n="oauth.refresh">刷新登录状态</button>
                 </div>
-                <div id="go-auth-content" class="stack" role="status" aria-live="polite"></div>
+                <div id="go-oauth-content" class="stack" role="status" aria-live="polite"></div>
                 <div class="key-actions">
-                  <button id="go-auth-start" type="button" class="btn btn-sm btn-primary" data-i18n="goAuth.start">浏览器登录 Go 订阅</button>
-                  <button id="go-auth-cancel" type="button" class="btn btn-sm hidden" data-i18n="goAuth.cancel">取消本次登录</button>
-                  <button id="go-auth-disconnect" type="button" class="btn btn-sm btn-danger hidden" data-i18n="goAuth.disconnect">断开 Go 订阅登录</button>
+                  <button id="go-oauth-start" type="button" class="btn btn-sm btn-primary" data-i18n="goOAuth.start">浏览器登录 Go OAuth</button>
+                  <button id="go-oauth-cancel" type="button" class="btn btn-sm hidden" data-i18n="oauth.cancel">取消本次登录</button>
+                  <button id="go-oauth-disconnect" type="button" class="btn btn-sm btn-danger hidden" data-i18n="goOAuth.disconnect">断开 Go OAuth 登录</button>
                 </div>
-                <p class="section-caption" data-i18n="goAuth.notice">只接入已确认的 Go 订阅路由，不自动改用余额通道。OAuth 订阅额度查询不可用时显示未知，不推算剩余额度。</p>
+                <p class="section-caption" data-i18n="goOAuth.notice">只接入已确认的 Go 订阅路由，不自动改用余额通道。Go 订阅额度查询不可用时显示未知，不推算剩余额度。</p>
+              </section>
+              <section class="section">
+                <div class="section-head">
+                  <div>
+                    <h2 class="section-title" data-i18n="zenOAuth.title">Zen / Console PAYG OAuth</h2>
+                    <p class="section-caption" data-i18n="zenOAuth.caption">独立授权 Zen 按量付费通道；保留手动 Zen Key 和 Go OAuth 连接。Go OAuth 登录不会启用此通道。</p>
+                  </div>
+                  <button id="zen-oauth-refresh" type="button" class="btn btn-sm" data-i18n="oauth.refresh">刷新登录状态</button>
+                </div>
+                <p class="config-warning" data-i18n="zenOAuth.notice">启用后走 Zen OAuth 的请求按 PAYG 消耗 credits，不使用 Go 订阅额度；不会自动将 Go 失败转入本通道，模型仍依配置 prefer 选路。</p>
+                <div id="zen-oauth-content" class="stack" role="status" aria-live="polite"></div>
+                <div class="key-actions">
+                  <button id="zen-oauth-start" type="button" class="btn btn-sm btn-primary" data-i18n="zenOAuth.start">浏览器登录 Zen / Console PAYG</button>
+                  <button id="zen-oauth-cancel" type="button" class="btn btn-sm hidden" data-i18n="oauth.cancel">取消本次登录</button>
+                  <button id="zen-oauth-disconnect" type="button" class="btn btn-sm btn-danger hidden" data-i18n="zenOAuth.disconnect">断开 Zen / Console PAYG 登录</button>
+                </div>
+                <p class="section-caption" data-i18n="zenOAuth.balanceNotice">本页 Go 额度不代表 Zen credits 余额；不推算 PAYG 余额或可用次数，请在官方 Console 查看计费信息。断开仅移除本地登录，不撤销官方会话。</p>
               </section>
               <section class="section">
                 <div class="section-head">

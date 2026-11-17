@@ -3,14 +3,17 @@ import * as store from "./store.js";
 import { t } from "./i18n.js";
 
 let csrf = "";
+let sessionVersion = 0;
 let onUnauthorized = null;
 
 export function setCsrf(value) {
   csrf = value || "";
+  sessionVersion++;
 }
 
 export function clearCsrf() {
   csrf = "";
+  sessionVersion++;
 }
 
 export function hasSession() {
@@ -22,13 +25,18 @@ export function setUnauthorizedHandler(handler) {
 }
 
 export async function api(path, options = {}) {
+  const requestVersion = sessionVersion;
   const headers = { ...(options.headers || {}), Accept: "application/json" };
   if (options.body) headers["Content-Type"] = "application/json";
   if (csrf && !["GET", "HEAD"].includes((options.method || "GET").toUpperCase()))
     headers["X-CSRF-Token"] = csrf;
   const response = await fetch(path, { ...options, headers });
+  const data = response.status === 204 ? null : await response.json().catch(() => ({}));
+  // A response from a previous login must not reveal data or invalidate the
+  // new session after the operator logs out and signs in again.
+  if (requestVersion !== sessionVersion)
+    throw new DOMException("The management session changed", "AbortError");
   if (response.status === 204) return null;
-  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     // The login endpoint answers 401 for bad credentials: surface its message
     // instead of treating the attempt as an expired session.

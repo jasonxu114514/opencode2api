@@ -6,13 +6,14 @@ package rotation
 import (
 	"encoding/json"
 	"fmt"
-	"opencode2api/internal/config"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
 	"time"
+
+	"opencode2api/internal/config"
 )
 
 // Attempt is one upstream attempt of a rotation request, kept for the WebUI.
@@ -85,13 +86,13 @@ type Manager struct {
 func New(path string, cfg config.RotationConfig) (*Manager, error) {
 	m := &Manager{path: path}
 	if path != "" {
-		b, e := os.ReadFile(path)
-		if e == nil {
-			if e = json.Unmarshal(b, &m.state); e != nil {
-				return nil, fmt.Errorf("invalid rotation state: %w", e)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			if err := json.Unmarshal(data, &m.state); err != nil {
+				return nil, fmt.Errorf("invalid rotation state: %w", err)
 			}
-		} else if !os.IsNotExist(e) {
-			return nil, e
+		} else if !os.IsNotExist(err) {
+			return nil, err
 		}
 	}
 	if len(m.state.Groups) != 0 && (len(m.state.Groups) != 2 || m.state.Groups[0] == nil || m.state.Groups[1] == nil || m.state.Groups[0].ID != "sota" || m.state.Groups[1].ID != "sweet") {
@@ -214,8 +215,8 @@ func (m *Manager) Snapshot() Snapshot {
 	return s
 }
 
-// group returns the group with id, or nil. The caller holds m.mu.
-func (m *Manager) group(id string) *Group {
+// groupLocked returns the group with id, or nil. The caller holds m.mu.
+func (m *Manager) groupLocked(id string) *Group {
 	for _, g := range m.state.Groups {
 		if g.ID == id {
 			return g
@@ -224,8 +225,8 @@ func (m *Manager) group(id string) *Group {
 	return nil
 }
 
-// usable reports whether model is available in g and not paused.
-func usable(g *Group, model string) bool {
+// modelUsable reports whether model is available in g and not paused.
+func modelUsable(g *Group, model string) bool {
 	return g.Available[model] && !time.Now().Before(g.Paused[model])
 }
 
@@ -237,18 +238,18 @@ func usable(g *Group, model string) bool {
 func (m *Manager) Select(id string, visited map[string]bool) (Token, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	g := m.group(id)
+	g := m.groupLocked(id)
 	if g == nil || len(g.Order) == 0 {
 		return Token{}, false
 	}
 	start := max(slices.Index(g.Order, g.Current), 0)
 	for n := 0; n < len(g.Order); n++ {
 		model := g.Order[(start+n)%len(g.Order)]
-		if visited[model] || !usable(g, model) {
+		if visited[model] || !modelUsable(g, model) {
 			continue
 		}
 		// A request-local skip must not change a newer, healthy global selection.
-		if !usable(g, g.Current) {
+		if !modelUsable(g, g.Current) {
 			m.switchLocked(g, model, "当前模型暂停或已下架")
 			m.saveLocked()
 		}
@@ -279,7 +280,7 @@ func (m *Manager) switchLocked(g *Group, to, reason string) {
 func (m *Manager) Fail(t Token, pause time.Duration, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	g := m.group(t.Group)
+	g := m.groupLocked(t.Group)
 	if g == nil {
 		return
 	}
@@ -292,7 +293,7 @@ func (m *Manager) Fail(t Token, pause time.Duration, reason string) {
 		next := t.Model
 		for n := 1; n < len(g.Order); n++ {
 			v := g.Order[(start+n)%len(g.Order)]
-			if usable(g, v) {
+			if modelUsable(g, v) {
 				next = v
 				break
 			}
@@ -308,7 +309,7 @@ func (m *Manager) Fail(t Token, pause time.Duration, reason string) {
 func (m *Manager) Manual(id, model string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	g := m.group(id)
+	g := m.groupLocked(id)
 	if g == nil || !slices.Contains(g.Order, model) || !g.Available[model] {
 		return fmt.Errorf("请选择该组当前可用的 Go 模型")
 	}

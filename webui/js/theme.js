@@ -1,5 +1,5 @@
-// Theme handling: an auto/light/dark cycle persisted per browser. The inline
-// head script applies the stored choice before first paint; this module owns
+// Theme handling: an auto/light/dark cycle persisted per browser. The
+// theme-init script applies the stored choice before first paint; this module owns
 // the topbar toggle and keeps "auto" tracking the system preference.
 import { t, onChange } from "./i18n.js";
 

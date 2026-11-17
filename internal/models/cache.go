@@ -19,7 +19,7 @@ import (
 
 // modelCatalogCacheSchemaVersion is the layout version of the catalog cache. A
 // file with any other version is rejected, so bump it with every layout change.
-const modelCatalogCacheSchemaVersion = 3
+const modelCatalogCacheSchemaVersion = 4
 
 // modelCatalogCacheWriteMu serializes cache writes across catalogs: every
 // runtime built from one config writes the same cache file.
@@ -34,6 +34,8 @@ type modelCatalogCache struct {
 	NativeProtocols map[config.Tier]map[string]wire.Protocol `json:"native_protocols"`
 	Unsupported     map[config.Tier]map[string]bool          `json:"unsupported"`
 	Metadata        map[config.Tier]map[string]Metadata      `json:"metadata,omitempty"`
+	OAuthTiers      []config.Tier                            `json:"oauth_tiers,omitempty"`
+	PendingTiers    []config.Tier                            `json:"pending_tiers,omitempty"`
 }
 
 // LoadCache installs a validated disk snapshot into a catalog. It deliberately
@@ -52,11 +54,22 @@ func (c *ModelCatalog) LoadCache(path string) error {
 	c.nativeProtocols = cloneTierProtocols(cache.NativeProtocols)
 	c.unsupported = cloneTierBools(cache.Unsupported)
 	c.modelMeta = cloneModelMeta(cache.Metadata)
+	c.oauthTiers = make(map[config.Tier]bool, len(cache.OAuthTiers))
+	c.pendingTiers = make(map[config.Tier]bool, len(cache.PendingTiers))
+	for _, tier := range cache.PendingTiers {
+		c.pendingTiers[tier] = true
+	}
+	for _, tier := range cache.OAuthTiers {
+		c.oauthTiers[tier] = true
+	}
 	c.updatedAt = cache.UpdatedAt.UTC()
 	c.cacheSource = "disk"
 	c.stale = true
 	if c.cachePath == "" {
 		c.cachePath = path
+	}
+	for _, tier := range cache.OAuthTiers {
+		c.clearOAuthTierLocked(tier)
 	}
 	c.mu.Unlock()
 	return nil
@@ -76,6 +89,14 @@ func (c *ModelCatalog) SaveCache() error {
 		NativeProtocols: cloneTierProtocols(c.nativeProtocols),
 		Unsupported:     cloneTierBools(c.unsupported),
 		Metadata:        cloneModelMeta(c.modelMeta),
+	}
+	for _, tier := range []config.Tier{config.TierZen, config.TierGo} {
+		if c.oauthTiers[tier] {
+			cache.OAuthTiers = append(cache.OAuthTiers, tier)
+		}
+		if c.pendingTiers[tier] {
+			cache.PendingTiers = append(cache.PendingTiers, tier)
+		}
 	}
 	c.mu.RUnlock()
 	if path == "" {
@@ -125,11 +146,25 @@ func loadModelCatalogCache(path string) (modelCatalogCache, error) {
 	}
 	cache.Zen = normalizeModelIDs(cache.Zen)
 	cache.Go = normalizeModelIDs(cache.Go)
-	if len(cache.Zen) == 0 && len(cache.Go) == 0 {
+	if len(cache.Zen) == 0 && len(cache.Go) == 0 && len(cache.OAuthTiers) == 0 && len(cache.PendingTiers) == 0 {
 		return modelCatalogCache{}, errors.New("model catalog cache is empty")
 	}
 	if err := validateCatalogCapabilities(cache.NativeProtocols, cache.Unsupported); err != nil {
 		return modelCatalogCache{}, err
+	}
+	seenOAuth := make(map[config.Tier]bool, len(cache.OAuthTiers))
+	for _, tier := range cache.OAuthTiers {
+		if tier != config.TierZen && tier != config.TierGo || seenOAuth[tier] {
+			return modelCatalogCache{}, errors.New("model catalog cache contains invalid OAuth tier sources")
+		}
+		seenOAuth[tier] = true
+	}
+	seenPending := make(map[config.Tier]bool, len(cache.PendingTiers))
+	for _, tier := range cache.PendingTiers {
+		if tier != config.TierZen && tier != config.TierGo || seenPending[tier] {
+			return modelCatalogCache{}, errors.New("model catalog cache contains invalid pending tier sources")
+		}
+		seenPending[tier] = true
 	}
 	cache.NativeProtocols = cloneTierProtocols(cache.NativeProtocols)
 	cache.Unsupported = cloneTierBools(cache.Unsupported)

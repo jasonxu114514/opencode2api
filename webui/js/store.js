@@ -13,6 +13,10 @@ export function get(key) {
   return state[key];
 }
 
+export function clear() {
+  for (const key of Object.keys(state)) state[key] = null;
+}
+
 export function set(key, value) {
   state[key] = value;
   const subscribers = listeners.get(key);

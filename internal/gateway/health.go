@@ -9,6 +9,7 @@ import (
 	"opencode2api/internal/config"
 	"opencode2api/internal/httpx"
 	modelcatalog "opencode2api/internal/models"
+	"opencode2api/internal/oauth"
 	wire "opencode2api/internal/protocol"
 )
 
@@ -70,7 +71,10 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, models := g.availableModels()
 	proxyTotal, proxyHealthy := g.transports.healthCounts()
 	zenKeys, goKeys := g.zenNodes.Len(), g.goNodes.Len()
-	if g.cfg.GoSubscription != nil {
+	if g.cfg.ZenOAuth != nil {
+		zenKeys = 1
+	}
+	if g.cfg.GoOAuth != nil {
 		goKeys = 1
 	}
 	staleAfter := max(2*time.Duration(g.cfg.Models.RefreshSeconds)*time.Second, time.Minute)
@@ -96,8 +100,11 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	modelStatus := "ready"
 	var lastRefresh *time.Time
 	issues := make([]string, 0, 3)
-	if g.cfg.GoSubscription != nil && g.cfg.GoSubscription.NeedsLogin {
-		issues = append(issues, "go_subscription_authorization_required")
+	if g.cfg.GoOAuth != nil && g.cfg.GoOAuth.NeedsLogin {
+		issues = append(issues, "go_oauth_authorization_required")
+	}
+	if g.cfg.ZenOAuth != nil && g.cfg.ZenOAuth.NeedsLogin {
+		issues = append(issues, "zen_oauth_authorization_required")
 	}
 	if models.UpdatedAt.IsZero() {
 		modelStatus = "pending"
@@ -122,7 +129,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	// Proxies carry Go-tier traffic whenever Go keys exist, and every lane
 	// while WARP is off; free-model traffic alone does not need them.
-	proxyBlocking := proxyHealthy == 0 && (g.warp == nil || goKeys > 0)
+	proxyBlocking := proxyHealthy == 0 && (g.warp == nil || goKeys > 0 || g.cfg.ZenOAuth != nil)
 	if proxyHealthy == 0 {
 		issues = append(issues, "no_healthy_proxies")
 	}
@@ -167,17 +174,23 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (g *Gateway) availableModels() ([]modelcatalog.Route, modelcatalog.CatalogSnapshot) {
-	if g.cfg.GoSubscription == nil {
+	if g.cfg.GoOAuth == nil && g.cfg.ZenOAuth == nil && !g.catalog.TierPending(config.TierGo) && !g.catalog.TierPending(config.TierZen) {
 		return g.catalog.AvailableModels(g.zenNodes.Len() > 0, g.goNodes.Len() > 0, g.cfg.Anonymous)
 	}
 	modelIDs := g.catalog.List()
-	seen := make(map[string]bool, len(modelIDs)+len(g.cfg.GoSubscription.Routes))
+	seen := make(map[string]bool, len(modelIDs))
 	for _, model := range modelIDs {
 		seen[model] = true
 	}
-	for model := range g.cfg.GoSubscription.Routes {
-		if !seen[model] {
-			modelIDs = append(modelIDs, model)
+	for _, connection := range []*oauth.Connection{g.cfg.GoOAuth, g.cfg.ZenOAuth} {
+		if connection == nil {
+			continue
+		}
+		for model := range connection.Routes {
+			if !seen[model] {
+				modelIDs = append(modelIDs, model)
+				seen[model] = true
+			}
 		}
 	}
 	slices.Sort(modelIDs)

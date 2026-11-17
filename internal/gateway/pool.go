@@ -151,18 +151,16 @@ func (p *anonymousNodes) HasPool() bool {
 	return p != nil && p.hasPool
 }
 
-// CursorFor returns a cursor whose first node is stable for a non-empty
-// affinity key, keeping a conversation on one exit; an empty affinity rotates
-// the starting node round-robin.
 // CursorForProxy returns a cursor whose first Next hands back the node that
 // uses proxy and whose second returns nil, so a relay-pinned diagnostic
 // attempts exactly one exit. A proxy outside the pool yields the same
 // single-shot cursor over no node, which the caller reports as an error.
 func (p *anonymousNodes) CursorForProxy(proxy *proxyTransport) anonymousCursor {
-	c := anonymousCursor{pool: p, offset: len(p.nodes), single: true}
+	c := anonymousCursor{pool: p, start: -1, single: true}
 	if p == nil || proxy == nil {
 		return c
 	}
+	c.offset = len(p.nodes)
 	for i, node := range p.nodes {
 		if node.proxy == proxy {
 			c.start = i
@@ -172,6 +170,9 @@ func (p *anonymousNodes) CursorForProxy(proxy *proxyTransport) anonymousCursor {
 	return c
 }
 
+// CursorFor returns a cursor whose first node is stable for a non-empty
+// affinity key, keeping a conversation on one exit; an empty affinity rotates
+// the starting node round-robin.
 func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 	if p == nil || len(p.nodes) == 0 {
 		return anonymousCursor{pool: p}
@@ -323,8 +324,7 @@ func (c *anonymousCursor) Next() *anonymousNode {
 	}
 	if c.single {
 		index := c.start
-		c.single = false
-		c.offset = n
+		c.start = -1
 		if index < 0 || index >= n {
 			return nil
 		}
@@ -530,7 +530,14 @@ func transportPool(proxies []string, cfg config.PerformanceConfig, responseHeade
 		if err != nil {
 			return nil, fmt.Errorf("proxy %s: %w", config.RedactURL(raw), err)
 		}
-		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, client: &http.Client{Transport: transport}, bun: &http.Client{Transport: bun}}
+		// Redirects can forward x-api-key and replay an inference body to a
+		// different origin. The configured endpoint owns the request directly.
+		rejectRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		proxy := &proxyTransport{
+			index: len(p.items), name: raw, pool: isPool,
+			client: &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
+			bun:    &http.Client{Transport: bun, CheckRedirect: rejectRedirect},
+		}
 		proxy.healthy.Store(true)
 		p.items = append(p.items, proxy)
 	}

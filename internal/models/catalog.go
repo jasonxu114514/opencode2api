@@ -80,6 +80,8 @@ type ModelCatalog struct {
 	stale           bool
 	refreshAfter    time.Duration
 	freeOnly        bool
+	oauthTiers      map[config.Tier]bool
+	pendingTiers    map[config.Tier]bool
 }
 
 // CatalogSnapshot summarizes the catalog for health reporting. Exposed counts
@@ -185,14 +187,27 @@ func (c *ModelCatalog) Replace(zen, goModels []string) {
 // catalog fresh. A nil argument leaves that part of the state unchanged, so a
 // tier whose listing failed keeps its previous models; native and unsupported
 // are replaced per tier, metadata as a whole.
-func (c *ModelCatalog) ReplaceWithCapabilities(zen, goModels []string, native map[config.Tier]map[string]wire.Protocol, unsupported map[config.Tier]map[string]bool, metadata map[config.Tier]map[string]Metadata) {
+func (c *ModelCatalog) ReplaceWithCapabilities(zen, goModels []string, native map[config.Tier]map[string]wire.Protocol, unsupported map[config.Tier]map[string]bool, metadata map[config.Tier]map[string]Metadata, oauthTiers ...config.Tier) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if zen != nil {
 		c.zen = toSet(zen)
+		delete(c.oauthTiers, config.TierZen)
+		delete(c.pendingTiers, config.TierZen)
 	}
 	if goModels != nil {
 		c.goModels = toSet(goModels)
+		delete(c.oauthTiers, config.TierGo)
+		delete(c.pendingTiers, config.TierGo)
+	}
+	for _, tier := range oauthTiers {
+		if tier != config.TierZen && tier != config.TierGo {
+			continue
+		}
+		if c.oauthTiers == nil {
+			c.oauthTiers = make(map[config.Tier]bool)
+		}
+		c.oauthTiers[tier] = true
 	}
 	if native != nil {
 		for _, tier := range []config.Tier{config.TierZen, config.TierGo} {
@@ -214,6 +229,42 @@ func (c *ModelCatalog) ReplaceWithCapabilities(zen, goModels []string, native ma
 	c.updatedAt = time.Now().UTC()
 	c.cacheSource = "live"
 	c.stale = false
+}
+
+// ClearOAuthTier discards account-specific discovery when its authorization
+// changes. The tier stays pending until a new authorized catalog replaces it.
+func (c *ModelCatalog) ClearOAuthTier(tier config.Tier) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clearOAuthTierLocked(tier)
+}
+
+func (c *ModelCatalog) clearOAuthTierLocked(tier config.Tier) {
+	if !c.oauthTiers[tier] {
+		return
+	}
+	if tier == config.TierZen {
+		c.zen = map[string]bool{}
+	} else if tier == config.TierGo {
+		c.goModels = map[string]bool{}
+	}
+	delete(c.nativeProtocols, tier)
+	delete(c.unsupported, tier)
+	delete(c.modelMeta, tier)
+	delete(c.oauthTiers, tier)
+	if c.pendingTiers == nil {
+		c.pendingTiers = make(map[config.Tier]bool)
+	}
+	c.pendingTiers[tier] = true
+	c.stale = true
+}
+
+// TierPending reports whether invalidated account discovery still needs a
+// refresh; it does not treat a missing model as an authorization decision.
+func (c *ModelCatalog) TierPending(tier config.Tier) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.pendingTiers[tier]
 }
 
 // CopyState copies the discovered state of source (models, capabilities,
@@ -248,10 +299,20 @@ func (c *ModelCatalog) CopyState(source *ModelCatalog) {
 	updatedAt := source.updatedAt
 	cacheSource := source.cacheSource
 	stale := source.stale
+	oauthTiers := make(map[config.Tier]bool, len(source.oauthTiers))
+	for tier, enabled := range source.oauthTiers {
+		oauthTiers[tier] = enabled
+	}
+	pendingTiers := make(map[config.Tier]bool, len(source.pendingTiers))
+	for tier, pending := range source.pendingTiers {
+		pendingTiers[tier] = pending
+	}
 	source.mu.RUnlock()
 	c.mu.Lock()
 	c.zen, c.goModels, c.nativeProtocols, c.unsupported, c.updatedAt = zen, goModels, native, unsupported, updatedAt
 	c.modelMeta = meta
+	c.oauthTiers = oauthTiers
+	c.pendingTiers = pendingTiers
 	c.cacheSource, c.stale = cacheSource, stale
 	c.mu.Unlock()
 }

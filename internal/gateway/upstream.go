@@ -155,7 +155,7 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 // replay so the Playground sees the selected key's own answer.
 func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
 	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
-	if _, selected := debugKeyOverrideFrom(ctx); selected || effectiveRoute.Tier == config.TierGo && g.cfg.GoSubscription != nil {
+	if _, selected := debugKeyOverrideFrom(ctx); selected || !effectiveRoute.Anonymous && g.tierOAuth(effectiveRoute.Tier) != nil {
 		return resp, effectiveRoute, err
 	}
 	if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
@@ -935,11 +935,11 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 // live traffic before. The attempt is still recorded in telemetry, and any HTTP
 // response, whatever its status, is returned as is.
 func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, override DebugKeyOverride, attemptOffset int) (*http.Response, error, int) {
-	if override.Tier == config.TierGo && g.cfg.GoSubscription != nil {
-		if override.KeyID != subscriptionAccountID(g.cfg.GoSubscription) {
-			return nil, errors.New("the selected Go subscription is no longer connected"), 0
+	if connection := g.tierOAuth(override.Tier); connection != nil {
+		if override.KeyID != oauthAccountID(connection) {
+			return nil, errors.New("the selected Console plan is no longer connected"), 0
 		}
-		return g.doGoSubscriptionUpstream(ctx, route, bodies, ids, attemptOffset)
+		return g.doOAuthUpstream(ctx, route, bodies, ids, attemptOffset)
 	}
 	nodes := g.zenNodes
 	baseURL := g.cfg.Upstream.Zen
@@ -1022,8 +1022,8 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 // response (body still open), else the last error, plus the number of
 // attempts made.
 func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (response *http.Response, resultErr error, resultAttempts int) {
-	if route.Tier == config.TierGo && g.cfg.GoSubscription != nil {
-		return g.doGoSubscriptionUpstream(ctx, route, bodies, ids, attemptOffset)
+	if g.tierOAuth(route.Tier) != nil {
+		return g.doOAuthUpstream(ctx, route, bodies, ids, attemptOffset)
 	}
 	var lastResponse *http.Response
 	defer func() {
@@ -1305,7 +1305,7 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 		KeyID: keyID, Channel: channel, Anonymous: anonymous, Proxy: proxyName, Status: status,
 		DurationMS: max(duration.Milliseconds(), 0), Success: success, Outcome: outcome,
 	})
-	if channel != "subscription" && !isDiagnosticRequest(ctx) && g.availability != nil && g.catalog.IsFreeModel(route.ID) {
+	if channel != "oauth" && !isDiagnosticRequest(ctx) && g.availability != nil && g.catalog.IsFreeModel(route.ID) {
 		bodySnippet := ""
 		if resp != nil && (resp.StatusCode == 400 || resp.StatusCode == 404 || resp.StatusCode == 410 || resp.StatusCode == 422) {
 			bodySnippet = string(peekResponseBody(resp))

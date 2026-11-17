@@ -96,11 +96,12 @@ func (g *Gateway) newWarpLease(lease *warp.Lease, useBun bool) (*warpLease, erro
 	if err != nil {
 		return nil, err
 	}
+	rejectRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &warpLease{
 		lease:   lease,
 		pool:    g.warp,
-		regular: &http.Client{Transport: transport},
-		bun:     &http.Client{Transport: bun},
+		regular: &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
+		bun:     &http.Client{Transport: bun, CheckRedirect: rejectRedirect},
 		useBun:  useBun,
 	}, nil
 }

@@ -93,7 +93,8 @@ func newRegistrar() *registrar {
 	return &registrar{
 		base: defaultAPIBase,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			Transport: &http.Transport{
 				Proxy:               nil,
 				ForceAttemptHTTP2:   false,
@@ -293,7 +294,6 @@ func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			bodyText := strings.TrimSpace(string(data))
 			if resp.StatusCode == http.StatusTooManyRequests {
 				// Cloudflare's own limit becomes the pacing. Record it and fail
 				// fast: sleeping here would hold the pool's create mutex and
@@ -306,9 +306,11 @@ func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte
 					pause = maxRateLimitPause
 				}
 				r.pause(pause)
-				return &registrationPausedError{retryAfter: pause, reason: bodyText}
+				return &registrationPausedError{retryAfter: pause, reason: "Cloudflare rate limit"}
 			}
-			lastErr = fmt.Errorf("Cloudflare API HTTP %d: %s", resp.StatusCode, bodyText)
+			// Registration replies can echo device credentials. Retain the
+			// status for diagnostics without putting those replies into logs.
+			lastErr = fmt.Errorf("Cloudflare API HTTP %d", resp.StatusCode)
 			if resp.StatusCode < 500 {
 				return lastErr
 			}

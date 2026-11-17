@@ -2,26 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
 
-使用 Go 编写的 **OpenCode Zen / Zen Go API 网关**。对外提供 Chat Completions、Responses 和 Anthropic Messages 接口，按上游原生协议转换请求，并统一管理上游 Key 与代理。
+使用 Go 编写的 OpenCode Zen / Zen Go 网关。客户端调用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages，网关选择可用上游，并在原生协议不同时转换请求和响应。System One 决策使用独立透传接口。
 
-WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
-
-## 功能
-
-- 三种推理协议之间的普通 JSON 响应与 SSE 流式转换。
-- 文本、图片、reasoning、函数工具、工具调用和工具结果；目标协议允许时支持文件内容转换。
-- 独立的 Zen / Go Key 池，可配置优先级、重试和会话亲和性。
-- 使用 OpenCode `public` 凭证的可选 Zen 匿名通道，默认关闭，上游封堵可能使其不可用。
-- 可选的用户态 Cloudflare WARP 出口，免费模型流量无需 TUN 或 root 权限。
-- 直连、HTTP、HTTPS、SOCKS5、SOCKS5H 连接，以及代理文件。
-- 动态模型发现、原生协议与能力信息、磁盘缓存。
-- 独立管理端口，支持配置编辑、Playground、路由诊断、Token 统计和实时日志。
-- 配置热重载：先验证新配置，再切换新请求使用的 Gateway。
-- Go 共享套餐额度看板，显示剩余百分比、重置时间和可用模型。
-- API Key 生成、自定义、命名、启停和删除，变更立即生效。
-- `sota` / `sweet` 分组别名，支持模型排序、故障切换、流式输出保护和状态恢复。
-
-新增页面及调用示例见[管理控制台说明](docs/management.zh-CN.md)。
+管理 WebUI 内嵌于可执行文件，运行时无需 Node.js 或数据库。模型发现、推理、OAuth 和可选 WARP 仍需访问相应上游服务。
 
 ## 赞助商
 
@@ -53,7 +36,7 @@ go build -o opencode2api ./cmd/opencode2api
 启动前编辑 `config.json`：
 
 1. 将 `server_keys` 替换为自己的本地 API Key。
-2. 在 `zen_keys` 填入 Zen API Key（推荐），或在 `go_keys` 填入 Go Key。示例关闭匿名通道，且两个上游 Key 数组为空，必须先配置上游凭证才能启动；已有的 Go 订阅连接也满足此要求。
+2. 在 `zen_keys` 填入 Zen API Key（推荐），或在 `go_keys` 填入 Go Key。示例关闭匿名通道，且两个上游 Key 数组为空，必须先配置上游凭证才能启动；已保存的 Go OAuth（`go_oauth`）或 Zen OAuth（`zen_oauth`）连接也满足此要求。不支持在凭证全空时先启动服务、再进入 WebUI 完成首次 OAuth 登录。
 3. 替换 `webui.password`。示例配置启用了 WebUI，用户名为 `admin`。
 
 **匿名通道可能已被上游重点封堵，优先使用 Zen API Key。** 配置与 WebUI 默认关闭匿名访问；已有配置中明确设置的 `anonymous: true` 不会被自动改为关闭。只有接受免费请求仍可能失败时，才主动开启。
@@ -76,558 +59,268 @@ Windows 下使用 `Copy-Item config.example.json config.json` 复制配置，执
 
 配置所在目录需要可写，以便迁移密码、保存配置和写入模型缓存。
 
-## Docker 部署
+## Docker 与 Compose
 
-已发布镜像：`ghcr.io/jasonxu114514/opencode2api`。
+已发布镜像为 `ghcr.io/jasonxu114514/opencode2api`。先按前文准备 `config.json`。需要通过发布端口访问时，容器内部 API/WebUI 应监听 `0.0.0.0:8080`、`0.0.0.0:8081`；访问范围由宿主机端口绑定及必要的 HTTPS 入口限制。
 
 ```bash
-cp config.example.json config.json
-# 启动前填写 Key，并替换 WebUI 密码。
 docker compose up -d
 docker compose logs -f
 ```
 
-Compose **仅在首次启动时**将宿主机配置导入 `opencode2api-state` 命名卷。后续建议通过 WebUI 修改配置。需要重新导入宿主机文件时：
+Compose **仅在首次启动**从宿主配置初始化 `opencode2api-state` 卷。此后实际配置位于卷中，建议通过 WebUI 修改。需重新导入宿主文件时：
 
 ```bash
 docker compose cp config.json opencode2api:/var/lib/opencode2api/config.json
 docker compose restart
 ```
 
-容器内的服务进程使用普通用户运行。Compose 启用只读根文件系统，并提供可写状态卷和临时 `/tmp` 文件系统。
+覆盖前先备份实际配置与状态。入口脚本以普通用户运行服务，仅在初始化时把示例 API 的准确值 `127.0.0.1:8080` 改为 `0.0.0.0:8080`。Compose 使用只读根文件系统、可写状态卷与 `/tmp` tmpfs。发布端口默认绑定宿主全部接口；仅本机访问时，将 `ports` 改为 `127.0.0.1:8080:8080`、`127.0.0.1:8081:8081`。
 
-WARP 只需要出站 UDP（Cloudflare 端点端口 `2408`），因此镜像的普通用户、无 `NET_ADMIN` 配置无需改动；不要为此改用 host 网络或添加 `--cap-add`。如果容器网络禁止 UDP，启用 WARP 会在启动时失败。
+| Compose 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `OPENCODE2API_VERSION` | `latest` | 镜像标签；固定版本时指定发行标签。 |
+| `OPENCODE2API_PORT` | `8080` | 宿主 API 端口。 |
+| `OPENCODE2API_WEBUI_PORT` | `8081` | 宿主管理端口。 |
+| `OPENCODE2API_LISTEN` | 未设置 | 显式覆盖容器 API 监听。 |
+| `OPENCODE2API_WEBUI_LISTEN` | 未设置 | 显式覆盖容器管理监听。 |
 
-| Compose 环境变量            | 默认值   | 作用                                 |
-| --------------------------- | -------- | ------------------------------------ |
-| `OPENCODE2API_VERSION`      | `latest` | 镜像标签；可指定发行标签来固定版本。 |
-| `OPENCODE2API_PORT`         | `8080`   | 映射到容器 8080 的宿主机端口。       |
-| `OPENCODE2API_WEBUI_PORT`   | `8081`   | 映射到容器 8081 的宿主机端口。       |
-| `OPENCODE2API_LISTEN`       | 未设置   | 显式覆盖容器内 API 监听地址。        |
-| `OPENCODE2API_WEBUI_LISTEN` | 未设置   | 显式覆盖容器内 WebUI 监听地址。      |
+后两项在容器内为 `LISTEN_ADDRESS`、`WEBUI_LISTEN_ADDRESS`，为空时沿用实际配置。更改宿主端口不更改内部监听；更改内部 API 端口还须修改映射及默认检查 8080 的镜像健康检查。`proxyfile` 必须挂载到配置的容器内路径。
 
-后两项在容器内对应 `LISTEN_ADDRESS` 与 `WEBUI_LISTEN_ADDRESS`。值为空时使用配置文件中的地址。首次初始化配置时，入口脚本会将示例 API 地址 `127.0.0.1:8080` 改为 `0.0.0.0:8080`，使其能够通过发布端口访问。
-
-修改宿主机端口不会改变容器内监听地址。如果修改容器内 API 端口，还需要同步调整端口映射和镜像健康检查；默认健康检查使用 8080 端口。
-
-构建并运行本地镜像：
+需要本地镜像时：
 
 ```bash
 docker build -t opencode2api:local .
 docker volume create opencode2api-state
 docker run -d --name opencode2api \
-  -p 8080:8080 -p 8081:8081 \
+  -p 127.0.0.1:8080:8080 -p 127.0.0.1:8081:8081 \
   -e CONFIG_SEED_PATH=/run/config/opencode2api.json \
-  -v "$(pwd)/config.json:/run/config/opencode2api.json:ro" \
+  -v "$PWD/config.json:/run/config/opencode2api.json:ro" \
   -v opencode2api-state:/var/lib/opencode2api \
   opencode2api:local
 ```
 
-在 Docker 中使用 `proxyfile` 时，代理文件也需要挂载到容器内配置指定的位置。
+WARP 需要向 Cloudflare `2408` 端口发送 UDP，不需要 host 网络或额外网络能力；网络阻断该流量时无法初始化 WARP。
 
-## API 调用
+## 调用 API
 
-`server_keys` 用于客户端调用本地网关，与 `zen_keys`、`go_keys` 相互独立，不会作为上游认证凭证发送。
+以下是现有兼容接口。OpenAI 兼容客户端的 Base URL 可填 `http://127.0.0.1:8080/v1`；管理接口位于另一监听端口。
 
-请求可以使用 `Authorization: Bearer YOUR_LOCAL_API_KEY` 或 `x-api-key: YOUR_LOCAL_API_KEY`。健康检查无需认证。
+| 方法 | 路径 | 行为 |
+| --- | --- | --- |
+| `GET` | `/v1/models` | 当前配置可路由的模型，以及符合条件的轮转别名。 |
+| `POST` | `/v1/chat/completions` | Chat Completions，支持 JSON 和 SSE。 |
+| `POST` | `/v1/responses` | Responses，支持 JSON 和 SSE。 |
+| `POST` | `/v1/messages` | Anthropic Messages，支持 JSON 和 SSE。 |
+| `POST` | `/v1/systemone` | 原生 System One 决策透传，不转换协议。 |
+| `GET` | `/healthz` | 无需认证的就绪检查与资源摘要。 |
 
-| 方法 | 路径                   | 用途                       |
-| ---- | ---------------------- | -------------------------- |
-| GET  | `/v1/models`           | 当前配置下可以路由的模型。 |
-| POST | `/v1/chat/completions` | Chat Completions。         |
-| POST | `/v1/responses`        | Responses。                |
-| POST | `/v1/messages`         | Anthropic Messages。       |
-| POST | `/v1/systemone`        | System One 结构化决策。    |
-| GET  | `/healthz`             | 就绪状态与资源汇总。       |
+全部 `/v1/*` 接口要求通过 `Authorization: Bearer ...` 或 `x-api-key` 提交已启用的 `server_keys` 值。请求体上限为 32 MiB。推理响应的 `x-request-id` 可用于关联日志。
 
-先获取可用模型：
-
-```bash
-curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY"
-```
-
-将以下示例中的 `MODEL_ID` 替换为模型列表返回的 ID。
-
-**Chat Completions**
+先查询实际可用的模型 ID：
 
 ```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hello"}]}'
+curl http://127.0.0.1:8080/v1/models \
+  -H 'Authorization: Bearer YOUR_LOCAL_API_KEY'
+
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_LOCAL_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL_ID","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-**Responses**
-
-```bash
-curl http://localhost:8080/v1/responses \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","input":"Hello"}'
-```
-
-**Anthropic Messages**
-
-```bash
-curl http://localhost:8080/v1/messages \
-  -H "x-api-key: YOUR_LOCAL_API_KEY" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","max_tokens":512,"messages":[{"role":"user","content":"Hello"}]}'
-```
-
-需要流式响应时，在请求体中加入 `"stream": true`，并使用 `curl -N`。响应通过 `x-request-id` 提供请求关联标识。API 请求体上限为 32 MiB。
-
-**System One**
-
-```bash
-curl http://localhost:8080/v1/systemone \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","state":"1 + 1 = 2","questions":{"arithmetic":{"type":"noul","instructions":"Is 1 + 1 equal to 2?"}}}'
-```
-
-System One 将自由文本状态与类型化问题配对，并返回类型化答案，因此其负载与 chat/responses 桥接结构完全不同，只做原样转发，不做任何转换。只有原生协议为 System One 的模型才能在本接口提供服务；在消息接口（`/v1/chat/completions`、`/v1/responses`）上提交的决策负载同样原样转发，而不经过转换。上游的流式回复按原样透传，不做中断恢复。
-
-### 协议兼容边界
-
-客户端协议与上游原生协议相同时，会保留供应商特有字段。跨协议请求经过统一中间结构转换，部分参数没有等价表达。例如，Chat 的 JSON 输出约束与 `seed` 不会被转发到 Anthropic Messages。不支持的内容块或工具类型可能被拒绝。
-
-转换 Responses 历史时，相邻的 assistant reasoning、文本和函数调用项目会组成同一轮 assistant 消息，包括函数调用之间穿插文本的情况。工具结果和 user 消息会分隔轮次；转换为 Chat Completions 时，缺失或不匹配的工具结果仍会被拒绝。
-
-网关仅实现上表中的接口，不提供 embeddings、文件上传、图像生成、Responses 查询或取消接口。网关不保存会话历史；客户端需要提交历史，或使用实际上游支持的相关能力。
-
-## 路由与模型
-
-### 模型发现
-
-服务按配置周期刷新 Zen / Go 的 `/v1/models` 和 OpenCode [能力目录](https://models.opencode.ai/api.json)，分别记录两个 Tier 的原生协议与模型限制。OpenCode 的 Zen / Go 文档作为协议发现的回退来源。
-
-可通过 `models.protocols` 覆盖自动发现结果：
+Responses 与 Anthropic Messages 分别使用以下标准 JSON 请求体，发送到对应接口：
 
 ```json
-{
-  "models": {
-    "refresh_seconds": 300,
-    "protocols": {
-      "custom-model": "chat"
-    }
-  }
-}
+{"model":"MODEL_ID","input":"你好"}
 ```
-
-协议值仅允许 `chat`、`responses`、`anthropic`。使用不支持的原生协议的模型会从模型列表中隐藏，除非配置了覆盖值。
-
-成本、弃用信息及模型限制来自官方 [OpenCode 元数据地址](https://models.opencode.ai/api.json)，每 24 小时刷新一次。能力目录中的限制优先；元数据中的 `limit.context`、`limit.input` 和 `limit.output` 仅补充缺失字段，通过 `/v1/models` 的 `context_window` / `context_length`、`max_input`、`max_output` 暴露。每个 HTTP 客户端的拉取超时为 30 秒，刷新失败时保留已有数据。升级后继续兼容原有 `.models.dev.json` 缓存文件名，无需删除缓存。
-
-元数据给出价格时，`/v1/models` 的每个条目还会带上 `cost`（每百万 token 的美元价格：`input`、`output`、`cache_read`、`cache_write`，以及 OpenClaw 使用的 `cacheRead` / `cacheWrite`）。推理模型会在 `reasoning_efforts` 和 OpenClaw 读取的 `compat.supportedReasoningEfforts` 中列出可用档位：`minimal` 到 `max`；思考强度为 `auto` 时截止到探测得到的上限。强制或探测得到的档位通过 `default_reasoning_effort` 给出。缓存价格字段会在下一次元数据刷新后出现。
-
-### 匿名通道与回退
-
-**匿名通道可能已被上游重点封堵，优先使用 Zen API Key。** 内置默认值与示例均为 `anonymous: false`，WebUI 不自动启用匿名通道，也不修改已有配置中明确设置的 `true`。
-
-启用 `anonymous: true` 后，满足以下任一条件的模型可以进入 Zen 匿名通道：
-
-- 模型 ID 包含 `free`，不区分大小写。
-- OpenCode 元数据中的输入、输出成本均为零，且模型未弃用。
-
-这只是网关的路由判断，上游仍可能拒绝或限制请求。匿名请求在上游认证头中使用 `public` 凭证。
-
-路由顺序：
-
-1. 符合条件的模型最多尝试 `performance.max_anonymous_exits` 个可用匿名代理，每个代理一次；仅使用 v2 `/inference`，免费模型的 v1 `/zen` 回退已停用。
-2. 按 `prefer` 顺序尝试认证通道，仅包含已配置 Key 且可以提供该模型的 Tier。
-3. 每个认证 Tier 分别使用 `retry.max_attempts` 预算。
-
-匿名阶段不受 `retry.max_attempts` 截断，但所有阶段共享请求总超时。网络错误、认证失败、限流和服务端错误可以触发出口轮换。请求级 `400`/`413`/`422`（例如 `context_length_exceeded`）会立即结束请求：换出口或换 Tier 都无法改变请求本身。IP 级 abuse `403` 只淘汰当前出口；所有出口都被封时停止扫描，已配置的 Go Key 仍可继续服务。
-
-如果后续重试在收到 HTTP 响应前发生传输错误，网关会保留最近一次上游 HTTP 错误，而不是用传输错误覆盖它。状态码和 `Retry-After` 保持不变，响应体最多在内存中保留 64 KiB，沿用现有错误消息转换。重试前会释放原响应连接或 WARP 出口；后续真实 HTTP 响应会取代旧响应，客户端取消仍优先处理。此行为不更换会话标识、不增加重试预算，也不改变上游额度。
-
-配置 `models.anonymous_backoff` 后，连续 `threshold` 次匿名失败或所有出口都被 IP 封禁会暂停整条匿名通道 `base_hours`，之后每次再触发翻倍，直到 `max_hours`。单个非滥用 `403` 或 `429` 不会立即熔断，只计入连续失败。暂停期间不取代理、不发任何上游请求（包括模型目录刷新和可用性探测），路由直接落到认证通道。窗口到期后只允许一个请求做半开探测：成功关闭熔断并恢复匿名通道，失败则开启下一个更长的窗口。省略该配置块时熔断关闭。
-
-每个 Tier 使用自己的原生协议编码请求。启用 `performance.first_event_timeout_seconds` 后，会先等待完整的 SSE data 事件再向客户端交付响应；注释心跳不算首事件。首事件前超时或断开会沿用现有 Key / 代理重试预算，交付后不再重放。默认 `0` 关闭，可对接受请求后无事件的上游尝试设置为 `15` 秒。它限制首事件而非首个文本 token，不适用于 System One；轮转别名使用独立的 `rotation.first_output_seconds`。识别到过期的 Responses reasoning 引用时，可执行一次修复重试；指定 Key 的诊断不会执行该重试。
-
-已知 OpenCode 标题请求在提示词和消息整形前判定，避免整形改变消息数量后，误加 agent 工具或把普通 agent 请求误判为标题请求。既有标题特征和历史限制保持不变；这并不代表所有 `FreeUsageLimitError` 都已解决。
-
-只有匿名通道可用时，`/v1/models` 仅展示符合匿名条件的模型。
-
-只有明确启用匿名通道后，符合条件的免费模型才可尝试不使用 Zen Key，但这不保证上游允许访问。如果想保留认证 Key 但只暴露免费模型，设置 `models.free_only: true`：付费模型不再出现在 `/v1/models`，直接请求会被拒绝，轮转别名只保留免费成员；匿名关闭时免费模型使用已配置的 Key，开启时也可回退到这些 Key。
-
-### 免费模型 WARP 出口
-
-启用 `warp.enabled` 后，免费通道上的所有免费模型请求——匿名通道、通过 Zen Key 的免费模型回退、免费模型可用性探测，以及匿名模型目录刷新——都改走用户态 Cloudflare WARP 隧道，不再使用任何代理，因此上游看到的是 WARP 出口地址，而不是配置的节点。Go 套餐 Key 与付费模型仍使用原有代理绑定。
-
-隧道运行在网关进程内：注册 WARP 设备，通过 UDP 与 Cloudflare 建立 WireGuard 连接，并在用户态网络栈中终结。它不需要 TUN 设备、root、`NET_ADMIN` 或修改路由表，但宿主机（或容器）必须能向 Cloudflare 端点发送 UDP（端口 `2408`）。注册与 `warp=on` 的 trace 探测在启动时完成；WARP 无法初始化时启动直接失败，不会静默回退到代理。通过 WebUI 启用同样采用失败即拒绝：参数错误会返回错误，旧运行时继续服务。
-
-`warp.pool_size`（1–32，默认 `2`）是**上限**而不是固定数量。第一个出口同步注册、决定服务是否 ready；之后池子在后台预注册上限的一半（至少 1 个），突发流量可以直接拿到预热出口而不用等注册。活跃出口再按并发调整：每个在途请求一个出口，另加一个备用，最多不超过上限；空闲 60 秒的多余出口会被回收。出口第一次收到上游 429 或 403 即被淘汰，由预注册的出口立刻顶上——免费模型请求会持续切换到其他出口，直到用完 `retry.max_attempts` 次才把最后一个 429 返回客户端；被淘汰的出口马上在后台重新注册。注册仍然串行，节流改由 Cloudflare 的 429 / Retry-After 决定，而不是固定间隔。若机房能给出的不同出口网段少于预注册目标，池子会退避而不是无限注册；自动免费模型探测在没有备用出口时跳过，并在一轮探测淘汰出口后停止本轮。`warp.stack` 默认 `ipv6`，可选 `ipv4` 或 `dual`。
-
-上游的免费额度按**出口网段**计算，所以只有替换出口能拿到不同网段时轮换才有意义：IPv6 出口按 `/64` 去重并冷却 30 分钟，IPv4 出口按 `/32`。Cloudflare WARP 的 IPv4 出口通常是同一个共享 NAT 地址，常被其他用户用尽；IPv6 网络栈的出口则由外层 WireGuard 源地址决定。把 `warp.source_ipv6` 设为路由到本机的 IPv6 前缀（通常是 `/64`，`warp.stack` 默认已是 `ipv6`），每个出口就会从该前缀绑定自己的源地址。Linux 下该地址通过 `IPV6_FREEBIND` 绑定（网关已自动设置），或要求地址已分配到网卡。不会预先探测地址族：握手先尝试 IPv6 端点，全部失败时自动回退到 IPv4 端点（此时出口为共享地址）。留空则共用本机默认源地址。某些网络的 WARP 出口池本身已被用尽，此时每个新出口也会返回 429，网关会持续轮换出口，但仍会在尝试次数用尽后返回 429。`/healthz` 会返回 `warp` 状态块；启用 WARP 但没有任何活跃出口时返回 503。只有 WARP 关闭或存在 Go Key 需要代理时，`no_healthy_proxies` 才会阻塞就绪。诊断请求会占用出口，但不会轮换或淘汰它。关闭 WARP 后，免费通道恢复使用代理。
-
-### 官方系统提示词
-
-每个经过整形的免费模型请求都会携带 OpenCode CLI 自身的系统提示词——基础指令、`<env>` 环境块和内置 skill 列表——因为免费层级会校验请求是否具有 agent 形态。v1 `/zen` 使用 1.x 工具名，`/inference` 与 `/zen/go` 使用 2.x 工具名。环境块包含请求的模型、网关工作目录、平台和 UTC 日期。
-
-远程客户端可通过可选的 `upstream.prompt_environment` 替换注入的环境值，不删除字段、不改变顺序，也不修改官方基础提示词：
 
 ```json
-{
-  "upstream": {
-    "prompt_environment": {
-      "working_directory": "/workspace",
-      "workspace_root": "/workspace",
-      "platform": "linux",
-      "is_git_repo": true
-    }
-  }
-}
+{"model":"MODEL_ID","max_tokens":512,"messages":[{"role":"user","content":"你好"}]}
 ```
 
-这是需要合并到现有 `upstream` 对象中的配置片段，不是完整配置。省略或设置为空对象时保持原有宿主机行为。非空 `working_directory` 同时作为默认 workspace root，除非另设 `workspace_root`；其他省略值保持旧默认，包括 `is_git_repo: true`。平台支持 `linux`、`darwin`、`win32`，其中 `windows` 会规范化为 `win32`；显式平台也会同步选择 shell 工具描述，但网关不会执行或转换客户端命令。路径仅作为文本使用，不解析、不访问；控制字符、行分隔符和尖括号会被拒绝。这些值由运维人员指定，不代表自动识别了客户端环境；需要不同环境的客户端应使用独立网关配置。请求模型和 UTC 日期保持不变。任意覆写值（包括 macOS 描述）是否通过上游校验仍需验证。
+Anthropic 客户端还可发送 `anthropic-version: 2023-06-01`。流式请求添加 `"stream": true`，用 `curl -N` 或能即时消费 SSE 的客户端。HTTP 200 后仍可能发生流错误，需检查错误事件与最终结果。
 
-注入按协议处理：Chat 的系统与 developer 消息会合并为一条位于最前的 `system` 消息；Anthropic 写入 `system`（字符串，或调用方提供块列表时在最前插入文本块）；Responses 写入 `instructions`。如果系统内容中已包含标记 `You are opencode, an interactive CLI tool`，请求会原样通过，因此已经发送官方提示词的客户端不会被重复注入。通过 Zen 或 Go Key 提供的免费模型也会接受同样的整形，只是仍然从对应 Tier 的代理出网。
-
-覆写仅作用于网关注入的环境块，不修改客户端已有的官方提示词；匿名、认证、WARP 和探测请求共用该设置。通过 WebUI 保存其他设置时会保留这些值；修改请编辑 JSON 配置并重新加载，目前没有独立的 WebUI 输入字段。
-
-### 工具整形
-
-每个经过整形的免费模型请求中，网关会把客户端声明的每个具名工具改名为不透明的线上名称：命名空间前缀加上客户端名称 SHA-256 的前 12 个十六进制字符（冲突时追加 `_2`、`_3` 等后缀），并追加该通道的完整官方工具集：`/zen` 使用 1.x 定义（`bash`、`edit`、`glob`、`grep`、`read`、`skill`、`task`、`todowrite`、`webfetch`、`websearch`、`write`），`/inference` 与 `/zen/go` 使用 13 个工具的 2.x 定义。没有 `tools`、`tools` 为空数组或使用旧版 `functions` 数组的请求同样会补全官方工具集；`tool_choice`、旧版 `function_call` 和工具调用历史会同步改写。Responses 内置工具和 Anthropic 服务端工具保持不变。
-
-响应（包括流式与非流式，以及拆分到多个 Chat 分块中的工具名）会恢复为客户端声明的名称。只有在客户端声明了等价工具时，官方工具名才会映射到客户端名称；否则响应中的名称保持原样。整形请求历史时，未知工具调用以及没有客户端等价工具的官方调用会连同配对的结果一起移除；若具名 `tool_choice` 指向被移除的工具，也会一并移除。
-
-旧版 `functions` 定义与现代工具使用同一次重命名，确保定义、具名选择、历史引用和响应名称还原保持一致。
-
-### 免费模型可用性
-
-只探测 ID 含 `free`（不区分大小写），或元数据输入、输出价格均为零且未弃用的模型，按模型原生协议发送简短探测请求。先尝试已启用的匿名通道，再尝试一个配置的 Zen Key；启用 `warp.enabled` 时，每条探测通道都改走 WARP 而不是代理，无法取得出口时结果为 `warp_unavailable`，视为不确定。任一通道返回完整有效响应即视为可用，只有所有实际尝试的通道都明确返回模型不存在或已下架时才自动禁用，从模型列表与路由中移除。认证失败、429、超时、网络错误、5xx 和响应格式异常均视为结果不确定，不新增禁用，1 小时后复测。探测不修改生产 Key / 代理的冷却状态，也不计入请求统计，但仍会访问上游并可能消耗免费额度。
-
-System One 使用原生 `noul` 类型询问“1+1 是否等于 2”，不注入聊天或工具字段。模型列表标明 `native_protocol` 和 `supported_endpoints`；仅在配置 Go Key 且有可用模型时展示轮转别名。升级时解除 v1.3.6 旧探测生成的禁用并立即安排复测，避免非法会话 ID 造成的误判继续保留。
-
-周期硬编码：正常模型每 **1 小时**探测，明确失效模型每 **24 小时**复测。已禁用模型到期复测遇到临时错误时，保留原禁用原因并在 24 小时后重试；复测成功自动恢复。也可在 WebUI「免费模型可用性」页立即恢复启用，进入手动控制：保持启用且不再自动探测，也不会被在途或后续探测结果覆盖；如需回到自动探测，在同一页面按「切回自动」，下一轮调度即安排探测。旧版本留下的 `manually_enabled` 记录在启动时自动迁移为手动控制。没有可用 Zen / 匿名通道，或推理协议不支持探测时跳过，不自动禁用。
-
-手动控制也会暂停 `reasoning.effort=auto` 的档位探测；已验证档位超过 2 小时后不再强制下发。切回自动后可重新探测档位。
-
-状态保存在 `config.json.<上游地址指纹>.availability.json`，重启后保留，按 Zen 上游 URL 隔离。后台每分钟检查到期项，跳过手动控制的模型，串行探测其余模型，每条通道最多等待 60 秒。
-
-管理接口：`GET /api/models/availability` 查看状态；`POST /api/models/probe` 将所有自动探测的免费模型标记为到期并立即开始一轮探测，WebUI「刷新状态」按钮即调用它（真正的重新探测，而不是只重载缓存视图）；`POST /api/models/restore` 携带 `{"model":"MODEL_ID"}` 恢复并进入手动控制；`POST /api/models/manual` 携带 `{"model":"MODEL_ID","manual":true|false}` 在手动与自动之间切换。均需管理登录，写入接口还需 CSRF 校验。
-
-### 会话与代理
-
-Key 初始化时均衡分配到代理。真实流量可以触发代理检查、Key 重新绑定和失败冷却。已经标记异常的代理，每 15 分钟通过 Cloudflare trace 复查一次。
-
-服务使用稳定会话哈希选择首选 Key 或匿名代理。建议通过 `x-session-id` 区分独立会话，同时支持 `x-opencode-session`、`x-session-affinity`、`session_id`、`conversation-id`、`conversation_id` 请求头，请求体中的 `conversation_id`、`metadata.session_id`，以及 Claude Code `metadata.user_id` 中的会话 ID。
-
-网关自行生成的会话与项目标识按调用方的服务端 Key 隔离，不同 Key 不会共享上游会话、首选 Key 或匿名代理；客户端自带的官方 OpenCode 会话（`ses_…`）原样保留；网关自行派生的会话标识按进程加盐，重启网关后会用新的标识，而不会沿用上一轮进程的上游会话。没有显式会话 ID 时，使用系统提示词和第一条用户消息生成会话标识，因此同一 Key 下系统提示词和开场内容都相同的会话仍可能共享亲和性。需要互相隔离的用户应各自使用独立的服务端 Key。调整 Key 或代理池成员后，原有会话选择的节点可能变化。
-
-失败冷却按指数增长，最高为 `performance.failure_cooldown_seconds` 的八倍；如果上游的 `Retry-After` 更长，则使用更长时间。所有认证 Key 都处于冷却时，路由仍可能尝试最早结束冷却的 Key；仍在冷却的匿名节点会被跳过。
-
-## 配置参考
-
-起始配置见 [config.example.json](config.example.json)，启动前须添加上游凭证。配置文件读取器支持非标准 JSON 的 `//` 和 `/* ... */` 注释；管理接口请求体仍须使用标准 JSON。未知字段（包括 `_comment`）和无效取值会被拒绝。
-
-### Key、监听地址与路由
-
-| 字段                        | 默认值或要求                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------- |
-| `listen`                    | `127.0.0.1:8080`。                                                                    |
-| `server_keys`               | 至少一个本地 Key。                                                                    |
-| `zen_keys`、`go_keys`       | 未明确启用匿名模式时，至少需要一个上游 Key 或已有的 `go_subscription` 连接。           |
-| `anonymous`                 | `false`；须主动开启，上游封堵可能使其不可用，优先使用 Zen API Key。                    |
-| `warp.enabled`              | `false`；免费通道流量通过 Cloudflare WARP 出口，不使用代理。                          |
-| `warp.pool_size`            | `2`；WARP 出口上限（后台预注册一半，活跃出口按并发调整），1–32。                    |
-| `warp.stack`                | `ipv6`；可选 `ipv6`、`ipv4`、`dual`。                                                 |
-| `warp.source_ipv6`          | 空；每个出口绑定的外层 IPv6 源前缀（`/64`），要求 `stack = "ipv6"`。                  |
-| `prefer`                    | `go`；可选 `go`、`zen`。                                                              |
-| `upstream.zen`              | `https://opencode.ai/zen`。                                                           |
-| `upstream.go`               | `https://opencode.ai/zen/go`。                                                        |
-| `upstream.anonymous`        | `https://opencode.ai/inference`；匿名通道仅使用此地址，已停用 v1 `/zen` 回退。          |
-| `proxies`                   | 两个代理来源都为空时，使用 `["direct"]`。                                             |
-| `proxyfile`                 | 可选；相对路径基于配置文件所在目录解析。                                              |
-| `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
-| `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
-| `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
-| `models.active_probes`      | `false`；关闭时通过实际请求被动追踪模型可用性，不主动发起测试请求。设为 `true` 开启主动探测。 |
-| `models.anonymous_backoff`  | 缺省关闭；`{threshold, base_hours, max_hours}`，默认 6、1、24。                       |
-| `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
-| `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |
-
-### 强制思考强度
-
-`reasoning.effort` 在请求自身没有指定思考强度时，指定发往上游的强度；
-`reasoning.effort_by_model` 按模型 ID 覆盖它。它对三种协议、两个转换方向都生效，
-对跨协议请求尤其重要：Anthropic 的 `thinking.budget_tokens` 只能被 Chat 与
-Responses 近似表达，而强制指定的强度可以到达单独靠预算表达不出的档位。
+System One 要求选择 `native_protocol` 为 `systemone` 的模型，例如：
 
 ```json
-{
-  "reasoning": {
-    "effort": "high",
-    "effort_by_model": { "claude-opus-5": "max" }
-  }
-}
+{"model":"SYSTEM_ONE_MODEL_ID","state":"1 + 1 = 2","questions":{"arithmetic":{"type":"noul","instructions":"Is 1 + 1 equal to 2?"}}}
 ```
 
-客户端显式关闭始终优先。Anthropic 原生 `thinking.type="disabled"` 和 Chat/Responses 的 effort
-`"none"` 都会在协议转换后保持关闭，不会被配置的默认强度重新开启。
+网关直接转发决策请求与答案。消息接口也能识别 System One 模型的这种决策结构，但普通聊天内容无法转换成决策问题。上游 System One 流式响应直接透传，不提供流重置恢复。
 
-两个方向的强度都会如实保留：显式的 `output_config.effort` 不会再被 `thinking`
-块遮蔽，`budget_tokens` 保持其档位（`8192` 为 `high`，`32000` 为 `xhigh`，
-两者可区分），发往 Responses 时强度会以 `reasoning.effort` 形式传递而不再丢失。
+### 兼容边界
 
-WebUI 的配置中心也提供默认强度和按模型覆盖。管理 API 的 `GET /api/config`
-会返回 `reasoning`，`PUT /api/config` 接受同名对象；省略该字段会保留现有值，
-发送空对象则会清除它。
+三种消息协议支持文本、可表达的图片/文件内容、reasoning、函数定义、工具调用、工具结果和流式响应。原生请求保留未被网关主动整形的供应商字段；跨协议只转换已有对应表示的内容，例如 Chat `seed` 和 JSON 输出约束不转换为 Anthropic 参数。不支持的内容或工具可能返回校验错误。
 
-代理支持 `direct`、`http://`、`https://`、`socks5://` 和 `socks5h://`，URL 可包含认证信息。配置内代理先加载，再追加 `proxyfile` 内容，并按首次出现的顺序去重。
+Responses 历史中的 assistant reasoning、文本和函数调用会合并为 assistant 轮次；用户消息和工具结果分隔轮次。转换到 Chat Completions 时，缺失或不匹配的工具结果仍会报错。
 
-代理文件每行一个地址，允许空行和注释：
+网关不实现 embeddings、文件上传、图片生成、Responses 检索或取消，也不替客户端保存会话历史。请求需携带所需历史；上游可能提供的有状态功能不代表网关具有本地会话存储。
 
-```text
-# 首选代理
-http://user:password@127.0.0.1:7890
-socks5://127.0.0.1:1080  # 备用代理
-direct
-```
+## 配置与路由
 
-支持 `#`、`;`、`//` 注释标记，标记需要位于行首或空白字符之后。
+从 [config.example.json](config.example.json) 开始配置。文件支持 `//` 和 `/* ... */` 注释，管理 API 请求体须使用标准 JSON。未知字段、无效值、重复顶层字段及同一 OAuth 方案的新旧字段冲突会被拒绝。保存会规范化配置并去掉注释。
 
-#### 轮换代理池
+| 配置项 | 默认值 / 含义 |
+| --- | --- |
+| `server_keys` | 必须保留至少一个启用的本地 Key。 |
+| `zen_keys`、`go_keys` | 独立上游 Key 池；示例均为空。 |
+| `prefer` | `go`；也可设为 `zen`，决定可用认证通道的首选顺序。 |
+| `anonymous` | `false`；为符合条件的免费模型启用上游 `public` 凭证。 |
+| `upstream.zen` | 手动 Zen Key 默认使用 `https://opencode.ai/zen`。 |
+| `upstream.go` | 手动 Go Key 及其额度接口默认使用 `https://opencode.ai/zen/go`。 |
+| `upstream.anonymous` | 匿名通道默认使用 `https://opencode.ai/inference`。 |
+| `models.refresh_seconds` | `300`；模型发现间隔。 |
+| `models.protocols` | 按模型覆盖原生协议：`chat`、`responses`、`anthropic`、`systemone`。 |
+| `models.free_only` | `false`；发现与路由均仅允许免费模型。 |
+| `models.active_probes` | `false`；可选的免费模型合成推理探测。 |
+| `reasoning.effort` | 内置默认未设置；示例设为 `high`。 |
+| `reasoning.effort_by_model` | 按模型覆盖默认思考强度。 |
 
-在条目末尾追加 `#pool`（或在开头加 `pool+`）即可声明该地址是轮换代理池（例如 [Resin](https://github.com/Resinat/Resin)），每次新建 TCP 连接都会从不同出口 IP 发出：
+### 模型与通道选择
 
-```text
-http://127.0.0.1:7890#pool
-socks5://127.0.0.1:1080#pool
-pool+http://127.0.0.1:7891
-```
+模型发现结合上游目录与 `https://models.opencode.ai/api.json` 的 OpenCode 能力和价格目录，按 Tier 保存原生协议，并通过 `/v1/models` 提供已知的上下文/Token 上限、价格、`native_protocol`、`supported_endpoints` 与 reasoning 信息。价格及弃用元数据每 24 小时刷新，失败保留已有数据；价格元数据不是账单估算或账户余额。
 
-代理池条目的处理方式与静态代理完全不同：
+使用手动 Key 时，明确开启匿名后，符合条件的免费模型可先尝试匿名通道，再按 `prefer` 尝试可用 Key 池；匿名关闭时使用已配置 Key。模型 ID 不区分大小写包含 `free`，或元数据表明未弃用且输入/输出价格均为零，即可判为免费，但不保证上游接受。付费模型需要适当的认证通道。`models.free_only` 同时限制轮转组成员。
 
-| 行为         | 静态代理                                    | `#pool` 条目                                              |
-| ------------ | ------------------------------------------- | --------------------------------------------------------- |
-| 连接复用     | Keep-alive + HTTP/2 多路复用（`performance.*` 连接池参数） | 每次请求新建 TCP + CONNECT 隧道（`DisableKeepAlives`，禁用 HTTP/2） |
-| 失败冷却     | 15s–120s 指数退避，并受 `Retry-After` 影响  | 无冷却：下一次请求直接换一个新出口 IP                     |
-| 可用性剔除   | 标记不可用、迁移 Key、每 15 分钟复检        | 永不剔除，完全跳过健康检查                                |
-| 匿名通道重试 | 每个出口最多访问一次，最多 `performance.max_anonymous_exits` 个出口 | 最多尝试 `retry.max_attempts` 次，循环该池条目            |
+OAuth 另有规则：请求选择 OAuth 路由后，只使用该 Tier 已确认的路由，不因失败改走匿名、手动 Key 或其他 Tier。Go OAuth 授权失败、额度耗尽或返回 429，均不会触发 PAYG 请求。两类通道都能服务同一模型时，明确选择 `prefer: "zen"` 允许使用已连接的 Zen PAYG 通道。
 
-当 URL 背后的服务本身就在做轮换、而池内出口 IP 会被单独限流或不稳定时使用它：网关会把每次尝试都当作新出口，而不是把整个会话固定在某个出口上。只要一条 `#pool` 条目即可，无需再罗列几十个出口。静态条目仍然保留下文的连接池行为。
+### 超时、代理与会话亲和
 
-### 超时与连接池
+| 配置项 | 默认值 | 含义 |
+| --- | --- | --- |
+| `retry.max_attempts` | `3` | Key 重试循环预算；匿名与轮转有各自选择规则。 |
+| `retry.timeout_seconds` | `300` | 整个推理请求预算，含流式消费。 |
+| `performance.attempt_timeout_seconds` | `0` | 可选的较短单次尝试上限；零沿用请求超时。 |
+| `performance.first_event_timeout_seconds` | `0` | 可选的首事件等待上限；零关闭。 |
+| `performance.connect_timeout_seconds` | `5` | 建立连接超时。 |
+| `performance.failure_cooldown_seconds` | `15` | 失败后的基础冷却时间。 |
+| `performance.max_anonymous_exits` | 有效值 `8` | 单次匿名请求的不同静态出口上限；零使用内置值。 |
+| `performance.free_tier_block_seconds` | 有效值 `900` | 免费通道出口封锁冷却时间；零使用内置值。 |
+| `performance.max_idle_conns` | `2048` | 每个 transport 的空闲连接上限。 |
+| `performance.max_idle_conns_per_host` | `256` | 每个 host/transport 的空闲连接上限。 |
+| `performance.max_conns_per_host` | `0` | 连接数上限；零表示不限。 |
+| `performance.idle_conn_timeout_seconds` | `120` | 空闲连接寿命。 |
 
-| 字段                                    | 默认值 | 含义                                             |
-| --------------------------------------- | ------ | ------------------------------------------------ |
-| `retry.max_attempts`                    | `3`    | 每个认证 Tier 的尝试次数，包含首次请求。         |
-| `retry.timeout_seconds`                 | `300`  | 推理请求总超时，包含流式响应读取。               |
-| `performance.attempt_timeout_seconds`   | `0`    | 单次尝试的总超时；0 表示使用请求总超时。         |
-| `performance.max_anonymous_exits`       | `8`    | 每个匿名请求最多尝试的静态代理出口数。           |
-| `performance.free_tier_block_seconds`   | `900`  | 被免费层标记的出口冷却时长。                     |
-| `performance.connect_timeout_seconds`   | `5`    | 建立连接的超时。                                 |
-| `performance.failure_cooldown_seconds`  | `15`   | 失败冷却基数。                                   |
-| `performance.max_idle_conns`            | `2048` | 每个代理 Transport 的空闲连接上限。              |
-| `performance.max_idle_conns_per_host`   | `256`  | 每个 Transport 对单个主机的空闲连接上限。        |
-| `performance.max_conns_per_host`        | `0`    | 单个主机的连接上限；0 表示不限制。               |
-| `performance.idle_conn_timeout_seconds` | `120`  | 空闲连接保留时间。                               |
+`proxies` 支持 `direct`、HTTP、HTTPS、SOCKS5、SOCKS5H URL。`proxyfile` 从配置目录相对路径读取，每个非空行一个代理，合并后去重；最终为空时使用直连。行首或空白后的 `#`、`;`、`//` 表示注释。代理 URL 中的账号密码属于敏感信息。
 
-单次响应头超时不会超过请求总超时。希望慢节点仍能留出回退时间时，可以将它设为小于总超时的值。请求上下文过期后会停止后续尝试，不会惩罚尚未实际使用的 Key 或代理。
+供应商负责轮换出口时，可写成 `pool+https://proxy.example:8443` 或 `https://proxy.example:8443#pool`。每次尝试新建连接，不复用 keep-alive/HTTP/2，也不采用静态节点的冷却和健康淘汰。实际出口轮换由供应商提供。静态代理保留连接复用、健康跟踪与 Key 绑定；`proxy_bindings` 可按 Key 指纹绑定已配置代理。
 
-### 日志与管理端
+建议为独立会话发送 `x-session-id`。同时支持 OpenCode 会话头和既有 conversation 字段；未指定时使用初始 system/user 内容生成种子。网关生成的身份按本地 API Key 与进程生命周期隔离，有效的官方 OpenCode 会话 ID 原样保留。同一 Key 下相同开头可能共享亲和性，需要用户隔离时使用独立 Key。
 
-| 字段                          | 默认值或要求                                    |
-| ----------------------------- | ----------------------------------------------- |
-| `logging.level`               | `info`；可选 `debug`、`info`、`warn`、`error`。 |
-| `logging.ring_size`           | `2000`；范围为 100–50,000。                     |
-| `logging.dump_request_bodies` | `false`；配合 `debug` 日志级别输出上游请求体。  |
-| `webui.enabled`               | 省略时为 `false`；示例配置设置为 `true`。       |
-| `webui.listen`                | `0.0.0.0:8081`。                                |
-| `webui.username`              | 启用 WebUI 时必填；示例为 `admin`。             |
-| `webui.password`              | 首次初始化密码，最小长度为 10。                 |
-| `webui.password_hash`         | 自动生成的 Argon2id 哈希，用于替代明文密码。    |
-| `webui.session_ttl_minutes`   | `720`；范围为 5–10,080。                        |
+可选 `models.anonymous_backoff` 在连续失败后暂停整个匿名通道，默认阈值 `6` 次、基础 `1` 小时、最大 `24` 小时；不配置此对象则关闭该通道级熔断。
 
-启动时会将初始密码哈希化，并从配置中删除明文；包含初始明文密码的备份也会删除。配置和备份仍包含运行所需的上游 Key、代理凭据，应限制文件访问权限。
+### 免费模型整形与 reasoning
 
-请求体日志默认关闭，每份准备好的上游请求体最多输出 64 KiB。已配置的敏感值会脱敏，但对话内容本身仍可能包含敏感信息。
+免费模型兼容逻辑会按需注入官方 OpenCode 系统提示词和工具定义，改写线上工具名，并在响应中还原客户端名称。使用 Key 的免费模型也可能经过整形。网关只转发工具调用，不会在本机执行工具；System One 不经过消息/工具整形。
 
-## WebUI 与诊断
-
-管理监听端口提供 WebUI 和 `/api/*` 接口。认证使用单一管理员账号、服务端 Session、HttpOnly / SameSite Cookie、写操作 CSRF 校验及登录限速。
-
-| 管理接口                                         | 用途                                            |
-| ------------------------------------------------ | ----------------------------------------------- |
-| `POST /api/auth/login`                           | 登录，获取 Session Cookie 和 CSRF Token。       |
-| `GET /api/auth/session`、`POST /api/auth/logout` | 查看或结束当前 Session。                        |
-| `GET /api/config`、`PUT /api/config`             | 读取脱敏配置或应用修改。                        |
-| `POST /api/config/reload`                        | 从磁盘重载配置。                                |
-| `POST /api/config/reveal`                        | 验证密码后查看配置中的敏感值。                  |
-| `PUT /api/account`                               | 验证密码后修改账号，修改后使已有 Session 失效。 |
-| `GET /api/monitor`                               | 请求、Token、上游和资源统计。                   |
-| `GET /api/debug/models`                          | 模型路由、Key 指纹和 metadata 诊断。            |
-| `POST /api/debug/inference`                      | 执行 Playground 请求。                          |
-| `POST /api/proxies/check`                        | 检查一个已保存或草稿代理到 Zen 上游的连通性。     |
-| `GET /api/logs`、`GET /api/logs/stream`          | 最近日志或 SSE 实时订阅。                       |
-
-Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP 每分钟最多 12 次：
+注入提示词包含目录、工作区、平台、模型与 UTC 日期，默认描述网关主机。远程客户端可配置兼容文本：
 
 ```json
-{
-  "protocol": "chat",
-  "key": { "mode": "auto" },
-  "request": {
-    "model": "MODEL_ID",
-    "messages": [{ "role": "user", "content": "Hello" }]
-  }
-}
+{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}
 ```
 
-服务端强制设置 `stream: false`。需要指定 Key 时，使用 `{"mode":"selected","tier":"zen","id":"KEY_FINGERPRINT"}`，其中指纹来自 `/api/debug/models`。指定 Key 的诊断最多执行一次上游尝试，不进入匿名通道，不轮换 Key，不切换 Tier，也不重放 reasoning 请求。
+将此对象合并到 `upstream.prompt_environment`。目录仅作为文本使用，不会由此访问；`windows` 规范为 `win32`，还支持 `linux`、`darwin`。客户端已提供的官方提示词不被覆盖。界面没有这些高级字段，需编辑配置并重载；任意环境覆盖值尚未经过真实上游校验。
 
-**自动模式和指定 Key 模式都不会改变生产 Key 的冷却、失败次数，以及代理的健康状态和绑定关系。** 诊断仍会真实访问上游，可能消耗供应商配额，并会计入监控。
+思考强度接受 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`、`auto` 或空值，客户端明确指定的强度优先。`none` 移除 reasoning 设置。`auto` 仅使用近期为免费 Zen/匿名模型验证的强度上限，不扩大探测范围；自动发现需开启主动探测，可能发送多次消耗额度的请求，结果两小时后过期。Go/付费模型及未验证强度不会被推算。
 
-执行后，管理接口返回 HTTP 200，实际结果位于 `ok`、`http_status`、`request_id`、`route` 和 `response`。指定 Key 时还返回 `selected_key` 与 `key_test`，其值包括 `usable`、`rejected`、`rate_limited`、`transport_error`、`upstream_error`、`request_error`、`unavailable`。管理请求格式、认证、CSRF 和限速错误仍返回各自对应的 HTTP 状态。
+默认从真实流量学习可用性。只有 `models.active_probes: true` 才执行合成检查；管理端探测按钮仅安排检查，不绕过此开关。只有明确的模型下架/不存在证据才禁用模型，限流、认证失败、普通错误和超时不能证明下架。手动恢复会保持启用并退出自动探测，直到恢复自动控制。
 
-### 批量代理管理
+### WARP
 
-WebUI 支持批量导入内联代理、检查选中条目和暂存批量移除。检查逐条调用 `POST /api/proxies/check`，需要管理登录和 `X-CSRF-Token`；请求体二选一：`{"id":"SAVED_PROXY_ID"}`（`GET /api/config` 返回的已保存代理 ID）或 `{"value":"https://proxy.example:8443"}`（草稿地址）。前端最多四个并发，后端最多八个，超出立即拒绝、不排队；每次检查限时 20 秒。
+`warp.enabled` 默认 `false`。开启后，免费匿名/手动 Zen 流量及其目录/探测路径使用进程内 Cloudflare WARP 隧道；Go、付费及 OAuth 路由继续使用配置的代理。需要向 Cloudflare `2408` 端口发送 UDP，无需 TUN 设备或修改路由表。初始化失败会拒绝启动或候选配置。
 
-**仅检查代理到 Zen 的连通性，不验证推理、Key 或额度。** 请求通过指定代理的独立 Bun 客户端向配置的 `upstream.zen` 加 `/v1/models` 发送无认证 GET，不带 Zen/Go Key、`public` 或 OAuth 凭证，不发推理、不跟随重定向、不走 WARP，也不修改正式健康、冷却或绑定状态。`anonymous: false` 时仍可检查，不会擅自启用匿名推理。
+`warp.pool_size` 是随并发调整的出口上限，范围 1–32，默认 2。`warp.stack` 为 `ipv6`（默认）、`ipv4` 或 `dual`。替换出口不保证获得新的上游额度。可选 `warp.source_ipv6` 要求 IPv6 堆栈及 `/64` 或更短前缀；Windows 下实际选择的源地址必须已分配到网卡，程序不会配置主机网络。
 
-成功执行检查后返回 HTTP 200，结果包含 `ok`、`state`、`reason`，以及可用时的 `status`、`latency_ms`。`available` 表示上游返回 200–399 或 401（401 仅表示到站后需要认证）；`unavailable` 仅限本次确认的代理端拒绝连接、DNS 失败或代理 407；429 为 `limited`，上游 403 等错误为 `rejected`，超时及其他不能定位的错误为 `inconclusive`。后三种状态不得当作确认损坏代理批量清理；本次不可用也不代表永久故障。
+## 管理与 OAuth
 
-移除只暂存在页面中，仍须通过 `PUT /api/config` 保存完整配置后才生效，检查本身不会删除代理。`proxyfile` 提供的代理在来源文件管理，不加入内联代理表格。
+WebUI 包含概览、诊断/Playground/日志、接入、API Key、模型与额度、轮转、配置、账号页面，提供简中、英语、越南语及意大利语。语言与主题选择保存在浏览器。完整操作与端点见[管理指南](docs/management.zh-CN.md)。
 
-### Go 订阅登录
+管理端使用管理员 Session Cookie、写操作 CSRF 和登录限流；修改管理员凭证会使 Session 失效。本地 API Key 不授予管理权限。`GET /api/config` 隐藏敏感值；再次验证密码后可显示手动 Key/代理值，但不会显示 OAuth Token。
 
-在「模型与额度」页面（`/#model-quotas`）点击「浏览器登录 Go 订阅」，打开页面显示的 OpenCode 官方 Device OAuth 链接，输入显示的 `user_code`。确认这是自己发起的授权后完成登录；WebUI 按间隔请求后端轮询并完成授权交换，无需手贴 Token、导入本机凭证文件或提交回调 URL。账号关联多个组织时，在 WebUI 选择 Go 订阅所在的组织。
+在「模型与额度」启动 Device OAuth。自行打开页面显示的官方验证地址，输入 `user_code`，批准自己发起的请求，并按需选择组织/工作区。后端负责轮询和刷新；不使用粘贴 Token、导入本机凭证文件或提交回调 URL 的流程。
 
-- 后端按需自动刷新访问凭证，并将连接保存到本地配置的 `go_subscription`。其中包含访问和刷新凭证，属于敏感信息，请保护配置文件及备份；WebUI 不接收这些凭证。
-- 「断开 Go 订阅登录」仅移除网关保存的连接，不撤销 OpenCode 官方会话。手动配置的 `go_keys` 仍保留，但 OAuth 连接期间不作备用通道；断开后恢复原有手动 Key 路由。登录失效时应重新登录，而非依赖手动 Key 回退。
-- OAuth 只使用已确认的官方 Go 订阅路由，不回退到按量付费（PAYG）通道。OAuth 额度当前显示为「未知」，不根据模型或请求结果推算；手动 Go Key 仍可使用原有额度查询接口。
+| 连接 | 范围与限制 |
+| --- | --- |
+| Go OAuth | 仅官方 Go 订阅路由；额度显示未知。 |
+| Zen OAuth | 使用 Console 工作区 credits 的 PAYG；开始前必须明确确认，余额显示未知。 |
 
-实现参考上游源码快照：[v2 `4617210822bdbb31e5749751afbfb4584ccedac8`](https://github.com/anomalyco/opencode/tree/4617210822bdbb31e5749751afbfb4584ccedac8)、[dev `7745079647b65036fe142e09ccd8623b25be1878`](https://github.com/anomalyco/opencode/tree/7745079647b65036fe142e09ccd8623b25be1878)。源码对比和本地检查不代表已通过真实订阅登录验证，上游授权或路由仍可能变化。生命周期和管理接口见[管理控制台说明](docs/management.zh-CN.md)。
+两类连接的待完成登录、凭证、刷新和断开分别管理。离开/隐藏页面停止自动轮询，返回可继续未过期登录。退出管理 Session 取消该 Session 的待完成登录，保留已完成连接；取消待完成登录不会断开已有账号。
 
-### 界面语言
+连接以 `go_oauth`、`zen_oauth` 保存于配置，包含访问/刷新凭证，配置与备份均需保护。对应 OAuth 存在期间，手动 Key 保留但不作备用，即使需要重新登录也一样。断开仅删除本地连接，在重新发现后恢复手动路由，不撤销官方 Session。匿名关闭时，断开最后连接前先保留其他凭证。
 
-WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English**、**Tiếng Việt** 和 **Italiano**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。
+只接受已认证官方远程配置中通过方案 URL 与 SDK 校验的路由，不从 Go 地址推导 PAYG，也不引入任意远程请求头。普通配置保存保留后端管理的 OAuth 凭证。旧 `go_subscription`/`zen_subscription` 加载时迁移；同一方案同时提供新旧字段会被拒绝。
 
-- 语言选择器位于顶部工具栏右侧，登录卡片上也有一个。
-- 选择结果保存在 `localStorage`，键名为 `opencode2api.ui.lang`。
-- 切换语言会同时重绘静态文案（`data-i18n`、`data-i18n-attr`）和 JavaScript 生成的文案，无需刷新页面。
-- 日期时间格式跟随所选语言。
+实现依据管理指南列出的上游源码快照；此处说明代码行为，不代表所有账号的真实授权与推理已通过验证，上游权限和路由格式可能变化。
 
-新增语言时，在 `webui/js/i18n.js` 的 `DICTIONARY` 中增加一个语言块，并在 `SUPPORTED`、`LABELS`、`FLAGS` 和 `DATE_LOCALES` 中登记其代码，同时加入 `browserLocale` 检测链。
+### 本地 Key、额度与轮转
 
-### 保存与重载
+API Key 页面支持创建、命名、启用、停用、删除。自动 Key 使用 192 位随机数；自定义 Key 为 16–256 位字母、数字、`.`、`_`、`-`，名称 1–80 字符，最多 200 个，至少一个启用。新请求立即使用变更；未实现按 Key 模型权限、消费上限或过期时间。
 
-服务先验证候选配置并创建新的 Gateway，然后保存配置并切换实例。验证或保存失败时，当前 Gateway 继续处理请求；已经开始的请求继续使用原有实例。
+手动 Go Key 额度来自已配置 Go 上游的 `/v1/usage`，是共享滚动/每周/每月百分比窗口，不是逐模型余额。多个 Key 可能共享同一套餐，不能相加。成功缓存 60 秒、失败 15 秒，旧数据标记历史。OAuth 额度/credits 未知，不根据手动 Key 或成功请求推算。
 
-Key、代理、上游地址、重试、模型、日志和路由偏好立即对新请求生效。`listen`、`webui.listen`、`webui.enabled` 的修改需要重启进程。保存后的 JSON 会规范化，不保留原有注释。
+轮转别名 `sota`、`sweet` 使用 Go 模型，支持三种消息接口和流式输出。每组共享当前模型，成功保持，失败推进。SOTA 固定包含 `deepseek-v4.1-flash`、`glm-5.3`、`grok-4.6`、`kimi-k3`、`qwen3.8-max`；Sweet 收集其他合适的 Go 模型。能否调用以实际发现为准。可在 `/#rotation` 调整别名、顺序和首输出超时。
 
-## 监控与持久化
+普通错误预算为三个模型、每模型最多三次；额度/限流直接跳过，轮换不产生额外共享额度。流式内容提交后，错误结束当前答案并让下一请求使用后续模型。响应 `model` 保留请求别名，`X-Resolved-Model` 标记实际模型。状态保存于配置旁。
 
-请求结果以完整推理过程为准。即使 HTTP 200 已经发出，SSE 错误事件或异常断流仍会计为失败，并标记 `stream_error`；客户端取消标记为 `client_canceled`。WebUI 会将这些结果与 HTTP 状态一起显示。
+## 运行与安全
 
-上游**尝试记录**统计的是收到响应头为止的 HTTP 交互，其成功状态和耗时与完整 JSON 响应或流的最终完成情况分开计算。
+配置保存先校验并构建替代运行时，校验或持久化失败保留当前运行时。Key、代理、路由、模型与日志设置对新请求生效；监听地址和 WebUI 开关需要重启。手动编辑文件后执行 UI 重载或 `POST /api/config/reload`，没有自动文件监视器。
 
-Token 统计仅使用上游报告的 usage。输入 Token 包含缓存读取和写入，缓存 Token 单独统计缓存读取量。缺失 usage 时不估算 Token，覆盖率表示已经建立路由的推理请求中有多少报告了 usage。`usage.server_keys` 按调用方认证所用的本地 server key（指纹，与 `/api/api-keys` 的 ID 一致）拆分请求数和 Token；Playground 流量计入 `playground`。
+| 数据 | 存储位置 |
+| --- | --- |
+| 配置及上一版本 | `config.json`、`config.json.bak`。 |
+| 模型及元数据缓存 | `config.json.models.catalog.json`、`config.json.models.dev.json`。 |
+| 可用性及轮转 | `config.json.<upstream-fingerprint>.availability.json`、`config.json.rotation.json`。 |
+| Session、用量、近期请求/尝试、日志环形缓冲、最近 Playground 结果 | 内存，进程重启清空。 |
+| 结构化日志 | stdout JSON，需外部收集才能长期保存。 |
 
-| 数据                                            | 保存位置或保留规则                                                        |
-| ----------------------------------------------- | ------------------------------------------------------------------------- |
-| Session、指标、Token 累计、最近 Playground 结果 | 进程内存；重启清空。                                                      |
-| 请求与尝试明细                                  | 最近一小时，最多 10,000 个请求和 20,000 次尝试；API 分别最多返回 500 条。 |
-| 实时日志环形缓冲                                | 进程内存，大小由 `logging.ring_size` 指定。                               |
-| 结构化日志                                      | stdout JSON；需要长期保留时由外部系统收集。                               |
-| 当前配置与上一版本                              | `config.json`、`config.json.bak`。                                        |
-| 模型目录缓存                                    | `config.json.models.catalog.json`。                                       |
-| 成本与弃用信息缓存                              | `config.json.models.dev.json`。                                           |
+文件名以实际配置路径为前缀。监控保留跨热重载数据，不跨进程共享；Token 只统计上游报告值，不估算缺失用量。完整请求结果与收到响应头为止的尝试指标是不同口径。Playground 用量单独归类。最近一小时最多保留 10,000 请求/20,000 尝试，接口各返回最多 500 条。
 
-缓存文件名基于实际配置路径生成。lifetime 仅表示当前进程运行期间的累计，各实例之间不共享 Session 或监控状态。
+`GET /healthz` 不发送上游请求、无需 Key。目录未就绪/为空、WARP 不可用或必要代理全部不健康时返回 503。可用但过期目录可返回 200 及 `status: "degraded"`；过期阈值为两倍刷新间隔，最低 60 秒。就绪不保证 Key 有效、额度充足或推理成功；公开响应只含计数与状态，不含凭证或代理地址。
 
-### 健康检查
+本地使用将 API 与管理监听在 loopback。网络访问须使用 HTTPS 并限制管理入口；可信反向代理应正确设置 `X-Forwarded-Proto`。限流使用直连对端地址，同一反向代理后的客户端共享限制。可执行文件本身提供 HTTP。
 
-`/healthz` 不增加监控计数，也不触发网络请求；返回资源数量，不包含 Key 或代理地址。
+配置和备份包含上游 Key、代理密码、OAuth Token，密码哈希不加密这些内容。限制文件权限，Windows 使用 ACL，分享源码时排除运行文件。`logging.dump_request_bodies` 默认关闭且需 debug 才输出，即使截断与脱敏仍可能暴露对话内容。Playground 和主动可用性探测会发送真实上游请求，可能消耗额度或 credits。
 
-- HTTP 503：模型目录尚未就绪、当前配置下没有可路由模型，或没有健康代理。
-- HTTP 200：服务就绪。可用目录缓存过期时仍返回 200，同时模型状态为 `stale`，整体状态为 `degraded`。
+## 本地开发与核对
 
-过期阈值为 `models.refresh_seconds` 的两倍，且不低于 60 秒。就绪状态检查目录和资源，不会实际验证某个上游 Key 能否完成下一次推理。
+`cmd/opencode2api` 启动服务；`internal/admin` 负责管理，`gateway` 负责路由/运行时，`protocol` 负责 JSON/SSE 转换，`models` 负责发现，`oauth` 负责官方授权，`config` 负责校验/持久化，`telemetry` 负责监控/日志。静态资源位于 `webui`，无需安装前端依赖。
 
-## 开发
-
-Go 源码按职责拆分为独立包。程序入口负责组装服务，具体实现放在 `internal/` 中。
-
-```text
-cmd/
-  opencode2api/main.go    命令行参数、启动与优雅退出
-internal/
-  admin/                 管理 API、登录会话与 Playground
-  buildinfo/             健康检查和管理接口共享的版本信息
-  config/                配置解析、持久化、密码与脱敏
-  gateway/               HTTP 路由、重试、资源池、刷新与运行时
-  httpx/                 通用 HTTP 响应、响应体处理与请求头
-  identity/              请求标识与会话亲和性
-  jsonutil/              JSON 取值与解码辅助函数
-  models/                模型目录、能力、价格与缓存
-  protocol/              请求和响应转换、SSE 解析与输出
-  telemetry/             请求跟踪、指标、日志与异常恢复
-webui/
-  embed.go               将静态资源内嵌到可执行文件
-  index.html             页面结构
-  css/                   设计 token、基础样式、组件与页面布局
-  js/                    ES 模块：外壳、i18n、共享辅助与每页一个模块
-```
-
-建议阅读顺序：
-
-1. [程序入口](cmd/opencode2api/main.go) → [运行时管理](internal/gateway/runtime.go) → [HTTP 处理](internal/gateway/gateway.go)。
-2. [上游请求](internal/gateway/upstream.go)和[模型路由](internal/models/catalog.go)说明请求如何选择并到达上游。
-3. [请求转换](internal/protocol/request.go)、[响应转换](internal/protocol/response.go)和[流式传输](internal/protocol/stream.go)说明协议处理过程。
-4. [管理路由](internal/admin/server.go)和 [WebUI 交互](webui/js/main.js)说明配置编辑与诊断功能。
-
-执行 Go 格式化、静态分析和程序构建：
+常规开发环境可运行以下原生 Go 命令；需要工作区内缓存时，将 `GOCACHE`、`GOMODCACHE` 设为项目内持久目录：
 
 ```bash
-gofmt -w cmd internal webui
 go vet ./...
-go build -o opencode2api ./cmd/opencode2api
+go build -trimpath -o opencode2api ./cmd/opencode2api
 ```
 
-开发时可以直接运行 `go run ./cmd/opencode2api -config config.json`。发布构建仍通过 `-ldflags "-X main.version=vX.Y.Z"` 注入版本号。
-
-Node.js 仅用于 WebUI 的 JavaScript 语法检查：
+Node.js 仅用于可选的 JavaScript 语法核对，无需安装包。在 Bash 执行，Windows 可用 Git Bash：
 
 ```bash
-for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
+for file in webui/js/*.js webui/js/pages/*.js; do
+  node --input-type=module --check < "$file" || exit 1
+done
 ```
 
-项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含四份 README。
+在 Bash 中执行以上命令（Windows 可用 Git Bash）。部署前检查见[验证与维护](docs/management.zh-CN.md#验证与维护)。发行版本可通过 `-ldflags "-X main.version=vX.Y.Z"` 注入。
 
-## 常见问题
+| 现象 | 核对内容 |
+| --- | --- |
+| API 401 | 本地 Key、启用状态与请求头。 |
+| 启动提示缺少凭证 | 配置上游 Key/已有 OAuth，或明确启用匿名。 |
+| 无模型 / health 503 | 目录状态、原生协议支持、凭证配置和资源可用性。 |
+| OAuth 请求失败 | 安全账号状态与重登提示，不会自动转 PAYG。 |
+| HTTP 200 但生成失败 | SSE 错误事件、请求结果及 `x-request-id` 日志。 |
+| 修改无效 | 保存/重载实际配置；监听变化需重启。 |
+| Compose 中宿主配置修改无效 | 实际配置位于状态卷，重新导入或使用 WebUI。 |
+| 重启后用量清零 | 计数器仅在内存，日志需另外保存。 |
 
-| 现象                          | 排查方向                                           |
-| ----------------------------- | -------------------------------------------------- |
-| API 返回 401                  | 使用配置中的本地 `server_keys`。                   |
-| 健康检查一直为 `starting`     | 查看目录刷新日志和网络连通性，必要时补充协议覆盖。 |
-| 模型列表为空                  | 检查配置的 Tier、匿名资格和原生协议是否受支持。    |
-| 请求返回 502 / 504            | 查看上游尝试、凭据、代理以及请求总超时和单次超时。 |
-| HTTP 200 但生成失败           | 查看 SSE 错误事件和请求结果，不能只看 HTTP 状态。  |
-| Docker 中宿主机配置修改不生效 | 当前配置在状态卷中；重新导入，或通过 WebUI 修改。  |
-| 无法通过容器端口访问          | 检查监听地址、端口映射和状态卷中的实际配置。       |
-| 重启后监控消失                | 监控仅保存在内存，需要外部收集 stdout 日志。       |
+升级前安全备份程序、配置及状态，停止进程后再替换可执行文件。回退时恢复相互匹配的程序、配置与状态。
 
 ## 致谢
 
 感谢 [LINUX DO](https://linux.do) 社区的支持。
 
-### 自适应思考强度
-
-将 `reasoning.effort` 或按模型覆盖值设置为 `auto`，即可使用免费模型探测实际验证过的最高可用档。已有具体档位语义不变，客户端显式指定的强度始终优先，不维护模型名称白名单。
-
-基础请求成功后，对能力目录标记支持 reasoning 的模型依次验证 `max`、`xhigh`、`high`、`medium`、`low`、`minimal`。只有明确的思考参数不支持错误才尝试下一档；429、超时等临时失败会停止搜索，不能据此判断模型档位上限。全部档位均被拒绝时，不注入思考覆盖。
-
-结果按上游 URL、模型与原生协议持久化，在可用性页展示，最多使用两小时内的验证结果。主动探测仍只覆盖免费 Zen/匿名模型；Go/付费模型、能力未知或尚未验证的模型不猜测档位。开启 `auto` 不扩大探测范围，也不能证明上游一定执行了所有接受的字段；每个模型可能增加数次简短请求并消耗上游额度。
-
 ## 许可证
 
-SPDX-License-Identifier: GPL-3.0-or-later
-
-本项目是自由软件，采用自由软件基金会发布的 GNU 通用公共许可证第 3 版或（由你选择的）任何后续版本。你可以按该许可证重新分发和修改本项目；本项目不提供任何担保。完整条款见 [LICENSE](LICENSE)。
+SPDX-License-Identifier: GPL-3.0-or-later。完整条款见 [LICENSE](LICENSE)，本软件不提供担保。

@@ -73,14 +73,9 @@ type exit struct {
 	closeOnce sync.Once
 }
 
-func newExit(ctx context.Context, reg registration) (*exit, error) {
-	return newExitWithStack(ctx, reg, DefaultStack, netip.Addr{})
-}
-
 // newExitWithStack builds one userspace tunnel for reg. A valid source pins
-// the outer WireGuard socket to that address and restricts the peer endpoints
-// to IPv6, so the public egress is derived from the rotating source rather than
-// from whatever address the host happens to share.
+// the outer IPv6 socket and tries IPv6 endpoints first. IPv4 endpoints remain
+// available as a fallback when the host cannot reach Cloudflare over IPv6.
 func newExitWithStack(ctx context.Context, reg registration, stack Stack, source netip.Addr) (*exit, error) {
 	normalized, err := ParseStack(string(stack))
 	if err != nil {

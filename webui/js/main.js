@@ -3,7 +3,7 @@ import { api, setCsrf, clearCsrf, setUnauthorizedHandler } from "./api.js";
 import { refreshMonitor, loadConfig, loadDebugModels } from "./data.js";
 import * as i18n from "./i18n.js";
 import * as store from "./store.js";
-import { $, $$, toast } from "./ui.js";
+import { $, $$, closeDialogs, toast } from "./ui.js";
 import * as logstream from "./logstream.js";
 import { init as initTheme } from "./theme.js";
 
@@ -53,6 +53,9 @@ function openPage(id) {
 
 function showLogin() {
   clearCsrf();
+  store.clear();
+  closeDialogs();
+  $$("input[type='password']").forEach((input) => (input.value = ""));
   current?.hide?.();
   current = null;
   $("#app").classList.add("hidden");

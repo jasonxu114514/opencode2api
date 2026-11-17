@@ -83,9 +83,6 @@ func (e *phasedError) Unwrap() error { return e.err }
 // client gets a proxy error instead of a generic bad gateway.
 var errProxyUnavailable = errors.New("proxy unavailable")
 
-// proxyUnavailableError is an attempt error that asProxyUnavailable attributed
-// to the proxy route. It matches both errProxyUnavailable and the original
-// error under errors.Is and errors.As.
 // timeoutStatus classifies an exhausted request budget for the client.
 //
 // A write-phase failure means the upstream never finished reading the request
@@ -134,6 +131,8 @@ func isPayloadTooLarge(err error, budgetAlive bool) bool {
 	return errors.Is(err, errAttemptTimeout) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// proxyUnavailableError attributes an attempt failure to its proxy route while
+// preserving both the proxy-unavailable marker and the original error.
 type proxyUnavailableError struct {
 	proxy string
 	err   error

@@ -1,4 +1,4 @@
-package goauth
+package oauth
 
 import (
 	"context"
@@ -29,6 +29,13 @@ type remoteProvider struct {
 }
 
 func (client *Client) Discover(ctx context.Context, credential Credential) (map[string]Route, error) {
+	return client.DiscoverForPlan(ctx, credential, PlanGo)
+}
+
+func (client *Client) DiscoverForPlan(ctx context.Context, credential Credential, plan Plan) (map[string]Route, error) {
+	if !validPlan(plan) {
+		return nil, &OAuthError{Code: "invalid_plan"}
+	}
 	if err := credential.Validate(); err != nil {
 		return nil, err
 	}
@@ -71,11 +78,13 @@ func (client *Client) Discover(ctx context.Context, credential Credential) (map[
 			if baseURL == "" {
 				baseURL = provider.Settings.BaseURL
 			}
-			baseURL, ok = normalizeBase(baseURL, wireProtocol)
+			baseURL, ok = normalizeBaseForPlan(baseURL, wireProtocol, plan)
 			if !ok {
 				continue
 			}
 			route := Route{ModelID: modelID, Protocol: wireProtocol, BaseURL: baseURL}
+			// Map iteration order is arbitrary. Drop conflicting aliases instead
+			// of letting it decide which provider receives a billed request.
 			if existing, exists := routes[name]; exists && existing != route {
 				delete(routes, name)
 				ambiguous[name] = true
@@ -85,7 +94,7 @@ func (client *Client) Discover(ctx context.Context, credential Credential) (map[
 		}
 	}
 	if len(routes) == 0 {
-		return nil, &OAuthError{Code: "no_go_subscription"}
+		return nil, noRoutesError(plan)
 	}
 	return routes, nil
 }
@@ -109,16 +118,25 @@ func packageProtocol(packageName string) (protocol.Protocol, bool) {
 	}
 }
 
-func normalizeBase(raw string, wireProtocol protocol.Protocol) (string, bool) {
-	if wireProtocol != protocol.Chat && wireProtocol != protocol.Responses && wireProtocol != protocol.Anthropic {
+func normalizeBaseForPlan(raw string, wireProtocol protocol.Protocol, plan Plan) (string, bool) {
+	if !validPlan(plan) || wireProtocol != protocol.Chat && wireProtocol != protocol.Responses && wireProtocol != protocol.Anthropic {
 		return "", false
 	}
+	// Only official, plan-specific inference roots may receive OAuth tokens.
+	// Reject encoded paths and suffixes before canonicalizing route URLs.
 	parsed, err := url.Parse(raw)
 	if err != nil || !officialURL(parsed) || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
 		return "", false
 	}
 	path := strings.TrimRight(parsed.Path, "/")
-	if path == "/inference/go" {
+	root := "/inference/go"
+	if plan == PlanZen {
+		if path == "/zen" || path == "/zen/v1" {
+			return "https://opencode.ai/zen", true
+		}
+		root = "/inference"
+	}
+	if path == root {
 		if wireProtocol == protocol.Anthropic {
 			path += "/anthropic"
 		} else {
@@ -126,17 +144,28 @@ func normalizeBase(raw string, wireProtocol protocol.Protocol) (string, bool) {
 		}
 	}
 	switch path {
-	case "/inference/go/openai", "/inference/go/openai/v1":
+	case root + "/openai", root + "/openai/v1":
 		if wireProtocol == protocol.Anthropic {
 			return "", false
 		}
-		return "https://opencode.ai/inference/go/openai", true
-	case "/inference/go/anthropic", "/inference/go/anthropic/v1":
+		return "https://opencode.ai" + root + "/openai", true
+	case root + "/anthropic", root + "/anthropic/v1":
 		if wireProtocol != protocol.Anthropic {
 			return "", false
 		}
-		return "https://opencode.ai/inference/go/anthropic", true
+		return "https://opencode.ai" + root + "/anthropic", true
 	default:
 		return "", false
 	}
+}
+
+func validPlan(plan Plan) bool {
+	return plan == PlanGo || plan == PlanZen
+}
+
+func noRoutesError(plan Plan) error {
+	if plan == PlanZen {
+		return &OAuthError{Code: "no_zen_oauth"}
+	}
+	return &OAuthError{Code: "no_go_oauth"}
 }

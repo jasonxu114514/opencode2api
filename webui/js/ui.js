@@ -71,6 +71,8 @@ export function renderFacts(host, entries) {
   }
 }
 
+const openDialogs = new Set();
+
 // Generic dialog host; onClose fires on every close path so promise-based
 // dialogs settle exactly once.
 export function openDialog({ title, body = null, size = "", actions = [], onClose }) {
@@ -89,11 +91,13 @@ export function openDialog({ title, body = null, size = "", actions = [], onClos
   const close = () => {
     if (closed) return;
     closed = true;
+    openDialogs.delete(close);
     overlay.remove();
     document.removeEventListener("keydown", onKey, true);
     if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
     onClose?.();
   };
+  openDialogs.add(close);
   const onKey = (event) => {
     if (event.key === "Escape") {
       event.stopPropagation();
@@ -123,6 +127,10 @@ export function openDialog({ title, body = null, size = "", actions = [], onClos
   const target = dialog.querySelector("input, select, textarea") || dialog.querySelector(".dialog-actions .btn");
   target?.focus();
   return { close, dialog };
+}
+
+export function closeDialogs() {
+  for (const close of [...openDialogs]) close();
 }
 
 export function confirmDialog({

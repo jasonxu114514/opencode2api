@@ -32,7 +32,9 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		slog.Error("configuration error", "error", err)
+		// No validated configuration exists to seed the redactor yet. Parse
+		// errors can quote credential-bearing input, so keep this log generic.
+		slog.Error("configuration could not be loaded; check JSON, required fields, and file permissions")
 		os.Exit(1)
 	}
 	if *listen != "" {
