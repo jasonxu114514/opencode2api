@@ -72,7 +72,7 @@ type bridgeStreamEvent struct {
 // A canceled client gets no synthetic upstream error event: the gateway
 // cancels the request context when the client goes away, and writing after
 // that only wastes the remaining attempt.
-func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
+func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string, renames *ToolRenames) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
@@ -85,7 +85,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		responseArgs:      map[string]bool{},
 		responseReasoning: map[string]bool{},
 	}
-	emitter := bridgeStreamEmitter(w, flusher, to, model)
+	emitter := bridgeStreamEmitter(w, flusher, to, model, renames.Custom)
 	termination := streamOpen
 	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
@@ -220,7 +220,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	if cause == nil {
 		cause = errSSEUnexpectedEOF
 	}
-	emitter := bridgeStreamEmitter(w, flusher, protocol, model)
+	emitter := bridgeStreamEmitter(w, flusher, protocol, model, nil)
 	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
 		return usage, observer.Reported(), err
 	}
@@ -334,6 +334,8 @@ type streamToolRenameState struct {
 	decided          bool
 	renamed          bool
 	pending          string
+	upstream         string
+	transform        ArgumentTransform
 	pendingArguments strings.Builder
 	callIndex        any
 	choiceIndex      any
@@ -408,23 +410,39 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 						changed = true
 					}
 				}
-				if arguments, exists := function["arguments"]; exists && !state.decided {
-					if renamer.renames.HasLongerPrefix(state.pending) {
+				if arguments, exists := function["arguments"]; exists {
+					if !state.decided {
+						if renamer.renames.HasLongerPrefix(state.pending) {
+							if fragment, ok := arguments.(string); ok {
+								state.pendingArguments.WriteString(fragment)
+								delete(function, "arguments")
+								changed = true
+							}
+						} else {
+							if state.pending != "" {
+								function["name"] = state.pending
+								state.upstream = state.pending
+								state.transform = renamer.argumentTransform(state.upstream)
+								changed = true
+							}
+							state.decided = true
+						}
+					}
+					if state.decided && state.transform != nil {
 						if fragment, ok := arguments.(string); ok {
 							state.pendingArguments.WriteString(fragment)
 							delete(function, "arguments")
 							changed = true
 						}
-					} else {
-						if state.pending != "" {
-							function["name"] = state.pending
-							changed = true
-						}
-						state.decided = true
 					}
 				}
-				if state.decided && renamer.releasePendingArguments(state, function) {
+				if state.decided && state.transform == nil && renamer.releasePendingArguments(state, function) {
 					changed = true
+				}
+				if finished && state.transform != nil && state.pendingArguments.Len() > 0 {
+					if renamer.flushTransformedArguments(state, function) {
+						changed = true
+					}
 				}
 				if finished && !state.decided && (state.pending != "" || state.pendingArguments.Len() > 0) {
 					if renamer.finishState(state, function) {
@@ -475,6 +493,31 @@ func (renamer *streamToolRenamer) releasePendingArguments(state *streamToolRenam
 	return true
 }
 
+// argumentTransform returns the registered argument rewrite for an upstream
+// tool name, or nil when the call needs no translation.
+func (renamer *streamToolRenamer) argumentTransform(name string) ArgumentTransform {
+	if transform, ok := renamer.renames.ArgumentTransform(name); ok {
+		return transform
+	}
+	return nil
+}
+
+// flushTransformedArguments writes the buffered arguments of one tool call
+// through its argument transform. Arguments an upstream streamed in fragments
+// are complete by the time the choice finishes.
+func (renamer *streamToolRenamer) flushTransformedArguments(state *streamToolRenameState, function map[string]any) bool {
+	if state.transform == nil || state.pendingArguments.Len() == 0 {
+		return false
+	}
+	arguments := state.pendingArguments.String()
+	if rewritten, err := state.transform(arguments); err == nil {
+		arguments = rewritten
+	}
+	function["arguments"] = arguments
+	state.pendingArguments.Reset()
+	return true
+}
+
 // finishState settles a call the choice finished while its name was still
 // ambiguous: the held-back name and arguments are emitted verbatim.
 func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, function map[string]any) bool {
@@ -499,10 +542,14 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 			continue
 		}
 		state := renamer.tools[key]
-		if state == nil || state.decided || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
+		if state == nil || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
 			continue
 		}
-		if state.pending == "" && state.pendingArguments.Len() == 0 {
+		if state.decided {
+			if state.transform == nil || state.pendingArguments.Len() == 0 {
+				continue
+			}
+		} else if state.pending == "" && state.pendingArguments.Len() == 0 {
 			continue
 		}
 		calls = append(calls, renamer.pendingCall(state))
@@ -514,10 +561,16 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 // decided.
 func (renamer *streamToolRenamer) pendingCall(state *streamToolRenameState) any {
 	function := map[string]any{}
-	if state.pending != "" {
+	if !state.decided && state.pending != "" {
 		function["name"] = state.pending
 	}
-	if state.pendingArguments.Len() > 0 {
+	if state.transform != nil && state.pendingArguments.Len() > 0 {
+		arguments := state.pendingArguments.String()
+		if rewritten, err := state.transform(arguments); err == nil {
+			arguments = rewritten
+		}
+		function["arguments"] = arguments
+	} else if state.pendingArguments.Len() > 0 {
 		function["arguments"] = state.pendingArguments.String()
 	}
 	call := map[string]any{"index": state.callIndex, "function": function}
@@ -540,7 +593,14 @@ func (renamer *streamToolRenamer) finish() []byte {
 	byIndex := map[string]*choiceCalls{}
 	for _, key := range renamer.order {
 		state := renamer.tools[key]
-		if state == nil || state.decided || state.pending == "" && state.pendingArguments.Len() == 0 {
+		if state == nil {
+			continue
+		}
+		if state.decided {
+			if state.transform == nil || state.pendingArguments.Len() == 0 {
+				continue
+			}
+		} else if state.pending == "" && state.pendingArguments.Len() == 0 {
 			continue
 		}
 		index := state.choiceIndex
@@ -596,6 +656,8 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	state.pending = mergeToolName(state.pending, fragment)
 	if client, ok := renamer.renames.Client(state.pending); ok {
 		function["name"] = client
+		state.upstream = state.pending
+		state.transform = renamer.argumentTransform(state.upstream)
 		state.decided, state.renamed = true, true
 		return true
 	}
@@ -610,6 +672,8 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	// declared is written out as the model sent it.
 	client, renamed := renamer.renames.Resolve(state.pending)
 	function["name"] = client
+	state.upstream = state.pending
+	state.transform = renamer.argumentTransform(state.upstream)
 	state.decided, state.renamed = true, renamed
 	return true
 }
