@@ -43,6 +43,8 @@ type Server struct {
 	oauth         map[oauthKey]*oauthAttempt
 	oauthClient   *oauth.Client
 	proxyChecks   chan struct{}
+	// Set once before serving; see TrustCloudflareClientIP.
+	trustCloudflareIP bool
 }
 
 // New returns a Server for manager, reporting to monitor and logs.
@@ -352,7 +354,7 @@ func (a *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	a.logger.Info("sensitive configuration revealed", "component", "auth", "event", "secrets_revealed", "client_ip", clientIP(r))
+	a.logger.Info("sensitive configuration revealed", "component", "auth", "event", "secrets_revealed", "client_ip", a.clientIP(r))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"server_keys": cfg.ServerKeys, "zen_keys": cfg.ZenKeys, "go_keys": cfg.GoKeys, "proxies": cfg.Proxies})
 }
 

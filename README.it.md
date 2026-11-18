@@ -54,6 +54,7 @@ Opzioni da riga di comando:
 | `-config`     | `config.json`      | Percorso del file di configurazione.     |
 | `-listen`     | Non impostato      | Sostituisce l'indirizzo di ascolto API.  |
 | `-web-listen` | Non impostato      | Sostituisce l'indirizzo di ascolto WebUI. |
+| `-trust-cloudflare-client-ip` | `false` | I limiti di login/Playground della WebUI usano `CF-Connecting-IP`, solo se il peer diretto è loopback (`cloudflared` locale). |
 
 La directory di configurazione deve essere scrivibile per migrare la password, salvare la configurazione e memorizzare le cache dei modelli.
 
@@ -277,7 +278,7 @@ I nomi derivano dal percorso di configurazione effettivo. Il monitoraggio soprav
 
 `GET /healthz` non chiama l'upstream e non richiede chiavi. Rilevamento in attesa/vuoto, WARP indisponibile o assenza di proxy sani necessari producono 503. Un catalogo obsoleto ma utilizzabile può restituire 200 e `status: "degraded"`; la soglia è due volte l'intervallo di aggiornamento, almeno 60 secondi. La disponibilità non certifica chiavi, quota o inferenza. La risposta pubblica include conteggi/stato, senza segreti o indirizzi proxy.
 
-Per uso locale limita API e gestione a loopback. Per accesso in rete usa HTTPS e limita l'ingresso amministrativo. Un reverse proxy fidato deve impostare correttamente `X-Forwarded-Proto`; i limiti usano il peer diretto, quindi i client dietro un proxy li condividono. L'eseguibile serve HTTP.
+Per uso locale limita API e gestione a loopback. Per accesso in rete usa HTTPS e limita l'ingresso amministrativo. Un reverse proxy fidato deve impostare correttamente `X-Forwarded-Proto`; i limiti usano il peer diretto, quindi i client dietro un proxy li condividono. Dietro un tunnel `cloudflared` sullo stesso host, avvia con `-trust-cloudflare-client-ip` per dare a ogni visitatore il proprio limite: `CF-Connecting-IP` è usato solo per peer loopback (Cloudflare sovrascrive l'header) e i client IPv6 condividono un limite per /64. Non attivarlo per altri reverse proxy. L'eseguibile serve HTTP.
 
 Configurazione e backup contengono chiavi upstream, password proxy e token OAuth; l'hash della password non li cifra. Limita i permessi dei file, con ACL su Windows, ed escludi i file di runtime dalla condivisione del codice. `logging.dump_request_bodies` è disabilitato e richiede livello debug; i corpi possono rivelare conversazioni anche dopo riduzione e mascheramento. Playground e test attivi consumano potenzialmente quota o credits reali.
 

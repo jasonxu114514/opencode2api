@@ -54,6 +54,7 @@ Tuỳ chọn dòng lệnh:
 | `-config`      | `config.json`  | Đường dẫn file cấu hình.                     |
 | `-listen`      | Không đặt      | Ghi đè địa chỉ lắng nghe của API.            |
 | `-web-listen`  | Không đặt      | Ghi đè địa chỉ lắng nghe của WebUI.          |
+| `-trust-cloudflare-client-ip` | `false` | Giới hạn đăng nhập/Playground của WebUI dùng `CF-Connecting-IP`, chỉ khi peer trực tiếp là loopback (`cloudflared` cục bộ). |
 
 Thư mục cấu hình phải ghi được để thực hiện việc chuyển mật khẩu, lưu cấu hình và cache mô hình.
 
@@ -277,7 +278,7 @@ Tên tệp theo đường dẫn cấu hình thực tế. Theo dõi giữ qua n�
 
 `GET /healthz` không gọi upstream, không cần key. Khám phá chưa xong/trống, WARP không dùng được hoặc thiếu proxy khỏe bắt buộc trả 503. Danh mục cũ nhưng dùng được có thể trả 200 với `status: "degraded"`; ngưỡng cũ là hai lần chu kỳ, ít nhất 60 giây. Sẵn sàng không chứng minh key hợp lệ, đủ hạn mức hay suy luận thành công. Phản hồi công khai chỉ có số lượng/trạng thái, không có bí mật hay địa chỉ proxy.
 
-Dùng loopback cho API và quản trị cục bộ. Khi truy cập qua mạng, dùng HTTPS và giới hạn lối vào quản trị. Reverse proxy tin cậy phải đặt `X-Forwarded-Proto` đúng; giới hạn dùng địa chỉ peer trực tiếp, nên client cùng proxy chia sẻ giới hạn. Tệp thực thi phục vụ HTTP.
+Dùng loopback cho API và quản trị cục bộ. Khi truy cập qua mạng, dùng HTTPS và giới hạn lối vào quản trị. Reverse proxy tin cậy phải đặt `X-Forwarded-Proto` đúng; giới hạn dùng địa chỉ peer trực tiếp, nên client cùng proxy chia sẻ giới hạn. Khi dùng đường hầm `cloudflared` trên cùng máy, thêm `-trust-cloudflare-client-ip` để mỗi khách có giới hạn riêng: `CF-Connecting-IP` chỉ được dùng cho peer loopback (Cloudflare ghi đè header này), IPv6 gộp theo /64. Không bật cho reverse proxy khác. Tệp thực thi phục vụ HTTP.
 
 Cấu hình/bản sao lưu chứa key upstream, mật khẩu proxy, token OAuth; hash mật khẩu không mã hóa chúng. Hạn chế quyền tệp, dùng ACL trên Windows, và loại tệp runtime khi chia sẻ mã. `logging.dump_request_bodies` mặc định tắt và cần mức debug; nội dung đã cắt/che vẫn có thể lộ hội thoại. Playground và thử chủ động có thể tiêu hao hạn mức hoặc credits thật.
 
