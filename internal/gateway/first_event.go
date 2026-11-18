@@ -199,6 +199,15 @@ func (b *attemptBody) Close() error {
 	return b.body.Close()
 }
 
+// Non-2xx bodies are buffered before classification or forwarding; see
+// doInferenceAttempt. The time cap applies even when the optional attempt
+// deadline is disabled; cancellation interrupts the transport read without a
+// background reader.
+const (
+	maxErrorBodyBytes = 1 << 20
+	errorBodyTimeout  = 2 * time.Second
+)
+
 // doInferenceAttempt sends one upstream attempt through client under two
 // optional deadlines. It passes straight through to client.Do when both
 // timeouts are zero or negative, and for the /systemone path.
@@ -221,8 +230,10 @@ func (b *attemptBody) Close() error {
 // errFirstEventTimeout as the error when that deadline caused the failure, and
 // closing the returned body also releases the attempt's context.
 func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeout, attemptTimeout time.Duration) (*http.Response, error) {
-	if (firstEventTimeout <= 0 && attemptTimeout <= 0) || strings.HasSuffix(req.URL.Path, "/systemone") {
-		return client.Do(req)
+	// /systemone skips the optional deadlines, but its error bodies are still
+	// bounded below like every other attempt's.
+	if strings.HasSuffix(req.URL.Path, "/systemone") {
+		firstEventTimeout, attemptTimeout = 0, 0
 	}
 	trace := &attemptTrace{}
 	ctx, cancel := context.WithCancelCause(req.Context())
@@ -273,8 +284,30 @@ func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeou
 		cancel(nil)
 		return resp, &phasedError{err: err, phase: trace.phase()}
 	}
-	// Without a first-event wait the attempt is done once headers arrive.
-	if firstEventTimeout <= 0 || resp.StatusCode/100 != 2 || !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+	if resp.StatusCode/100 != 2 {
+		// Error bodies are read by classification, retries and the error copied
+		// to the client, all after this function returns and without a deadline
+		// of their own: a peer that sends headers and then stalls would hold the
+		// retry loop until the request budget is gone. Read at most
+		// maxErrorBodyBytes here under an absolute errorBodyTimeout (not reset
+		// by a peer trickling bytes; the attempt timer also stays armed), then
+		// close without draining. Status, headers and whatever bytes arrived are
+		// kept, so 403/429/5xx classification and retries are unchanged.
+		bodyTimer := time.AfterFunc(errorBodyTimeout, func() { cancel(context.DeadlineExceeded) })
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		bodyTimer.Stop()
+		_ = resp.Body.Close()
+		cancel(nil)
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.ContentLength = int64(len(body))
+		resp.Header.Del("Content-Length")
+		resp.Header.Del("Transfer-Encoding")
+		resp.TransferEncoding = nil
+		resp.Trailer = nil
+		return resp, nil
+	}
+	// Without a first-event wait a successful attempt commits at headers.
+	if firstEventTimeout <= 0 || !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		if attemptTimer != nil {
 			if cause := commitDeadline(); cause != nil {
 				cancel(nil)

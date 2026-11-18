@@ -4,14 +4,15 @@ import (
 	"io"
 )
 
-// DrainAndClose discards up to 64 KiB of body and closes it, so the
-// connection can be reused. A nil body is ignored. The bound keeps a small
-// response fully drained while a large or endless one cannot hold the caller
-// for more than that amount of data.
+// DrainAndClose closes body without speculative reads. A byte-limited drain
+// is not time-limited: even one unread byte can stall the caller forever.
+// Callers that want connection reuse must consume the body under their own
+// deadline first; the regular and Bun transports already reuse a connection
+// after a clean EOF. Closing an unread body only gives up reuse. The name is
+// kept for existing callers. A nil body is ignored.
 func DrainAndClose(body io.ReadCloser) {
 	if body == nil {
 		return
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, 64<<10))
 	_ = body.Close()
 }
