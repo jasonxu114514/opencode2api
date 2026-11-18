@@ -76,7 +76,7 @@ func (a *Server) handleDebugModels(w http.ResponseWriter, _ *http.Request) {
 // the first enabled server key, which the gateway accounts to the Playground
 // bucket, and the result is kept for handleDebugModels.
 func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
-	if !a.allowDebug(clientIP(r)) {
+	if !a.allowDebug(rateLimitKey(a.clientIP(r))) {
 		writeAdminError(w, http.StatusTooManyRequests, "debug_rate_limited", "too many Playground requests; retry in one minute")
 		return
 	}

@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -43,7 +42,9 @@ type loginWindow struct {
 // password hash, creates a session and its CSRF token, and sets the session
 // cookie. A successful login clears that client's failure window.
 func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	client := clientIP(r)
+	client := a.clientIP(r)
+	// IPv6 peers share one limit per /64; logs keep the full address.
+	limitKey := rateLimitKey(client)
 	var input struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -52,7 +53,7 @@ func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !a.reserveLoginCheck(client) {
+	if !a.reserveLoginCheck(limitKey) {
 		writeAdminError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts; try again later")
 		return
 	}
@@ -77,7 +78,7 @@ func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	expires := time.Now().Add(time.Duration(cfg.WebUI.SessionTTLMinutes) * time.Minute)
 	a.mu.Lock()
-	delete(a.attempts, client)
+	delete(a.attempts, limitKey)
 	a.cleanupSessionsLocked(time.Now())
 	if len(a.sessions) >= 2048 {
 		a.removeEarliestSessionLocked()
@@ -217,7 +218,7 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	a.cancelOAuth("")
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1, Secure: requestIsSecure(r)})
-	a.logger.Info("admin account updated", "component", "auth", "event", "account_updated", "client_ip", clientIP(r))
+	a.logger.Info("admin account updated", "component", "auth", "event", "account_updated", "client_ip", a.clientIP(r))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"updated": true, "reauthenticate": true})
 }
 
@@ -334,18 +335,7 @@ func (a *Server) sessionValid(id string, cfg config.Config) bool {
 	return ok && time.Now().Before(session.Expires) && session.Username == cfg.WebUI.Username && session.AuthVersion == config.Fingerprint(cfg.WebUI.PasswordHash)
 }
 
-// clientIP returns the IP address of the direct peer, without the port. It
-// deliberately ignores X-Forwarded-For: the header is client-controlled, so
-// trusting it would let anyone escape the login and Playground rate limits by
-// rotating a value. Behind a reverse proxy every client therefore shares the
-// proxy's address.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
-}
+// clientIP, peerIP and rateLimitKey live in client_ip.go.
 
 // requestIsSecure reports whether the browser reached the server over TLS,
 // directly or, for the cookie's Secure flag and the CSRF origin check, through

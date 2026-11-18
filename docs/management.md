@@ -46,7 +46,7 @@ The UI supports Simplified Chinese, English, Vietnamese, and Italian. Language a
 
 Administrators log in with a username and password and receive an `HttpOnly`, `SameSite=Strict` session cookie. Every management API except login requires a valid session. Writes also require `X-CSRF-Token`; when an `Origin` header is present, it must match the service's origin. Login and session responses provide `csrf_token`. Local `server_keys` do not grant management access.
 
-Sessions default to 720 minutes, with a range of 5–10,080 minutes. Changing administrator credentials or restarting the process invalidates existing sessions; the account update endpoint requires the current password again. Login is throttled. Playground allows at most 12 requests per direct client per minute. The service does not trust `X-Forwarded-For`, so clients behind a reverse proxy share its limits. An HTTPS reverse proxy must set `X-Forwarded-Proto` correctly because it affects the cookie's Secure flag and origin checks.
+Sessions default to 720 minutes, with a range of 5–10,080 minutes. Changing administrator credentials or restarting the process invalidates existing sessions; the account update endpoint requires the current password again. Login is throttled. Playground allows at most 12 requests per direct client per minute. The service does not trust `X-Forwarded-For`, so clients behind a reverse proxy share its limits; with `-trust-cloudflare-client-ip`, loopback peers (a local `cloudflared`) are limited by `CF-Connecting-IP` instead, IPv6 per /64. An HTTPS reverse proxy must set `X-Forwarded-Proto` correctly because it affects the cookie's Secure flag and origin checks.
 
 ## Saving and reloading configuration
 

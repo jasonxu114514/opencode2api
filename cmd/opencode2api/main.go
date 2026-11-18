@@ -28,6 +28,7 @@ func main() {
 	configPath := flag.String("config", "config.json", "path to config.json")
 	listen := flag.String("listen", "", "override the configured API listen address")
 	webListen := flag.String("web-listen", "", "override the configured WebUI listen address")
+	trustCloudflareIP := flag.Bool("trust-cloudflare-client-ip", false, "WebUI: take the client IP for login limits from CF-Connecting-IP, only for loopback peers (local cloudflared)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -68,6 +69,10 @@ func main() {
 
 	if cfg.WebUI.Enabled {
 		admin := adminui.New(manager, monitor, hub, logger)
+		if *trustCloudflareIP {
+			admin.TrustCloudflareClientIP()
+			logger.Info("webui trusts CF-Connecting-IP from loopback peers", "component", "webui", "event", "cloudflare_client_ip_trusted")
+		}
 		webServer := &http.Server{
 			Addr: cfg.WebUI.Listen, Handler: admin.Handler(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,
 		}
