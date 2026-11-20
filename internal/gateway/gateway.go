@@ -281,6 +281,12 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadRequest, "request body must be a JSON object", "invalid_request_error", "")
 			return
 		}
+		var strippedEnvironment bool
+		r, strippedEnvironment, err = g.withClientEnvironment(r, payload, external)
+		if err != nil {
+			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "client_environment")
+			return
+		}
 		model := jsonutil.StringAt(payload, "model")
 		meta := telemetry.MetaFromRequest(r)
 		if meta != nil {
@@ -345,6 +351,14 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			if len(jsonutil.MapAt(payload, "questions")) == 0 || payload["state"] == nil {
 				wire.WriteError(w, external, http.StatusBadRequest, "this model uses System One decisions, not chat; send state and typed questions to /v1/systemone", "invalid_request_error", "model")
 				return
+			}
+			if strippedEnvironment {
+				// This path forwards raw bytes rather than converting payload.
+				body, err = jsonutil.Marshal(payload)
+				if err != nil {
+					wire.WriteError(w, external, http.StatusBadRequest, "request body could not be encoded", "invalid_request_error", "")
+					return
+				}
 			}
 			g.forwardSystemOne(w, r, body, payload, model, route)
 			return
@@ -564,6 +578,19 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "request body must be a JSON object", "invalid_request_error", "")
 		return
+	}
+	var strippedEnvironment bool
+	r, strippedEnvironment, err = g.withClientEnvironment(r, payload, wire.SystemOne)
+	if err != nil {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, err.Error(), "invalid_request_error", "client_environment")
+		return
+	}
+	if strippedEnvironment {
+		body, err = jsonutil.Marshal(payload)
+		if err != nil {
+			wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "request body could not be encoded", "invalid_request_error", "")
+			return
+		}
 	}
 	model := jsonutil.StringAt(payload, "model")
 	if meta := telemetry.MetaFromRequest(r); meta != nil {

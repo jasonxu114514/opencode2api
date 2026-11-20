@@ -212,13 +212,15 @@ L'oggetto facoltativo `models.anonymous_backoff` sospende la corsia anonima dopo
 
 La compatibilità gratuita può inserire prompt e strumenti ufficiali OpenCode, rinominare gli strumenti sul collegamento upstream e ripristinarne i nomi nelle risposte. Riguarda anche modelli gratuiti serviti con chiave. Il gateway inoltra le chiamate, senza eseguire strumenti sul computer. System One è escluso dall'adattamento di messaggi e strumenti.
 
-Il prompt inserito include directory, workspace, piattaforma, modello e data UTC. Normalmente descrive il computer del gateway. Per i client remoti configura il testo in `upstream.prompt_environment`:
+Il prompt inserito include modello e data UTC; directory, workspace, piattaforma e stato Git del client non noti sono indicati come `unknown`. Non vengono sostituiti con l'ambiente del gateway. Per fornire questi dati esplicitamente, aggiungi il campo `client_environment`, riservato al gateway, al livello principale di ogni richiesta di inferenza:
 
 ```json
-{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}
+{"client_environment":{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}}
 ```
 
-Inserisci l'oggetto nel campo indicato della configurazione. I percorsi sono testo e non vengono aperti. `windows` diventa `win32`; sono ammessi anche `linux` e `darwin`. Un prompt ufficiale già fornito dal client non viene sostituito. Questi valori avanzati non hanno campi dedicati nella UI: modifica e ricarica il file. Gli override arbitrari non sono stati verificati con la validazione reale dell'upstream.
+Il gateway legge e rimuove questa estensione prima dell'inoltro. Riconosce anche blocchi `<env>` formattati nelle istruzioni system/developer e aggiornamenti `<environment_context>` in messaggi user dedicati; prevale l'ultimo aggiornamento user. Quando viene inserito un prompt, l'ordine di priorità è: `client_environment` esplicito, dichiarazioni riconosciute del client, `upstream.prompt_environment` configurato, ambiente sconosciuto. Ogni fonte fornisce uno stato completo: i campi mancanti non vengono integrati da fonti con priorità inferiore e la directory di lavoro non implica la radice del workspace. Lo stato appartiene alla singola richiesta, senza cache tra richieste o sessioni. Invia l'ambiente con ogni richiesta, direttamente o nella cronologia della conversazione.
+
+I percorsi vengono validati come testo senza accesso al filesystem. `windows` diventa `win32`; sono ammessi anche `linux` e `darwin`. Per un valore predefinito del deployment, inserisci i quattro campi interni dell'esempio in `upstream.prompt_environment`, modifica il file di configurazione e ricaricalo; questi valori avanzati non hanno campi dedicati nella UI. Un prompt ufficiale già fornito dal client viene preservato. I valori di ambiente `unknown` sono stati accettati in richieste reali a `deepseek-v4.1-flash-free`; altri modelli e corsie restano da verificare.
 
 Il ragionamento accetta `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `none`, `auto` o un valore vuoto. Il livello esplicito del client ha precedenza. `none` rimuove le impostazioni. `auto` usa un limite recentemente verificato soltanto per modelli gratuiti Zen/anonimi e non estende la portata dei test. La scoperta richiede test attivi, può consumare quota con più richieste e scade dopo due ore. Nessun livello viene dedotto per Go, modelli a pagamento o capacità non verificate.
 

@@ -214,13 +214,15 @@ OAuth 另有规则：请求选择 OAuth 路由后，只使用该 Tier 已确认�
 
 免费模型兼容逻辑会按需注入官方 OpenCode 系统提示词和工具定义，改写线上工具名，并在响应中还原客户端名称。使用 Key 的免费模型也可能经过整形。网关只转发工具调用，不会在本机执行工具；System One 不经过消息/工具整形。
 
-注入提示词包含目录、工作区、平台、模型与 UTC 日期，默认描述网关主机。远程客户端可配置兼容文本：
+注入提示词包含模型与 UTC 日期；未知的客户端目录、工作区、平台及 Git 状态标记为 `unknown`，不会使用网关主机环境替代。可在每个推理请求顶层添加仅供网关使用的 `client_environment` 字段，明确提供这些信息：
 
 ```json
-{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}
+{"client_environment":{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}}
 ```
 
-将此对象合并到 `upstream.prompt_environment`。目录仅作为文本使用，不会由此访问；`windows` 规范为 `win32`，还支持 `linux`、`darwin`。客户端已提供的官方提示词不被覆盖。界面没有这些高级字段，需编辑配置并重载；任意环境覆盖值尚未经过真实上游校验。
+网关读取后会移除此扩展字段再转发请求。也可识别 system/developer 指令中格式明确的 `<env>` 块，以及独立 user 消息中的 `<environment_context>` 更新；后者以最后一次更新为准。注入提示词时，来源优先级为显式 `client_environment`、已识别的客户端声明、配置中的 `upstream.prompt_environment`、未知。每个来源作为完整快照使用，缺失字段不会从低优先级来源补齐，工作目录也不等于工作区根目录。快照仅属于当前请求，不跨请求或会话缓存；每次请求都需直接或通过会话历史携带环境信息。
+
+路径仅作文本校验，不访问文件系统；`windows` 规范为 `win32`，还支持 `linux`、`darwin`。如需部署级默认值，将上例的四个内层字段放入 `upstream.prompt_environment`，编辑配置文件并重载；界面没有这些高级字段。客户端已提供的官方提示词仍不被覆盖。环境值为 `unknown` 的真实 `deepseek-v4.1-flash-free` 请求已获上游接受；其他模型及通道尚未验证。
 
 思考强度接受 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`、`auto` 或空值，客户端明确指定的强度优先。`none` 移除 reasoning 设置。`auto` 仅使用近期为免费 Zen/匿名模型验证的强度上限，不扩大探测范围；自动发现需开启主动探测，可能发送多次消耗额度的请求，结果两小时后过期。Go/付费模型及未验证强度不会被推算。
 

@@ -214,13 +214,15 @@ An optional `models.anonymous_backoff` object pauses the anonymous lane after re
 
 Free-model compatibility can inject the official OpenCode system prompt and tool definitions, rename client tools on the wire, and restore their names in responses. This also affects free models served by keys. The gateway relays tool calls; it does not execute tools on the host. System One is excluded from message/tool shaping.
 
-The injected prompt includes a working directory, workspace, platform, model, and UTC date. By default these describe the gateway host. Set `upstream.prompt_environment` to supply compatibility text for remote clients:
+The injected prompt includes the model and UTC date, and reports unknown client directory, workspace, platform, or Git status as `unknown`. It never substitutes the gateway host's environment. To supply these facts explicitly, add the gateway-only `client_environment` field at the top level of each inference request:
 
 ```json
-{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}
+{"client_environment":{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}}
 ```
 
-Merge that object into `upstream.prompt_environment`. Paths are text, not accessed by this setting. `windows` normalizes to `win32`; `linux` and `darwin` are also accepted. A client-supplied official prompt is not replaced. There are no dedicated UI fields for these advanced values; edit the file and reload it. Arbitrary environment overrides have not been verified against upstream validation.
+The gateway consumes and removes this extension before forwarding. It also recognizes formatted `<env>` blocks in system/developer instructions and standalone user `<environment_context>` updates; the latest user update wins. When injecting a prompt, source priority is explicit `client_environment`, recognized client declarations, configured `upstream.prompt_environment`, then unknown. Each source supplies a complete snapshot: missing fields are not filled from lower-priority sources, and a working directory does not imply a workspace root. Each request owns its snapshot; there is no environment cache across requests or sessions. Send the environment with every request, directly or in its conversation history.
+
+Paths are validated as text without filesystem access. `windows` normalizes to `win32`; `linux` and `darwin` are also accepted. To set a deployment fallback, place the four inner fields above in `upstream.prompt_environment`, edit the configuration file, and reload it; these advanced values have no dedicated UI fields. A client-supplied official prompt is still preserved. Unknown environment values have been accepted in live `deepseek-v4.1-flash-free` requests; other models and lanes remain unverified.
 
 Reasoning accepts `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `none`, `auto`, or an empty value. Explicit client effort takes precedence. `none` removes reasoning settings. `auto` uses a recently validated effort ceiling only for eligible free Zen/anonymous models; it does not expand probe scope. Automatic discovery needs active probes, may make several billable/quota-consuming requests, and expires after two hours. Go/paid models and unverified levels get no inferred override.
 

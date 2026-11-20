@@ -212,13 +212,15 @@ Gửi `x-session-id` để tách hội thoại rõ ràng. Header phiên OpenCode
 
 Tương thích mô hình miễn phí có thể chèn prompt/công cụ chính thức OpenCode, đổi tên công cụ trên đường truyền và khôi phục tên trong phản hồi. Mô hình miễn phí dùng key cũng chịu xử lý này. Gateway chỉ chuyển tiếp lời gọi, không chạy công cụ trên máy. System One không đi qua chỉnh dạng tin nhắn/công cụ.
 
-Prompt chèn thêm có thư mục, workspace, nền tảng, mô hình và ngày UTC; mặc định mô tả máy gateway. Có thể đặt văn bản tương thích cho client từ xa trong `upstream.prompt_environment`:
+Prompt chèn thêm có mô hình và ngày UTC; thư mục, workspace, nền tảng hoặc trạng thái Git chưa biết của client được ghi là `unknown`. Gateway không thay bằng môi trường của máy chủ. Để cung cấp rõ các thông tin này, thêm trường `client_environment` dành riêng cho gateway ở cấp cao nhất của mỗi yêu cầu suy luận:
 
 ```json
-{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}
+{"client_environment":{"working_directory":"C:\\work\\project","workspace_root":"C:\\work\\project","platform":"windows","is_git_repo":true}}
 ```
 
-Ghép đối tượng vào trường trên. Đường dẫn chỉ là văn bản, không được truy cập do thiết lập này. `windows` thành `win32`; cũng chấp nhận `linux`, `darwin`. Prompt chính thức client đã gửi không bị thay. UI chưa có trường riêng cho giá trị nâng cao này; sửa và nạp lại tệp. Giá trị ghi đè tùy ý chưa được xác minh với kiểm tra thực tế của upstream.
+Gateway đọc rồi xóa trường mở rộng này trước khi chuyển tiếp. Gateway cũng nhận diện khối `<env>` đúng định dạng trong chỉ dẫn system/developer và bản cập nhật `<environment_context>` trong tin nhắn user riêng; bản cập nhật user cuối cùng được ưu tiên. Khi chèn prompt, thứ tự nguồn là `client_environment` rõ ràng, khai báo client được nhận diện, cấu hình `upstream.prompt_environment`, rồi đến trạng thái chưa biết. Mỗi nguồn cung cấp một bản chụp đầy đủ: trường thiếu không được bổ sung từ nguồn có ưu tiên thấp hơn, và thư mục làm việc không đồng nghĩa với thư mục gốc workspace. Bản chụp chỉ thuộc yêu cầu hiện tại, không được lưu đệm giữa các yêu cầu hay phiên. Gửi môi trường trong mỗi yêu cầu, trực tiếp hoặc qua lịch sử hội thoại.
+
+Đường dẫn chỉ được kiểm tra như văn bản, không truy cập hệ thống tệp. `windows` thành `win32`; cũng chấp nhận `linux`, `darwin`. Để đặt giá trị mặc định cho bản triển khai, đưa bốn trường bên trong của ví dụ vào `upstream.prompt_environment`, sửa và nạp lại tệp cấu hình; UI chưa có trường riêng cho các giá trị nâng cao này. Prompt chính thức client đã gửi vẫn được giữ nguyên. Các giá trị môi trường `unknown` đã được chấp nhận trong yêu cầu thực tế tới `deepseek-v4.1-flash-free`; các mô hình và kênh khác vẫn chưa được xác minh.
 
 Mức suy luận nhận `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `none`, `auto` hoặc rỗng. Mức client chỉ định rõ có ưu tiên. `none` bỏ thiết lập suy luận. `auto` dùng mức trần mới được xác minh cho mô hình miễn phí Zen/ẩn danh, không mở rộng phạm vi thử. Khám phá tự động cần bật thử chủ động, có thể dùng nhiều yêu cầu tiêu hao hạn mức và hết hiệu lực sau hai giờ. Không suy đoán mức cho Go, mô hình trả phí hay khả năng chưa xác minh.
 

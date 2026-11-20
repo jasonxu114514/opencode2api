@@ -2,11 +2,7 @@ package gateway
 
 import (
 	_ "embed"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"opencode2api/internal/config"
@@ -41,40 +37,18 @@ Use the skill tool to load a skill when a task matches its description.
   </skill>
 </available_skills>`
 
-var (
-	opencodeEnvOnce sync.Once
-	opencodeWorkDir string
-)
-
 // opencodeEnvironment renders the <env> block the CLI puts after its base
-// prompt. Configured values replace the host defaults without changing the
-// field names or order; the host directory is resolved once per process.
+// prompt. Only values supplied for this request describe the client; missing
+// facts remain unknown without inspecting or describing the gateway's host.
 func opencodeEnvironment(model string, environment *config.PromptEnvironmentConfig) string {
-	opencodeEnvOnce.Do(func() {
-		directory := ""
-		if current, err := os.Getwd(); err == nil {
-			directory = filepath.Clean(strings.TrimSpace(current))
-		}
-		if directory == "" || directory == "." {
-			directory = "/workspace"
-		}
-		opencodeWorkDir = directory
-	})
 	apiModel := strings.TrimSpace(strings.TrimPrefix(model, "opencode/"))
 	if apiModel == "" {
 		apiModel = "unknown"
 	}
-	platform := runtime.GOOS
-	if platform == "windows" {
-		platform = "win32"
-	}
-	directory := opencodeWorkDir
-	workspace := directory
-	gitRepo := "yes"
+	directory, workspace, platform, gitRepo := "unknown", "unknown", "unknown", "unknown"
 	if environment != nil {
 		if environment.WorkingDirectory != "" {
 			directory = environment.WorkingDirectory
-			workspace = directory
 		}
 		if environment.WorkspaceRoot != "" {
 			workspace = environment.WorkspaceRoot
@@ -82,8 +56,11 @@ func opencodeEnvironment(model string, environment *config.PromptEnvironmentConf
 		if environment.Platform != "" {
 			platform = environment.Platform
 		}
-		if environment.IsGitRepo != nil && !*environment.IsGitRepo {
+		if environment.IsGitRepo != nil {
 			gitRepo = "no"
+			if *environment.IsGitRepo {
+				gitRepo = "yes"
+			}
 		}
 	}
 	return strings.Join([]string{

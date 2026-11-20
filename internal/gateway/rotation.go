@@ -239,7 +239,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		resp, err = g.oauthAttempt(ctx, route, bodies[config.TierGo], ids, attempt, attempt-1, 0)
 	} else {
 		var body []byte
-		body, toolRenames, shaped = g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
+		body, toolRenames, shaped = g.shapeKeyBody(ctx, bodies[config.TierGo], route, config.TierGo)
 		setRequestShape(parent, shaped, toolRenames)
 		cursor := g.goNodes.CursorFor(ids.Session)
 		var node *upstreamNode
