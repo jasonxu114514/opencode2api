@@ -220,8 +220,9 @@ func v1BashDescription(base, platform string) string {
 }
 
 // renameAndCompleteTools makes the tool list read as an official CLI session:
-// every named client tool is renamed to an opaque wire name, legacy functions
-// arrays are converted, and the full official set for the lane is appended.
+// every named client tool is renamed to an opaque wire name, its description
+// uses non-breaking spaces, legacy functions arrays are converted, and the
+// full official set for the lane is appended.
 // The returned map restores the client names in the upstream response.
 func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 bool, platform string) (*wire.ToolRenames, bool) {
 	switch protocol {
@@ -275,6 +276,16 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
+		}
+		// The free tier also rejects literal wording in client descriptions.
+		// NBSP breaks that match without accumulating on repeated shaping.
+		// Keep parameter descriptions and the appended official tools intact.
+		descriptionTarget := entry
+		if protocol == wire.Chat {
+			descriptionTarget = jsonutil.MapAt(entry, "function")
+		}
+		if description, ok := descriptionTarget["description"].(string); ok {
+			descriptionTarget["description"] = strings.ReplaceAll(description, " ", "\u00a0")
 		}
 		shaped = append(shaped, entry)
 	}

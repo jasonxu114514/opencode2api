@@ -214,6 +214,8 @@ An optional `models.anonymous_backoff` object pauses the anonymous lane after re
 
 Free-model compatibility can inject the official OpenCode system prompt and tool definitions, rename client tools on the wire, and restore their names in responses. This also affects free models served by keys. The gateway relays tool calls; it does not execute tools on the host. System One is excluded from message/tool shaping.
 
+During shaping, ordinary ASCII spaces in client tools' top-level descriptions are replaced with non-breaking spaces (`U+00A0`, NBSP) by default. Schemas, parameter descriptions, and the appended official tool definitions are unchanged by this conversion. Spaces inside code examples in those descriptions also change; upstream matching rules may change over time.
+
 The injected prompt includes the model and UTC date, and reports unknown client directory, workspace, platform, or Git status as `unknown`. It never substitutes the gateway host's environment. To supply these facts explicitly, add the gateway-only `client_environment` field at the top level of each inference request:
 
 ```json

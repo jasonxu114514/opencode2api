@@ -212,6 +212,8 @@ Gửi `x-session-id` để tách hội thoại rõ ràng. Header phiên OpenCode
 
 Tương thích mô hình miễn phí có thể chèn prompt/công cụ chính thức OpenCode, đổi tên công cụ trên đường truyền và khôi phục tên trong phản hồi. Mô hình miễn phí dùng key cũng chịu xử lý này. Gateway chỉ chuyển tiếp lời gọi, không chạy công cụ trên máy. System One không đi qua chỉnh dạng tin nhắn/công cụ.
 
+Khi chỉnh dạng, khoảng trắng ASCII trong mô tả cấp cao nhất của công cụ client mặc định được thay bằng khoảng trắng không ngắt dòng (`U+00A0`, NBSP). Phép chuyển đổi này không sửa schema, mô tả tham số hay định nghĩa công cụ chính thức được thêm vào. Khoảng trắng trong ví dụ mã nằm trong mô tả cũng thay đổi; quy tắc so khớp của upstream có thể thay đổi theo thời gian.
+
 Prompt chèn thêm có mô hình và ngày UTC; thư mục, workspace, nền tảng hoặc trạng thái Git chưa biết của client được ghi là `unknown`. Gateway không thay bằng môi trường của máy chủ. Để cung cấp rõ các thông tin này, thêm trường `client_environment` dành riêng cho gateway ở cấp cao nhất của mỗi yêu cầu suy luận:
 
 ```json

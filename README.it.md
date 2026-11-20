@@ -212,6 +212,8 @@ L'oggetto facoltativo `models.anonymous_backoff` sospende la corsia anonima dopo
 
 La compatibilità gratuita può inserire prompt e strumenti ufficiali OpenCode, rinominare gli strumenti sul collegamento upstream e ripristinarne i nomi nelle risposte. Riguarda anche modelli gratuiti serviti con chiave. Il gateway inoltra le chiamate, senza eseguire strumenti sul computer. System One è escluso dall'adattamento di messaggi e strumenti.
 
+Durante l'adattamento, gli spazi ASCII nelle descrizioni principali degli strumenti del client vengono sostituiti per impostazione predefinita con spazi non separabili (`U+00A0`, NBSP). La conversione non modifica schemi, descrizioni dei parametri o definizioni ufficiali aggiunte. Cambiano anche gli spazi negli esempi di codice contenuti nelle descrizioni; le regole di confronto dell'upstream possono cambiare nel tempo.
+
 Il prompt inserito include modello e data UTC; directory, workspace, piattaforma e stato Git del client non noti sono indicati come `unknown`. Non vengono sostituiti con l'ambiente del gateway. Per fornire questi dati esplicitamente, aggiungi il campo `client_environment`, riservato al gateway, al livello principale di ogni richiesta di inferenza:
 
 ```json
