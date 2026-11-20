@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"opencode2api/internal/config"
+	"opencode2api/internal/freequota"
 	"opencode2api/internal/httpx"
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
@@ -87,6 +88,8 @@ type Gateway struct {
 	catalog      *models.ModelCatalog
 	monitor      *telemetry.Metrics
 	availability *models.AvailabilityRegistry
+	// freeQuota counts free-model usage per egress. Nil disables tracking.
+	freeQuota *freequota.Tracker
 	// attemptTimeout bounds a whole upstream attempt (dial + write + headers
 	// and, when the first-event wait is enabled, the first event), not just
 	// the header wait. Zero arms no per-attempt deadline: each attempt is then

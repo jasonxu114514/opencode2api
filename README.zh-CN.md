@@ -236,6 +236,10 @@ OAuth 另有规则：请求选择 OAuth 路由后，只使用该 Tier 已确认�
 
 `warp.pool_size` 是随并发调整的出口上限，范围 1–32，默认 2。`warp.stack` 为 `ipv6`（默认）、`ipv4` 或 `dual`。替换出口不保证获得新的上游额度。可选 `warp.source_ipv6` 要求 IPv6 堆栈及 `/64` 或更短前缀；Windows 下实际选择的源地址必须已分配到网卡，程序不会配置主机网络。
 
+### 免费模型用量估算
+
+网关按出口统计当天（UTC）客户端已接受的免费模型请求——每个已配置代理、`direct`，以及每个 WARP 出口地址段。只有客户端请求的 2xx 响应计为用量；可用性探测不计入。`FreeUsageLimitError` 只有在该出口当天已经成功应答过请求、且 `Retry-After` 指向下一个 UTC 零点时才记录该出口的额度下限，因此请求形状拒绝、短暂限流和新出口上的拒绝都不会产生学习。学到的下限只属于该出口并跨日保留；`free_quota.assumed_daily_limit` 是尚未学到下限的出口使用的先验值（`0` 表示未知）。本地计数在 UTC 零点重置，上游重置时间未经验证。状态保存在配置文件旁的 `config.json.freequota.json`；文件缺失或损坏只会重置估算。`GET /api/free-quotas` 返回该估算，WebUI 在「模型与额度」页展示。
+
 ## 管理与 OAuth
 
 WebUI 包含概览、诊断/Playground/日志、接入、API Key、模型与额度、轮转、配置、账号页面，提供简中、英语、越南语及意大利语。语言与主题选择保存在浏览器。完整操作与端点见[管理指南](docs/management.zh-CN.md)。

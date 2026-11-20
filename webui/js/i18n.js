@@ -676,6 +676,22 @@ const DICTIONARY = {
       "availability.noneEligible":
         "No model in the current catalog qualifies as free.",
 
+      "quotas.freeUsage.title": "Free model usage today",
+      "quotas.freeUsage.desc":
+        "Counts accepted client free-model requests today per egress. A limit is learned only from that egress's daily-quota refusal; otherwise it shows the configured assumed default. Local counts reset at UTC midnight; the upstream reset time is not verified.",
+      "quotas.freeUsage.refresh": "Refresh usage",
+      "quotas.freeUsage.used": "Used today",
+      "quotas.freeUsage.remaining": "Estimated remaining",
+      "quotas.freeUsage.resets": "Resets in",
+      "quotas.freeUsage.col.egress": "Egress",
+      "quotas.freeUsage.col.used": "Used",
+      "quotas.freeUsage.col.limit": "Limit (estimate)",
+      "quotas.freeUsage.col.remaining": "Remaining",
+      "quotas.freeUsage.col.state": "State",
+      "quotas.freeUsage.empty": "No free-model traffic has been recorded today.",
+      "quotas.freeUsage.active": "active",
+      "quotas.freeUsage.exhausted": "exhausted · resets in {0}",
+
       "config.restartNotice":
         "Saved but not in effect yet: {0}. The current API is {1}, the WebUI is {2}. Please restart the process.",
       "config.revealPrompt": "Re-enter the admin password",
@@ -1253,6 +1269,22 @@ const DICTIONARY = {
       "availability.switchManual": "Chuyển sang thủ công",
       "availability.noneEligible":
         "Danh mục mô hình hiện tại không có mô hình nào đủ điều kiện miễn phí.",
+
+      "quotas.freeUsage.title": "Mức dùng model miễn phí hôm nay",
+      "quotas.freeUsage.desc":
+        "Chỉ tính các yêu cầu model miễn phí từ client được chấp nhận hôm nay theo từng đầu ra. Giới hạn chỉ được học từ lần từ chối hạn mức ngày của chính đầu ra đó; nếu chưa có, hiển thị giá trị assumed đã cấu hình. Bộ đếm cục bộ đặt lại lúc nửa đêm UTC; thời điểm đặt lại của upstream chưa được xác minh.",
+      "quotas.freeUsage.refresh": "Làm mới mức dùng",
+      "quotas.freeUsage.used": "Đã dùng hôm nay",
+      "quotas.freeUsage.remaining": "Ước tính còn lại",
+      "quotas.freeUsage.resets": "Đặt lại sau",
+      "quotas.freeUsage.col.egress": "Đầu ra",
+      "quotas.freeUsage.col.used": "Đã dùng",
+      "quotas.freeUsage.col.limit": "Giới hạn (ước tính)",
+      "quotas.freeUsage.col.remaining": "Còn lại",
+      "quotas.freeUsage.col.state": "Trạng thái",
+      "quotas.freeUsage.empty": "Hôm nay chưa ghi nhận lưu lượng model miễn phí.",
+      "quotas.freeUsage.active": "khả dụng",
+      "quotas.freeUsage.exhausted": "đã cạn · đặt lại sau {0}",
 
       "config.restartNotice":
         "Đã lưu nhưng chưa có hiệu lực: {0}. API hiện tại {1}, WebUI {2}. Vui lòng khởi động lại tiến trình.",
@@ -1849,6 +1881,22 @@ const DICTIONARY = {
       "availability.switchManual": "Passa a manuale",
       "availability.noneEligible":
         "Nessun modello nel catalogo corrente è idoneo come gratuito.",
+
+      "quotas.freeUsage.title": "Uso dei modelli gratuiti oggi",
+      "quotas.freeUsage.desc":
+        "Conta le richieste ai modelli gratuiti dei client accettate oggi per uscita. Un limite viene appreso solo dal rifiuto della quota giornaliera di quella stessa uscita; altrimenti mostra il valore assumed configurato. I conteggi locali si azzerano a mezzanotte UTC; l'azzeramento upstream non è verificato.",
+      "quotas.freeUsage.refresh": "Aggiorna uso",
+      "quotas.freeUsage.used": "Usato oggi",
+      "quotas.freeUsage.remaining": "Stima rimanente",
+      "quotas.freeUsage.resets": "Azzeramento tra",
+      "quotas.freeUsage.col.egress": "Uscita",
+      "quotas.freeUsage.col.used": "Usato",
+      "quotas.freeUsage.col.limit": "Limite (stima)",
+      "quotas.freeUsage.col.remaining": "Rimanente",
+      "quotas.freeUsage.col.state": "Stato",
+      "quotas.freeUsage.empty": "Oggi non è stato registrato traffico per i modelli gratuiti.",
+      "quotas.freeUsage.active": "attivo",
+      "quotas.freeUsage.exhausted": "esaurito · azzeramento tra {0}",
 
       "config.restartNotice":
         "Salvato ma non ancora in vigore: {0}. L'API corrente è {1}, la WebUI è {2}. Riavvia il processo.",

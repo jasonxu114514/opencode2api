@@ -234,6 +234,10 @@ La disponibilità viene appresa dal traffico reale per impostazione predefinita.
 
 `warp.pool_size` è il massimo di uscite adattato alla concorrenza, da 1 a 32, predefinito 2. `warp.stack` ammette `ipv6` (predefinito), `ipv4` o `dual`. Cambiare uscita non garantisce nuova quota upstream. `warp.source_ipv6` è facoltativo, richiede stack IPv6 e prefisso `/64` o più corto; su Windows gli indirizzi sorgente scelti devono essere già assegnati a un'interfaccia. Il gateway non configura la rete del computer.
 
+### Stima dell'uso dei modelli gratuiti
+
+Il gateway conta le richieste ai modelli gratuiti dei client accettate per uscita — ogni proxy configurato, `direct` e ogni blocco di uscita WARP — per il giorno UTC corrente. Solo le risposte 2xx alle richieste dei client contano come utilizzo; le probe di disponibilità sono escluse. Un `FreeUsageLimitError` registra il limite minimo di quell'uscita solo quando il suo `Retry-After` punta alla mezzanotte UTC successiva e l'uscita ha già servito una richiesta nello stesso giorno; rifiuti di forma, throttling brevi e rifiuti su un'uscita nuova non insegnano nulla. Il limite minimo resta su quell'uscita attraverso la mezzanotte; `free_quota.assumed_daily_limit` è il valore usato per un'uscita che non ha ancora insegnato il proprio (`0` lascia sconosciuto). I conteggi locali si azzerano a mezzanotte UTC; l'azzeramento upstream non è verificato. Lo stato vive accanto alla configurazione in `config.json.freequota.json`; un file mancante o corrotto azzera solo la stima. `GET /api/free-quotas` restituisce la stima; la WebUI la mostra nella pagina Modelli e quote.
+
 ## Gestione e OAuth
 
 La WebUI comprende panoramica, diagnostica/Playground/log, accesso client, chiavi API, modelli/quota, rotazione, configurazione e account. Supporta cinese semplificato, inglese, vietnamita e italiano; lingua e tema sono conservati nel browser. La [guida di gestione](docs/management.it.md) contiene i dettagli degli endpoint.

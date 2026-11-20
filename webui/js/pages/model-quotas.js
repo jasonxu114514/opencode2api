@@ -3,7 +3,7 @@ import { api, hasSession } from "../api.js";
 import { loadDebugModels } from "../data.js";
 import * as oauth from "../oauth.js";
 import { t, onChange } from "../i18n.js";
-import { $, bindTabs, copyText, el, emptyRow, localTime, toast } from "../ui.js";
+import { $, bindTabs, copyText, el, emptyRow, formatNumber, localTime, toast } from "../ui.js";
 
 const windows = () => [
   ["rolling", t("5 小时窗口", "quotas.window.hour")],
@@ -16,6 +16,12 @@ let timer = null;
 let loading = false;
 let activeTab = "quota";
 let generation = 0;
+let freeUsage = null;
+let freeLoading = false;
+let freeTimer = null;
+let freeStates = [];
+let freeReloadTarget = null;
+let pageVisible = false;
 
 async function load() {
   if (loading) return;
@@ -150,6 +156,112 @@ function render() {
     );
 }
 
+const countdown = (value) => {
+  const ms = new Date(value).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return "—";
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+};
+
+function tickFreeUsage() {
+  if (!freeUsage) return;
+  const value = countdown(freeUsage.resets_at);
+  $("#free-usage-resets").textContent = value;
+  for (const cell of freeStates) {
+    cell.textContent = t("已用尽 · {0} 后重置", "quotas.freeUsage.exhausted", value);
+  }
+  if (freeLoading) return;
+  if (
+    new Date(freeUsage.resets_at).getTime() <= Date.now() &&
+    freeReloadTarget !== freeUsage.resets_at
+  ) {
+    freeReloadTarget = freeUsage.resets_at;
+    loadFreeUsage();
+  }
+}
+
+function startFreeTimer() {
+  if (!pageVisible) return;
+  stopFreeTimer();
+  freeTimer = setInterval(tickFreeUsage, 1000);
+}
+
+function stopFreeTimer() {
+  clearInterval(freeTimer);
+  freeTimer = null;
+}
+
+function renderFreeUsage() {
+  if (!freeUsage) return;
+  const scopes = freeUsage.scopes || [];
+  $("#free-usage-used").textContent = formatNumber(freeUsage.total_used);
+  const remaining = scopes.map((scope) => scope.remaining).filter((value) => value != null);
+  $("#free-usage-remaining").textContent = remaining.length
+    ? `≈ ${formatNumber(remaining.reduce((sum, value) => sum + value, 0))}`
+    : "—";
+  $("#free-usage-resets").textContent = countdown(freeUsage.resets_at);
+  const host = $("#free-usage-scopes");
+  host.replaceChildren();
+  freeStates = [];
+  if (!scopes.length) {
+    emptyRow(host, 5, t("今日尚未记录免费模型流量。", "quotas.freeUsage.empty"));
+    return;
+  }
+  for (const scope of scopes) {
+    const limit = el("td", { class: "num" }, [
+      el("div", {
+        text:
+          scope.limit == null || scope.limit_source === "unknown"
+            ? "—"
+            : formatNumber(scope.limit),
+      }),
+      scope.limit_source
+        ? el("div", { class: "section-caption", text: scope.limit_source })
+        : null,
+    ]);
+    const state = scope.exhausted
+      ? t("已用尽 · {0} 后重置", "quotas.freeUsage.exhausted", countdown(freeUsage.resets_at))
+      : t("可用", "quotas.freeUsage.active");
+    const stateCell = el("td", { class: scope.exhausted ? "warn" : "ok", text: state });
+    if (scope.exhausted) freeStates.push(stateCell);
+    host.append(
+      el("tr", {}, [
+        el("td", { class: "mono", text: scope.egress || "—" }),
+        el("td", { class: "num", text: formatNumber(scope.used) }),
+        limit,
+        el("td", {
+          class: "num",
+          text: scope.remaining == null ? "—" : formatNumber(scope.remaining),
+        }),
+        stateCell,
+      ]),
+    );
+  }
+}
+
+async function loadFreeUsage() {
+  if (freeLoading) return;
+  freeLoading = true;
+  $("#free-usage-refresh").disabled = true;
+  try {
+    const value = await api("/api/free-quotas");
+    if (!hasSession()) return;
+    freeUsage = value;
+    $("#free-usage-status").textContent = "";
+    renderFreeUsage();
+  } catch (error) {
+    $("#free-usage-status").textContent = error.message;
+  } finally {
+    freeLoading = false;
+    $("#free-usage-refresh").disabled = false;
+  }
+}
+
 const date = (value) =>
   value && !value.startsWith("0001-") ? localTime(value) : t("待探测", "availability.pending");
 
@@ -272,15 +384,19 @@ export default {
       activeTab = id;
       if (id === "quota") {
         oauth.show();
+        stopFreeTimer();
         load();
         startPolling();
       } else {
         oauth.hide();
         stopPolling();
+        startFreeTimer();
         loadAvailability();
+        loadFreeUsage();
       }
     });
     $("#quota-refresh").addEventListener("click", load);
+    $("#free-usage-refresh").addEventListener("click", loadFreeUsage);
     $("#quota-account").addEventListener("change", render);
     $("#quota-model-search").addEventListener("input", render);
     $("#availability-refresh").addEventListener("click", refreshAvailability);
@@ -291,27 +407,37 @@ export default {
       const emptyOpt = $("#quota-account")?.querySelector('option[value=""]');
       if (emptyOpt) emptyOpt.textContent = t("尚未配置 Go Key", "quotas.noKey");
       if (activeTab === "quota") render();
-      else loadAvailability();
+      else {
+        loadAvailability();
+        loadFreeUsage();
+      }
     });
   },
   show() {
+    pageVisible = true;
     if (activeTab === "quota") {
       oauth.show();
       load();
       startPolling();
     } else {
+      startFreeTimer();
       loadAvailability();
+      loadFreeUsage();
     }
   },
   hide() {
-    oauth.hide();
+    pageVisible = false;
     stopPolling();
+    stopFreeTimer();
   },
   refresh() {
     if (activeTab === "quota") {
       oauth.refresh();
       load();
-    } else loadAvailability();
+    } else {
+      loadAvailability();
+      loadFreeUsage();
+    }
   },
   reset() {
     generation++;

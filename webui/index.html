@@ -737,6 +737,48 @@
               <section class="section">
                 <div class="section-head">
                   <div>
+                    <h2 class="section-title" data-i18n="quotas.freeUsage.title">今日免费模型用量</h2>
+                    <p class="section-caption" data-i18n="quotas.freeUsage.desc">
+                      按出口统计今日客户端已接受的免费模型请求。上限只从该出口自身的每日额度拒绝中学习，否则显示配置的 assumed 默认值；本地计数在 UTC 零点重置，上游重置时间未经验证。
+                    </p>
+                  </div>
+                  <button id="free-usage-refresh" class="btn btn-sm" data-i18n="quotas.freeUsage.refresh">
+                    刷新用量
+                  </button>
+                </div>
+                <p id="free-usage-status" class="section-caption" role="status"></p>
+                <div class="metrics free-usage-metrics">
+                  <div class="metric">
+                    <div class="metric-label" data-i18n="quotas.freeUsage.used">今日已用</div>
+                    <div id="free-usage-used" class="metric-value">—</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label" data-i18n="quotas.freeUsage.remaining">预计剩余</div>
+                    <div id="free-usage-remaining" class="metric-value">—</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label" data-i18n="quotas.freeUsage.resets">距重置</div>
+                    <div id="free-usage-resets" class="metric-value">—</div>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th data-i18n="quotas.freeUsage.col.egress">出口</th>
+                        <th class="num" data-i18n="quotas.freeUsage.col.used">已用</th>
+                        <th class="num" data-i18n="quotas.freeUsage.col.limit">上限（估计）</th>
+                        <th class="num" data-i18n="quotas.freeUsage.col.remaining">剩余</th>
+                        <th data-i18n="quotas.freeUsage.col.state">状态</th>
+                      </tr>
+                    </thead>
+                    <tbody id="free-usage-scopes"></tbody>
+                  </table>
+                </div>
+              </section>
+              <section class="section">
+                <div class="section-head">
+                  <div>
                     <h2 class="section-title" data-i18n="availability.title">免费模型探测</h2>
                     <p class="section-caption" data-i18n="availability.desc">
                       检查名称含 free 或零价未弃用的模型；仅明确失效才禁用并在 24 小时后复测，临时错误不新增禁用。手动控制的模型保持启用，不自动探测。

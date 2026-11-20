@@ -234,6 +234,10 @@ Mặc định học khả dụng từ lưu lượng thật. Yêu cầu thử t�
 
 `warp.pool_size` là trần số lối ra điều chỉnh theo đồng thời, từ 1 đến 32, mặc định 2. `warp.stack` nhận `ipv6` (mặc định), `ipv4`, `dual`. Thay lối ra không bảo đảm có hạn mức mới. `warp.source_ipv6` là tùy chọn, cần stack IPv6 và prefix `/64` hoặc ngắn hơn; trên Windows, địa chỉ nguồn được chọn phải được gán sẵn cho giao diện. Gateway không cấu hình mạng của máy.
 
+### Ước lượng mức dùng model miễn phí
+
+Gateway đếm request model miễn phí từ client được chấp nhận theo từng exit — mỗi proxy đã cấu hình, `direct`, và từng dải địa chỉ exit WARP — trong ngày UTC hiện tại. Chỉ phản hồi 2xx cho request của client mới tính là đã dùng; probe khả dụng không được tính. `FreeUsageLimitError` chỉ ghi nhận mức sàn hạn mức của exit đó khi `Retry-After` trỏ tới nửa đêm UTC kế tiếp và exit đã phục vụ ít nhất một request trong ngày; lỗi hình dạng request, throttle ngắn và từ chối trên exit mới không dạy được gì. Mức sàn chỉ thuộc exit đó và giữ qua nửa đêm; `free_quota.assumed_daily_limit` là prior cho exit chưa tự chứng minh (`0` = chưa biết). Bộ đếm cục bộ đặt lại lúc nửa đêm UTC; thời điểm đặt lại của upstream chưa được xác minh. Trạng thái nằm cạnh cấu hình trong `config.json.freequota.json`; file thiếu hoặc hỏng chỉ đặt lại ước lượng. `GET /api/free-quotas` trả về ước lượng, WebUI hiển thị ở trang Model & quotas.
+
 ## Quản trị và OAuth
 
 WebUI có tổng quan, chẩn đoán/Playground/log, hướng dẫn client, key API, mô hình/hạn mức, luân chuyển, cấu hình và tài khoản. Hỗ trợ tiếng Trung giản thể, Anh, Việt và Ý; lựa chọn ngôn ngữ/giao diện lưu trong trình duyệt. Chi tiết endpoint có trong [hướng dẫn quản trị](docs/management.vi.md).

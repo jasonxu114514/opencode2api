@@ -113,6 +113,10 @@
   color: var(--text-3);
 }
 
+.free-usage-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .breakdown {
   display: grid;
   gap: var(--sp-2);

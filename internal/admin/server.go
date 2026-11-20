@@ -91,6 +91,7 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("POST /api/zen/auth/poll", a.authenticate(a.csrf(http.HandlerFunc(a.handleZenOAuthPoll))))
 	mux.Handle("DELETE /api/zen/auth", a.authenticate(a.csrf(http.HandlerFunc(a.handleZenOAuthCancel))))
 	mux.Handle("DELETE /api/zen/connection", a.authenticate(a.csrf(http.HandlerFunc(a.handleZenOAuthDisconnect))))
+	mux.Handle("GET /api/free-quotas", a.authenticate(http.HandlerFunc(a.handleFreeQuotas)))
 	mux.Handle("GET /api/api-keys", a.authenticate(http.HandlerFunc(a.handleListAPIKeys)))
 	mux.Handle("POST /api/api-keys", a.authenticate(a.csrf(http.HandlerFunc(a.handleCreateAPIKey))))
 	mux.Handle("PATCH /api/api-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleUpdateAPIKey))))
@@ -277,7 +278,7 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		ZenOAuth:          current.ZenOAuth,
 		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Warp: update.Warp, Proxies: proxies, ProxyFile: update.ProxyFile,
 		ProxyBindings: proxyBindings,
-		Upstream:      update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
+		Upstream:      update.Upstream, Retry: update.Retry, Models: update.Models, FreeQuota: current.FreeQuota, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
 	}

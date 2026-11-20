@@ -236,6 +236,10 @@ Availability is learned from real traffic by default. Synthetic checks run only 
 
 `warp.pool_size` is a concurrency-driven exit ceiling from 1 to 32, default 2. `warp.stack` accepts `ipv6` (default), `ipv4`, or `dual`. Replacing an exit does not guarantee a fresh upstream allowance. `warp.source_ipv6` is optional, requires the IPv6 stack and a prefix of `/64` or shorter, and on Windows the selected source addresses must already be assigned to an interface. It does not configure host networking.
 
+### Free-model usage estimate
+
+The gateway counts accepted free-model client requests per egress — each configured proxy, `direct`, and each WARP exit block — for the current UTC day. Only 2xx responses to client requests count as usage; availability probes are excluded. A `FreeUsageLimitError` records that egress's allowance floor only when its `Retry-After` points at the next UTC midnight and the egress already served a request that day; shape refusals, short throttles and refusals on a fresh exit teach nothing. The floor stays with that egress across midnight; `free_quota.assumed_daily_limit` is the prior for an egress that has not taught its own (`0` leaves it unknown). Local counters reset at UTC midnight; the upstream reset time is not verified. State lives beside the configuration in `config.json.freequota.json`; a missing or corrupt file only resets the estimate. `GET /api/free-quotas` serves it, and the WebUI shows it under Model & quotas.
+
 ## Management and OAuth
 
 The WebUI has overview, diagnostics/Playground/logs, client access, API keys, models/quota, rotation, configuration, and account pages. It supports Simplified Chinese, English, Vietnamese, and Italian; language/theme choices are stored in the browser. See the [management guide](docs/management.md) for endpoint details.
