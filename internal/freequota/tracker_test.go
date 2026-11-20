@@ -61,7 +61,7 @@ func TestRefusalWithoutUsageTeachesNothing(t *testing.T) {
 	}
 }
 
-func TestRefusalAfterUsageLearnsLimit(t *testing.T) {
+func TestRefusalBelowAssumedTeachesNothing(t *testing.T) {
 	tracker := newTracker(t, 200)
 	for i := 0; i < 7; i++ {
 		ok(tracker, "p1", at(16, 9))
@@ -73,8 +73,24 @@ func TestRefusalAfterUsageLearnsLimit(t *testing.T) {
 		t.Fatalf("scopes = %+v, want one", got.Scopes)
 	}
 	scope := got.Scopes[0]
-	if scope.Limit != 7 || scope.LimitSource != "learned" {
-		t.Fatalf("limit = %d/%s, want 7/learned", scope.Limit, scope.LimitSource)
+	if scope.Exhausted || scope.Limit != 200 || scope.LimitSource != "assumed" {
+		t.Fatalf("scope = %+v, want an untouched assumed limit: a refusal under the allowance may be session-scoped", scope)
+	}
+	if scope.Remaining == nil || *scope.Remaining != 193 {
+		t.Fatalf("remaining = %v, want 193", scope.Remaining)
+	}
+}
+
+func TestRefusalAtAssumedLimitLearns(t *testing.T) {
+	tracker := newTracker(t, 200)
+	for i := 0; i < 200; i++ {
+		ok(tracker, "p1", at(16, 9))
+	}
+	quota(tracker, "p1", at(16, 10))
+
+	scope := tracker.Snapshot().Scopes[0]
+	if scope.Limit != 200 || scope.LimitSource != "learned" {
+		t.Fatalf("limit = %d/%s, want 200/learned", scope.Limit, scope.LimitSource)
 	}
 	if !scope.Exhausted {
 		t.Fatal("scope not marked exhausted")
@@ -110,7 +126,9 @@ func TestOffMidnightRefusalDoesNotTeach(t *testing.T) {
 
 func TestTransientRefusalClearsOnSuccess(t *testing.T) {
 	tracker := newTracker(t, 200)
-	ok(tracker, "p1", at(16, 9))
+	for i := 0; i < 200; i++ {
+		ok(tracker, "p1", at(16, 9))
+	}
 	quota(tracker, "p1", at(16, 10))
 	if !tracker.Snapshot().Scopes[0].Exhausted {
 		t.Fatal("expected exhausted after refusal")
@@ -121,31 +139,31 @@ func TestTransientRefusalClearsOnSuccess(t *testing.T) {
 	if scope.Exhausted {
 		t.Fatal("a later success must clear the exhaustion")
 	}
-	if scope.Limit != 2 || scope.LimitSource != "learned" {
-		t.Fatalf("limit = %d/%s, want the used floor 2", scope.Limit, scope.LimitSource)
+	if scope.Limit != 201 || scope.LimitSource != "learned" {
+		t.Fatalf("limit = %d/%s, want the used floor 201", scope.Limit, scope.LimitSource)
 	}
-	if scope.Used != 2 {
-		t.Fatalf("Used = %d, want 2", scope.Used)
+	if scope.Used != 201 {
+		t.Fatalf("Used = %d, want 201", scope.Used)
 	}
 }
 
 func TestLearnedLimitStaysOnItsEgress(t *testing.T) {
 	tracker := newTracker(t, 200)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 200; i++ {
 		ok(tracker, "a", at(16, 9))
 	}
 	quota(tracker, "a", at(16, 10))
 	ok(tracker, "b", at(16, 11))
 
 	got := tracker.Snapshot()
-	if got.TotalUsed != 5 {
-		t.Fatalf("TotalUsed = %d, want 5", got.TotalUsed)
+	if got.TotalUsed != 201 {
+		t.Fatalf("TotalUsed = %d, want 201", got.TotalUsed)
 	}
 	for _, scope := range got.Scopes {
 		switch scope.Egress {
 		case "a":
-			if scope.Limit != 4 || scope.LimitSource != "learned" || !scope.Exhausted {
-				t.Fatalf("a = %+v, want exhausted with the learned 4", scope)
+			if scope.Limit != 200 || scope.LimitSource != "learned" || !scope.Exhausted {
+				t.Fatalf("a = %+v, want exhausted with the learned 200", scope)
 			}
 		case "b":
 			if scope.Limit != 200 || scope.LimitSource != "assumed" || scope.Exhausted {
@@ -162,7 +180,7 @@ func TestLearnedLimitStaysOnItsEgress(t *testing.T) {
 
 func TestDayRolloverKeepsLearnedLimit(t *testing.T) {
 	tracker := newTracker(t, 200)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 200; i++ {
 		ok(tracker, "p1", at(16, 9))
 	}
 	quota(tracker, "p1", at(16, 10))
@@ -181,11 +199,11 @@ func TestDayRolloverKeepsLearnedLimit(t *testing.T) {
 	if scope.Used != 1 || scope.Exhausted {
 		t.Fatalf("scope = %+v, want a fresh day", scope)
 	}
-	if scope.Limit != 5 || scope.LimitSource != "learned" {
-		t.Fatalf("limit = %d/%s, want the learned 5 to survive midnight", scope.Limit, scope.LimitSource)
+	if scope.Limit != 200 || scope.LimitSource != "learned" {
+		t.Fatalf("limit = %d/%s, want the learned 200 to survive midnight", scope.Limit, scope.LimitSource)
 	}
-	if scope.Remaining == nil || *scope.Remaining != 4 {
-		t.Fatalf("remaining = %v, want 4", scope.Remaining)
+	if scope.Remaining == nil || *scope.Remaining != 199 {
+		t.Fatalf("remaining = %v, want 199", scope.Remaining)
 	}
 }
 
@@ -233,7 +251,7 @@ func TestPersistenceReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	tracker := Open(path, Options{AssumedDailyLimit: 200})
 	tracker.now = func() time.Time { return at(16, 12) }
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 200; i++ {
 		ok(tracker, "warp", at(16, 9))
 	}
 	quota(tracker, "warp", at(16, 10))
@@ -242,8 +260,8 @@ func TestPersistenceReload(t *testing.T) {
 	reloaded := Open(path, Options{AssumedDailyLimit: 200})
 	reloaded.now = func() time.Time { return at(16, 12) }
 	scope := reloaded.Snapshot().Scopes[0]
-	if scope.Used != 3 || scope.Limit != 3 || !scope.Exhausted {
-		t.Fatalf("scope = %+v, want used 3, learned 3, exhausted", scope)
+	if scope.Used != 200 || scope.Limit != 200 || !scope.Exhausted {
+		t.Fatalf("scope = %+v, want used 200, learned 200, exhausted", scope)
 	}
 }
 

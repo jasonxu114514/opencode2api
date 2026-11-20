@@ -154,7 +154,10 @@ func (t *Tracker) Record(ev Event) {
 		scope.Used++
 		scope.Exhausted = false
 	case isDailyLimit(ev.Status, ev.Body, ev.RetryAfter, when):
-		if scope.Used > 0 {
+		// A refusal proves exhaustion only when the egress has already accepted
+		// as much as its allowance. Below that the refusal can be scoped to one
+		// conversation rather than this egress, so it teaches nothing.
+		if scope.Used > 0 && (t.opts.AssumedDailyLimit <= 0 || scope.Used >= t.opts.AssumedDailyLimit) {
 			if scope.Used > scope.Limit {
 				scope.Limit = scope.Used
 			}
