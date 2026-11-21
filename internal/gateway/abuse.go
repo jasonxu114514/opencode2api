@@ -94,15 +94,22 @@ func peekResponseBody(resp *http.Response) []byte {
 	return prefix
 }
 
-// bufferRetryResponse releases a response's transport before the next attempt,
-// retaining at most 64 KiB of its body, including any prefix read before an error.
+// bufferRetryResponse retains an error response across later attempts.
+// doInferenceAttempt has already bounded and buffered non-2xx bodies under the
+// error-body deadline, so this read is memory-only. Keep the same size cap: a
+// second, smaller cap would truncate otherwise valid error JSON on a retry.
 func bufferRetryResponse(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Del("Content-Length")
+	resp.Header.Del("Transfer-Encoding")
+	resp.TransferEncoding = nil
+	resp.Trailer = nil
 }
 
 // replaceRetryResponse keeps the latest HTTP response across transport failures
