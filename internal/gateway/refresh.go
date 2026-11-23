@@ -49,6 +49,15 @@ func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, st
 		return true
 	}
 	if err != nil {
+		// A client that went away says nothing about the proxy: the request
+		// ended without a response because it was abandoned, not because the
+		// tunnel broke. checkClaimedProxy exempts context.Canceled for the same
+		// reason; do not start a confirming probe here either. That probe runs
+		// on a context without cancellation, and a probe failing for an
+		// unrelated reason would evict a proxy that never failed.
+		if errors.Is(err, context.Canceled) {
+			return false
+		}
 		g.verifyProxyAfterError(ctx, proxy, "upstream request error", status)
 		return false
 	}
