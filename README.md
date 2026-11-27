@@ -6,22 +6,6 @@ A Go gateway for OpenCode Zen and Zen Go. Clients use OpenAI Chat Completions, O
 
 The executable embeds the management WebUI. Running it requires neither Node.js nor a database. Model discovery, inference, OAuth, and optional WARP still require access to their upstream services.
 
-## Sponsors
-
-<table>
-  <tr>
-    <td width="190" align="center">
-      <a href="https://www.ipwo.net/?ref=githubopencode2api">
-        <img src="assets/IPWO.png" width="163" alt="IPWO">
-      </a>
-    </td>
-    <td>
-      <a href="https://www.ipwo.net/?ref=githubopencode2api">IPWO</a> residential proxies provide flexible network connectivity for AI development and API workflows, covering 195+ countries and regions with HTTP(S) and SOCKS5 support.<br>
-      Suitable for cross-region network testing, compliant data collection, and automated development. Dynamic, static, and unlimited proxy plans are available, with free testing and region selection. Discount code: <b>0200</b>.
-    </td>
-  </tr>
-</table>
-
 ## Quick start
 
 Download a binary from [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases), or build with **Go 1.24 or newer**:
