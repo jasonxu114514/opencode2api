@@ -46,7 +46,7 @@ Windows 原生方式为 `go build -trimpath -o opencode2api.exe ./cmd/opencode2a
 
 管理员通过用户名/密码登录，获得 `HttpOnly`、`SameSite=Strict` Session Cookie。所有管理 API 除登录均需有效 Session；写操作另需 `X-CSRF-Token`，带 `Origin` 时须与服务来源一致。登录/Session 响应提供 `csrf_token`。本地 `server_keys` 不能代替管理登录。
 
-Session 默认 720 分钟，范围 5–10,080 分钟。修改管理员凭证或重启进程会使现有 Session 失效；改账号接口要求再次验证当前密码。登录有限流；Playground 每直连客户端每分钟最多 12 次。服务不信任 `X-Forwarded-For`，反向代理后的客户端会共享对端限制。HTTPS 反向代理须正确设置 `X-Forwarded-Proto`，它参与 Cookie Secure 标记与来源校验。
+Session 默认 720 分钟，范围 5–10,080 分钟。修改管理员凭证或重启进程会使现有 Session 失效；改账号接口要求再次验证当前密码。登录有限流；Playground 每直连客户端每分钟最多 12 次。服务不信任 `X-Forwarded-For`，反向代理后的客户端会共享对端限制；启用 `-trust-cloudflare-client-ip` 时，loopback 对端（本机 `cloudflared`）改按 `CF-Connecting-IP` 限流，IPv6 按 /64。HTTPS 反向代理须正确设置 `X-Forwarded-Proto`，它参与 Cookie Secure 标记与来源校验。
 
 ## 配置保存与重载
 

@@ -40,6 +40,7 @@ Command-line options:
 | `-config`     | `config.json` | Configuration file path.           |
 | `-listen`     | Unset         | Override the API listen address.   |
 | `-web-listen` | Unset         | Override the WebUI listen address. |
+| `-trust-cloudflare-client-ip` | `false` | WebUI login/Playground limits use `CF-Connecting-IP`, only when the direct peer is loopback (a local `cloudflared`). |
 
 The configuration directory must be writable for password migration, configuration saves, and model caches.
 
@@ -267,7 +268,7 @@ Names use the actual configuration path. Monitoring survives hot reloads but is 
 
 `GET /healthz` makes no upstream request and requires no key. Pending/empty discovery, unavailable WARP, or missing required healthy proxies return 503. A usable stale catalog can return 200 with `status: "degraded"`; stale means older than twice the refresh interval, at least 60 seconds. Readiness is not proof of a valid key, remaining allowance, or successful inference. The public response contains counts/status, not secret values or proxy addresses.
 
-Keep API and management listeners on loopback for local use. For network access, use HTTPS and restrict access to management. A trusted reverse proxy must set `X-Forwarded-Proto` consistently; rate limiting uses the direct peer, so clients behind one proxy share its limits. The executable itself serves HTTP.
+Keep API and management listeners on loopback for local use. For network access, use HTTPS and restrict access to management. A trusted reverse proxy must set `X-Forwarded-Proto` consistently; rate limiting uses the direct peer, so clients behind one proxy share its limits. Behind a `cloudflared` tunnel on the same host, start with `-trust-cloudflare-client-ip` so each visitor gets its own limit: `CF-Connecting-IP` is then used only for loopback peers (Cloudflare overwrites that header), and IPv6 clients share one limit per /64. Do not enable it for other reverse proxies. The executable itself serves HTTP.
 
 Configuration files and backups hold upstream keys, proxy passwords, and OAuth tokens; password hashing does not encrypt them. Restrict filesystem permissions (Windows ACLs when applicable) and exclude runtime files from source sharing. `logging.dump_request_bodies` is off by default and requires debug logging; even redacted, capped body dumps can reveal conversation content. Playground and availability probes send real upstream requests and can consume quota or credits.
 

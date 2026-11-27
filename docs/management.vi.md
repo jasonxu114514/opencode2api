@@ -46,7 +46,7 @@ Giao diện hỗ trợ tiếng Trung giản thể, Anh, Việt và Ý; ngôn ng�
 
 Quản trị viên đăng nhập bằng tên và mật khẩu để nhận cookie phiên có `HttpOnly` và `SameSite=Strict`. Mọi API quản trị, trừ đăng nhập, đều cần phiên hợp lệ; thao tác ghi còn cần `X-CSRF-Token`. Nếu có header `Origin`, giá trị phải trùng với nguồn của dịch vụ. Phản hồi đăng nhập/phiên cung cấp `csrf_token`. `server_keys` cục bộ không thay thế được đăng nhập quản trị.
 
-Phiên mặc định kéo dài 720 phút, cho phép cấu hình từ 5 đến 10.080 phút. Đổi thông tin xác thực quản trị hoặc khởi động lại tiến trình làm các phiên hiện có mất hiệu lực; API đổi tài khoản yêu cầu xác minh lại mật khẩu hiện tại. Đăng nhập có giới hạn tần suất; Playground cho phép tối đa 12 lần mỗi phút trên mỗi client kết nối trực tiếp. Dịch vụ không tin cậy `X-Forwarded-For`, nên các client sau reverse proxy dùng chung giới hạn của đầu kết nối. Reverse proxy HTTPS phải đặt đúng `X-Forwarded-Proto` vì header này tham gia xác định cờ Secure của cookie và kiểm tra nguồn.
+Phiên mặc định kéo dài 720 phút, cho phép cấu hình từ 5 đến 10.080 phút. Đổi thông tin xác thực quản trị hoặc khởi động lại tiến trình làm các phiên hiện có mất hiệu lực; API đổi tài khoản yêu cầu xác minh lại mật khẩu hiện tại. Đăng nhập có giới hạn tần suất; Playground cho phép tối đa 12 lần mỗi phút trên mỗi client kết nối trực tiếp. Dịch vụ không tin cậy `X-Forwarded-For`, nên các client sau reverse proxy dùng chung giới hạn của đầu kết nối; với `-trust-cloudflare-client-ip`, peer loopback (`cloudflared` cục bộ) được giới hạn theo `CF-Connecting-IP`, IPv6 theo /64. Reverse proxy HTTPS phải đặt đúng `X-Forwarded-Proto` vì header này tham gia xác định cờ Secure của cookie và kiểm tra nguồn.
 
 ## Lưu và nạp lại cấu hình
 

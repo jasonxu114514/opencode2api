@@ -40,6 +40,7 @@ Windows 下使用 `Copy-Item config.example.json config.json` 复制配置，执
 | `-config`     | `config.json` | 配置文件路径。        |
 | `-listen`     | 未设置        | 覆盖 API 监听地址。   |
 | `-web-listen` | 未设置        | 覆盖 WebUI 监听地址。 |
+| `-trust-cloudflare-client-ip` | `false` | WebUI 登录/Playground 限流改用 `CF-Connecting-IP`，仅当直连对端为 loopback（本机 `cloudflared`）时生效。 |
 
 配置所在目录需要可写，以便迁移密码、保存配置和写入模型缓存。
 
@@ -267,7 +268,7 @@ API Key 页面支持创建、命名、启用、停用、删除。自动 Key 使�
 
 `GET /healthz` 不发送上游请求、无需 Key。目录未就绪/为空、WARP 不可用或必要代理全部不健康时返回 503。可用但过期目录可返回 200 及 `status: "degraded"`；过期阈值为两倍刷新间隔，最低 60 秒。就绪不保证 Key 有效、额度充足或推理成功；公开响应只含计数与状态，不含凭证或代理地址。
 
-本地使用将 API 与管理监听在 loopback。网络访问须使用 HTTPS 并限制管理入口；可信反向代理应正确设置 `X-Forwarded-Proto`。限流使用直连对端地址，同一反向代理后的客户端共享限制。可执行文件本身提供 HTTP。
+本地使用将 API 与管理监听在 loopback。网络访问须使用 HTTPS 并限制管理入口；可信反向代理应正确设置 `X-Forwarded-Proto`。限流使用直连对端地址，同一反向代理后的客户端共享限制。若通过本机 `cloudflared` 隧道访问，可加 `-trust-cloudflare-client-ip` 让每个访客独立限流：仅对 loopback 对端采用 `CF-Connecting-IP`（Cloudflare 会覆盖该头），IPv6 按 /64 合并。其他反向代理不要开启。可执行文件本身提供 HTTP。
 
 配置和备份包含上游 Key、代理密码、OAuth Token，密码哈希不加密这些内容。限制文件权限，Windows 使用 ACL，分享源码时排除运行文件。`logging.dump_request_bodies` 默认关闭且需 debug 才输出，即使截断与脱敏仍可能暴露对话内容。Playground 和主动可用性探测会发送真实上游请求，可能消耗额度或 credits。
 
