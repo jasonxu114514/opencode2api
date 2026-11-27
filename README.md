@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md) | [Türkçe](README.tr.md)
 
 A Go gateway for OpenCode Zen and Zen Go. Clients use OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages; the gateway selects an available upstream and converts the request and response when the native protocol differs. System One decisions have a separate pass-through endpoint.
 
