@@ -76,7 +76,7 @@ type bridgeStreamEvent struct {
 // A canceled client gets no synthetic upstream error event: the gateway
 // cancels the request context when the client goes away, and writing after
 // that only wastes the remaining attempt.
-func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
+func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string, renames *ToolRenames) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
@@ -90,6 +90,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		responseReasoning: map[string]bool{},
 	}
 	emitter := bridgeStreamEmitter(w, flusher, to, model)
+	emitter.renames = renames
 	termination := streamOpen
 	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
@@ -239,7 +240,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 // through the fragment-aware rewriter, while the other protocols use the
 // stateless RenameResponseTool rewrite on each frame.
 func RenameStreamReader(reader io.Reader, protocol Protocol, renames *ToolRenames) io.Reader {
-	if renames.Empty() {
+	if renames.Noop() {
 		return reader
 	}
 	return &renameStreamReader{
@@ -360,6 +361,10 @@ type streamToolRenamer struct {
 	renames  *ToolRenames
 	tools    map[string]*streamToolRenameState
 	order    []string
+	// customItems marks the Responses output items announced as a
+	// custom_tool_call, so the argument events that follow can be rewritten
+	// into custom tool call input events even though they carry no tool name.
+	customItems map[string]bool
 }
 
 // rewriteFrame rewrites one SSE data payload, which is raw JSON text. Frames
@@ -367,9 +372,12 @@ type streamToolRenamer struct {
 // mentions a client alias (Anthropic and Responses) or "tool_calls" (Chat) is
 // decoded.
 func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
+	if renamer.protocol == Responses {
+		return renamer.rewriteResponsesFrame(raw)
+	}
 	if renamer.protocol != Chat {
-		// Anthropic and Responses streams always carry a complete tool name in
-		// a single event, so the stateless object rewrite is exact.
+		// Anthropic streams always carry a complete tool name in a single
+		// event, so the stateless object rewrite is exact.
 		if !mayCarryToolName([]byte(raw)) {
 			return []byte(raw)
 		}
@@ -379,6 +387,57 @@ func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 		return []byte(raw)
 	}
 	return renamer.rewriteChatFrame(raw)
+}
+
+// rewriteResponsesFrame rewrites one Responses SSE payload. Besides restoring
+// aliased tool names, it keeps a custom tool's call shaped the way the client
+// declared it: an item announced as a function_call for a client custom tool is
+// re-encoded as custom_tool_call, and the argument deltas and completion that
+// follow are turned into custom tool call input events, which carry the input
+// text instead of JSON arguments. Deltas name no tool, so the item announced
+// earlier is remembered by id.
+func (renamer *streamToolRenamer) rewriteResponsesFrame(raw string) []byte {
+	named := mayCarryToolName([]byte(raw))
+	arguments := strings.Contains(raw, "function_call_arguments")
+	if !named && !arguments && len(renamer.customItems) == 0 {
+		return []byte(raw)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return []byte(raw)
+	}
+	changed := renameToolInMap(payload, renamer.protocol, renamer.renames)
+	switch jsonutil.StringAt(payload, "type") {
+	case "response.output_item.added", "response.output_item.done":
+		if item, ok := payload["item"].(map[string]any); ok && jsonutil.StringAt(item, "type") == "custom_tool_call" {
+			if id := jsonutil.StringAt(item, "id"); id != "" {
+				if renamer.customItems == nil {
+					renamer.customItems = map[string]bool{}
+				}
+				renamer.customItems[id] = true
+			}
+		}
+	case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+		id := jsonutil.StringAt(payload, "item_id")
+		if id != "" && renamer.customItems[id] {
+			if jsonutil.StringAt(payload, "type") == "response.function_call_arguments.done" {
+				payload["type"] = "response.custom_tool_call_input.done"
+				payload["input"] = freeformToolInput(payload["arguments"])
+				delete(payload, "arguments")
+			} else {
+				payload["type"] = "response.custom_tool_call_input.delta"
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return []byte(raw)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(raw)
+	}
+	return encoded
 }
 
 // rewriteChatFrame rewrites the tool names of one Chat chunk. Tool calls are

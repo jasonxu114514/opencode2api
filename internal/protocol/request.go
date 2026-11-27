@@ -574,19 +574,31 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 			if !ok {
 				return request, fmt.Errorf("tools[%d] must be an object", i)
 			}
-			// Built-in Responses tools (web_search, file_search, code_interpreter, …)
-			// have no Chat/Anthropic equivalent; skip them during cross-protocol
-			// bridging so requests that mix function tools with built-in plugins
-			// still reach the upstream.
-			if jsonutil.StringAt(tool, "type") != "function" {
+			switch jsonutil.StringAt(tool, "type") {
+			case "function":
+				request.Tools = append(request.Tools, bridgeTool{
+					Name:        jsonutil.StringAt(tool, "name"),
+					Description: jsonutil.StringAt(tool, "description"),
+					Schema:      tool["parameters"],
+					Strict:      jsonutil.BoolAt(tool, "strict"),
+				})
+			case "custom":
+				// A custom tool takes one freeform text argument. Chat and
+				// Anthropic tools carry JSON arguments only, so the declaration
+				// becomes a single-string function and the call is turned back
+				// into a custom_tool_call for the client.
+				request.Tools = append(request.Tools, bridgeTool{
+					Name:        jsonutil.StringAt(tool, "name"),
+					Description: jsonutil.StringAt(tool, "description"),
+					Schema:      customToolSchema(jsonutil.StringAt(tool, "name")),
+				})
+			default:
+				// Built-in Responses tools (web_search, file_search,
+				// code_interpreter, …) have no Chat/Anthropic equivalent; skip
+				// them during cross-protocol bridging so requests that mix
+				// function tools with built-in plugins still reach the upstream.
 				continue
 			}
-			request.Tools = append(request.Tools, bridgeTool{
-				Name:        jsonutil.StringAt(tool, "name"),
-				Description: jsonutil.StringAt(tool, "description"),
-				Schema:      tool["parameters"],
-				Strict:      jsonutil.BoolAt(tool, "strict"),
-			})
 		}
 		request.ToolChoice = decodeResponsesToolChoice(input["tool_choice"])
 		request.ResponseFormat = jsonutil.MapAt(input, "text", "format")
@@ -676,6 +688,24 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		}
 	}
 	return request, nil
+}
+
+// customToolSchema is the function schema a Responses custom tool is bridged
+// to. The tool takes one freeform string, so the whole input travels in a
+// single "input" property that customToolCallArguments and freeformToolInput
+// agree on.
+func customToolSchema(name string) map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"input": map[string]any{
+				"type":        "string",
+				"description": "The complete freeform input for " + name + ".",
+			},
+		},
+		"required":             []any{"input"},
+		"additionalProperties": false,
+	}
 }
 
 // customToolCallArguments encodes a Responses custom tool call's freeform input

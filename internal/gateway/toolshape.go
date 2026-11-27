@@ -114,7 +114,9 @@ func OfficialToolCandidates(officialName string) []string {
 	case "write":
 		return []string{"Write"}
 	case "patch":
-		return []string{"Patch"}
+		// Codex declares its patch tool as the custom tool apply_patch, so an
+		// official patch call has to come back under that name.
+		return []string{"Patch", "ApplyPatch", "apply_patch"}
 	default:
 		return nil
 	}
@@ -276,6 +278,9 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
+		}
+		if protocol == wire.Responses && jsonutil.StringAt(entry, "type") == "custom" {
+			renames.MarkCustom(name)
 		}
 		// The free tier also rejects literal wording in client descriptions.
 		// NBSP breaks that match without accumulating on repeated shaping.

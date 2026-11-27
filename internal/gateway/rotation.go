@@ -406,7 +406,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		}
 	}
 	if err == nil && external != route.Protocol {
-		b, err = wire.ConvertResponse(route.Protocol, external, b)
+		b, err = wire.ConvertResponse(route.Protocol, external, b, toolRenames)
 	}
 	if err != nil {
 		result.err = err

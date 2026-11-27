@@ -460,6 +460,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		}
 		shape := requestShapeFrom(r.Context())
 		toolRenames := shape.renames
+		// The client's Responses custom tools (Codex's apply_patch) have to
+		// come back as custom_tool_call items; shaping cannot know them,
+		// because a cross-protocol bridge has already turned them into plain
+		// functions by then.
+		if custom := wire.CustomToolNames(payload, external); len(custom) > 0 {
+			if toolRenames == nil {
+				toolRenames = wire.NewToolRenames()
+			}
+			for _, name := range custom {
+				toolRenames.MarkCustom(name)
+			}
+		}
 		if stream {
 			if meta != nil {
 				meta.Stream = true
@@ -482,7 +494,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				usage, usageReported, err = wire.ForwardStream(r.Context(), streamWriter, streamBody, upstreamRoute.Protocol, model)
 			} else {
 				w.WriteHeader(resp.StatusCode)
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, model)
+				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, model, toolRenames)
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -525,7 +537,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
 		if external != upstreamRoute.Protocol {
-			responseBody, err = wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody)
+			responseBody, err = wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody, toolRenames)
 			if err != nil {
 				g.logger.Warn("response protocol conversion failed", "component", "conversion", "event", "response_conversion_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "target_protocol", external, "error", err)
 				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)

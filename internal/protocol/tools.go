@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+
+	"opencode2api/internal/jsonutil"
 )
 
 // ClientToolPrefix marks every client tool the gateway renames on a shaped
@@ -35,6 +37,10 @@ type ToolRenames struct {
 	toWire   map[string]string
 	toClient map[string]string
 	official map[string]string
+	// custom marks the client tools declared as Responses custom tools, whose
+	// calls must go back as a custom_tool_call with a freeform input rather
+	// than a function_call with JSON arguments.
+	custom map[string]bool
 	// byCase and byShape map a folded client name back to the one declared
 	// client tool it names. A value of "" marks a fold two tools share: that
 	// name is never guessed between.
@@ -48,6 +54,7 @@ func NewToolRenames() *ToolRenames {
 		toWire:   map[string]string{},
 		toClient: map[string]string{},
 		official: map[string]string{},
+		custom:   map[string]bool{},
 		byCase:   map[string]string{},
 		byShape:  map[string]string{},
 	}
@@ -56,6 +63,13 @@ func NewToolRenames() *ToolRenames {
 // Empty reports whether no tool was renamed.
 func (r *ToolRenames) Empty() bool {
 	return r == nil || len(r.toWire) == 0
+}
+
+// Noop reports whether the set has nothing to restore or convert: no renamed
+// tool and no custom tool. Empty additionally ignores custom markers, which
+// rename nothing on their own.
+func (r *ToolRenames) Noop() bool {
+	return r == nil || (len(r.toWire) == 0 && len(r.custom) == 0)
 }
 
 // Count reports how many client tools were renamed.
@@ -82,6 +96,57 @@ func (r *ToolRenames) Client(wire string) (string, bool) {
 	}
 	client, ok := r.toClient[wire]
 	return client, ok
+}
+
+// MarkCustom records a client tool the request declared as a Responses custom
+// tool. A custom tool takes a freeform input string, so its calls have to leave
+// the gateway as custom_tool_call items the client recognises.
+func (r *ToolRenames) MarkCustom(client string) {
+	if r == nil || client == "" {
+		return
+	}
+	if r.custom == nil {
+		r.custom = map[string]bool{}
+	}
+	r.custom[client] = true
+}
+
+// CustomToolNames lists the Responses custom tools a client request declared.
+// A custom tool takes freeform text instead of JSON arguments, so its calls
+// must come back as custom_tool_call items.
+func CustomToolNames(payload map[string]any, protocol Protocol) []string {
+	if protocol != Responses {
+		return nil
+	}
+	var names []string
+	for _, raw := range jsonutil.SliceAt(payload, "tools") {
+		tool, _ := raw.(map[string]any)
+		if tool == nil || jsonutil.StringAt(tool, "type") != "custom" {
+			continue
+		}
+		if name := jsonutil.StringAt(tool, "name"); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// HasCustom reports whether the request declared any Responses custom tool.
+func (r *ToolRenames) HasCustom() bool {
+	return r != nil && len(r.custom) > 0
+}
+
+// IsCustom reports whether a wire or client tool name belongs to a client tool
+// declared as a Responses custom tool.
+func (r *ToolRenames) IsCustom(name string) bool {
+	if r == nil || name == "" || len(r.custom) == 0 {
+		return false
+	}
+	if r.custom[name] {
+		return true
+	}
+	client, _ := r.Resolve(name)
+	return r.custom[client]
 }
 
 // BindOfficial records the declared client tool that matches one official name.
