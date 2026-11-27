@@ -164,17 +164,28 @@ func (r *registrar) register(ctx context.Context) (registration, error) {
 		return registration{}, errors.New("create WARP device: response omitted id or token")
 	}
 
-	enabled, err := json.Marshal(map[string]bool{"warp_enabled": true})
-	if err != nil {
-		return registration{}, err
-	}
-	var patched deviceEnvelope
-	if err := r.doJSON(ctx, http.MethodPatch, "/reg/"+created.Result.ID, enabled, created.Result.Token, &patched); err != nil {
-		return registration{}, fmt.Errorf("enable WARP device: %w", err)
-	}
-	var current deviceEnvelope
-	if err := r.doJSON(ctx, http.MethodGet, "/reg/"+created.Result.ID, nil, created.Result.Token, &current); err != nil {
-		return registration{}, fmt.Errorf("read WARP device: %w", err)
+	// A fresh registration sometimes already comes back enabled with the full
+	// device config. Use it directly in that case: the PATCH+GET pair is two
+	// extra round trips on a path that runs for every exit and every
+	// replacement.
+	current := created
+	if !current.Result.WARPEnabled || !hasDeviceConfig(current.Result) {
+		enabled, err := json.Marshal(map[string]bool{"warp_enabled": true})
+		if err != nil {
+			return registration{}, err
+		}
+		var patched deviceEnvelope
+		if err := r.doJSON(ctx, http.MethodPatch, "/reg/"+created.Result.ID, enabled, created.Result.Token, &patched); err != nil {
+			return registration{}, fmt.Errorf("enable WARP device: %w", err)
+		}
+		// The PATCH reply usually carries the full device too, so only fall
+		// back to GET when it does not.
+		current = patched
+		if !patched.Result.WARPEnabled || !hasDeviceConfig(patched.Result) {
+			if err := r.doJSON(ctx, http.MethodGet, "/reg/"+created.Result.ID, nil, created.Result.Token, &current); err != nil {
+				return registration{}, fmt.Errorf("read WARP device: %w", err)
+			}
+		}
 	}
 	if !current.Result.WARPEnabled {
 		return registration{}, errors.New("read WARP device: WARP is not enabled")
@@ -224,6 +235,13 @@ func (r *registrar) register(ctx context.Context) (registration, error) {
 		Endpoint:      endpoint,
 		Endpoints:     endpoints,
 	}, nil
+}
+
+// hasDeviceConfig reports whether a device reply already carries the interface
+// addresses needed to build a tunnel, so the caller can skip a follow-up GET.
+func hasDeviceConfig(result deviceResult) bool {
+	addresses := result.Config.Interface.Addresses
+	return addresses.V4 != "" || addresses.V6 != ""
 }
 
 func replaceEndpointPort(endpoint string, port int) string {

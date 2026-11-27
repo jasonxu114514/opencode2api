@@ -130,13 +130,18 @@ func newExitWithStack(ctx context.Context, reg registration, stack Stack, source
 		tunDevice.Close()
 		return nil, err
 	}
-	if source.IsValid() {
-		// Try IPv6 endpoints first so the rotating source is used, but keep
-		// the IPv4 ones behind them: a host (or network) that cannot reach
-		// Cloudflare over IPv6 still gets a working tunnel, just with the
-		// shared address the prefix was supposed to avoid.
+	// Try IPv6 endpoints first when the exit leaves from a rotating IPv6
+	// source or the host has its own IPv6 connectivity. The IPv4 ones stay
+	// behind them, so an IPv4-only host still gets a working tunnel; an
+	// IPv6-capable host avoids the udp4 attempts that otherwise cost a probe
+	// timeout each before the tunnel comes up.
+	if source.IsValid() || hostHasIPv6() {
 		endpoints = preferIPv6Endpoints(endpoints)
 	}
+	// Start from the peer that answered for a previous exit: every exit talks to
+	// the same anycast peers, so re-walking dead candidates costs a probe
+	// timeout each, on a path that runs for every registration and replacement.
+	endpoints = orderEndpointsByMemory(endpoints)
 	wg := device.NewDevice(tunDevice, &simpleBind{source: source}, device.NewLogger(device.LogLevelError, "warp: "))
 	uapi := fmt.Sprintf(
 		"private_key=%s\npublic_key=%s\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint=%s\npersistent_keepalive_interval=25\n",
@@ -160,6 +165,48 @@ func newExitWithStack(ctx context.Context, reg registration, stack Stack, source
 	}
 	e.egress = egress
 	return e, nil
+}
+
+var (
+	hostIPv6Mu    sync.Mutex
+	hostIPv6At    time.Time
+	hostIPv6Value bool
+)
+
+// hostHasIPv6 reports whether this host currently has a globally routable
+// IPv6 address. The result is cached briefly because a laptop can change
+// networks while the pool is running, and endpoint order should follow it.
+func hostHasIPv6() bool {
+	hostIPv6Mu.Lock()
+	defer hostIPv6Mu.Unlock()
+	if !hostIPv6At.IsZero() && time.Since(hostIPv6At) < time.Minute {
+		return hostIPv6Value
+	}
+	hostIPv6At = time.Now()
+	hostIPv6Value = detectHostIPv6()
+	return hostIPv6Value
+}
+
+func detectHostIPv6() bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(ipNet.IP)
+		if !ok {
+			continue
+		}
+		ip = ip.Unmap()
+		if ip.Is6() && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
 }
 
 // preferIPv6Endpoints returns endpoints with the IPv6 ones first and the IPv4
@@ -204,7 +251,7 @@ func resolveEndpoints(ctx context.Context, candidates []string, fallback string)
 				endpoints = append(endpoints, normalized)
 			}
 		} else {
-			addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			addrs, err := lookupHost(ctx, host)
 			if err != nil {
 				continue
 			}
@@ -224,6 +271,33 @@ func resolveEndpoints(ctx context.Context, candidates []string, fallback string)
 		return nil, fmt.Errorf("resolve WARP endpoint candidates %v", candidates)
 	}
 	return endpoints[:min(len(endpoints), probeCandidates)], nil
+}
+
+const dnsCacheTTL = 10 * time.Minute
+
+type dnsCacheEntry struct {
+	addrs   []net.IPAddr
+	expires time.Time
+}
+
+var dnsCache sync.Map // host -> dnsCacheEntry
+
+// lookupHost resolves a Cloudflare endpoint host and caches the answer for a
+// short while. Every exit re-resolves the same peer host, so without a cache a
+// burst of registrations repeats the same DNS query for no benefit.
+func lookupHost(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if cached, ok := dnsCache.Load(host); ok {
+		entry := cached.(dnsCacheEntry)
+		if time.Now().Before(entry.expires) {
+			return entry.addrs, nil
+		}
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	dnsCache.Store(host, dnsCacheEntry{addrs: addrs, expires: time.Now().Add(dnsCacheTTL)})
+	return addrs, nil
 }
 
 func normalizeEndpoint(endpoint string) (string, error) {
@@ -283,23 +357,227 @@ func probeTargets(stack Stack) []probeTarget {
 }
 
 func (e *exit) probe(ctx context.Context, wg *device.Device, peerKey string, endpoints []string) (netip.Addr, error) {
-	var lastErr error
-	for index, endpoint := range endpoints {
-		if index > 0 {
-			if err := wg.IpcSet(fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerKey, endpoint)); err != nil {
-				lastErr = fmt.Errorf("switch WARP endpoint to %s: %w", endpoint, err)
-				continue
-			}
+	// Prefer peers that answered before and skip the ones already known to be
+	// unreachable; if that leaves nothing to try, walk the whole list once.
+	addr, attempted, err := e.probePass(ctx, wg, peerKey, endpoints, true)
+	if err == nil {
+		return addr, nil
+	}
+	if attempted == 0 {
+		addr, _, err = e.probePass(ctx, wg, peerKey, endpoints, false)
+		if err == nil {
+			return addr, nil
 		}
+	}
+	return netip.Addr{}, fmt.Errorf("verify WARP %s egress: %w", e.stack, err)
+}
+
+// probePass walks the candidate endpoints once and reports what it learned. A
+// peer that answers usually does so on the first handshake, so the sweep is
+// ordered by what previous exits saw (orderEndpointsByMemory) and stops at the
+// first working peer. Blocks where every candidate timed out are recorded as
+// unreachable, which keeps later exits from paying that timeout again.
+func (e *exit) probePass(ctx context.Context, wg *device.Device, peerKey string, endpoints []string, skipDead bool) (netip.Addr, int, error) {
+	type blockStat struct{ failed, total int }
+	stats := make(map[string]*blockStat, 2)
+	var (
+		lastErr   error
+		attempted int
+	)
+	for _, endpoint := range endpoints {
+		block := endpointBlock(endpoint)
+		stat := stats[block]
+		if stat == nil {
+			stat = &blockStat{}
+			stats[block] = stat
+		}
+		stat.total++
+		if skipDead && endpointBlockDead(block) {
+			continue
+		}
+		// Point the peer at this candidate before probing it. Re-pointing is a
+		// cheap local IPC call, so the device state stays obvious across passes.
+		if err := wg.IpcSet(fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerKey, endpoint)); err != nil {
+			lastErr = fmt.Errorf("switch WARP endpoint to %s: %w", endpoint, err)
+			stat.failed++
+			continue
+		}
+		attempted++
 		for _, target := range probeTargets(e.stack) {
-			egress, err := e.probeTarget(ctx, target)
+			addr, err := e.probeTarget(ctx, target)
 			if err == nil {
-				return egress, nil
+				rememberEndpoint(endpoint)
+				return addr, attempted, nil
 			}
 			lastErr = err
 		}
+		stat.failed++
 	}
-	return netip.Addr{}, fmt.Errorf("verify WARP %s egress: %w", e.stack, lastErr)
+	if lastErr == nil {
+		lastErr = errNoReachablePeer
+	}
+	// Only a block whose every candidate timed out is written off: peers inside
+	// one block are published together, but a block is not dead just because one
+	// of its addresses was not the one that answered.
+	for block, stat := range stats {
+		if stat.total > 0 && stat.failed == stat.total {
+			forgetBlock(block)
+		}
+	}
+	return netip.Addr{}, attempted, lastErr
+}
+
+var errNoReachablePeer = errors.New("no reachable WARP peer")
+
+// endpointMemory remembers which Cloudflare peer block answered last and which
+// blocks did not, so a new exit starts its probe where the previous one
+// succeeded. Every exit talks to the same anycast peers and only some of them
+// are reachable from a given source, so without this each registration pays a
+// probe timeout per dead candidate before the tunnel comes up.
+var endpointMemory = struct {
+	sync.Mutex
+	lastGood string
+	dead     map[string]time.Time
+}{dead: make(map[string]time.Time)}
+
+const (
+	// endpointDeadTTL bounds how long an unreachable peer block is skipped. It is
+	// short because a peer can come back, and a skipped block is still tried when
+	// nothing else is left.
+	endpointDeadTTL = 10 * time.Minute
+	// maxDeadEndpointBlocks keeps the map from growing without bound on a host
+	// that keeps resolving new candidate addresses.
+	maxDeadEndpointBlocks = 64
+)
+
+// endpointBlock groups candidate endpoints the way Cloudflare publishes them:
+// peers inside one IPv6 /64 or one IPv4 /24 are either all usable or all dead
+// from a given source, so one sweep of a block says something about the rest.
+func endpointBlock(endpoint string) string {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return endpoint
+	}
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	bits := 64
+	if addr.Is4() {
+		bits = 24
+	}
+	prefix, err := addr.Prefix(bits)
+	if err != nil {
+		return endpoint
+	}
+	return prefix.String()
+}
+
+func rememberEndpoint(endpoint string) {
+	block := endpointBlock(endpoint)
+	endpointMemory.Lock()
+	endpointMemory.lastGood = block
+	delete(endpointMemory.dead, block)
+	endpointMemory.Unlock()
+}
+
+func forgetBlock(block string) {
+	endpointMemory.Lock()
+	defer endpointMemory.Unlock()
+	if len(endpointMemory.dead) >= maxDeadEndpointBlocks {
+		now := time.Now()
+		for candidate, until := range endpointMemory.dead {
+			if !until.After(now) {
+				delete(endpointMemory.dead, candidate)
+			}
+		}
+	}
+	if endpointMemory.lastGood == block {
+		endpointMemory.lastGood = ""
+	}
+	endpointMemory.dead[block] = time.Now().Add(endpointDeadTTL)
+}
+
+// endpointBlockDead reports whether a recent sweep gave up on this block.
+func endpointBlockDead(block string) bool {
+	endpointMemory.Lock()
+	until, ok := endpointMemory.dead[block]
+	endpointMemory.Unlock()
+	return ok && until.After(time.Now())
+}
+
+// orderEndpointsByMemory moves candidates from the block that answered last to
+// the front, then the blocks still considered reachable, and the skipped blocks
+// last. Interleaving the tail tries one candidate per block before the second
+// candidate of any block, so a live block is reached before a dead one is
+// walked end to end.
+func orderEndpointsByMemory(endpoints []string) []string {
+	if len(endpoints) < 2 {
+		return endpoints
+	}
+	endpointMemory.Lock()
+	lastGood := endpointMemory.lastGood
+	dead := make(map[string]bool, len(endpointMemory.dead))
+	now := time.Now()
+	for block, until := range endpointMemory.dead {
+		if until.After(now) {
+			dead[block] = true
+		}
+	}
+	endpointMemory.Unlock()
+
+	preferred := make([]string, 0, len(endpoints))
+	var alive, unreachable []string
+	for _, endpoint := range endpoints {
+		block := endpointBlock(endpoint)
+		switch {
+		case lastGood != "" && block == lastGood:
+			preferred = append(preferred, endpoint)
+		case dead[block]:
+			unreachable = append(unreachable, endpoint)
+		default:
+			alive = append(alive, endpoint)
+		}
+	}
+	return append(append(preferred, interleaveByBlock(alive)...), interleaveByBlock(unreachable)...)
+}
+
+// interleaveByBlock returns the endpoints in rounds: the first candidate of
+// every block, then the second of every block, and so on. Candidate lists come
+// grouped by host, so a plain walk spends several timeouts on one unreachable
+// block before it ever tries a block that answers.
+func interleaveByBlock(endpoints []string) []string {
+	if len(endpoints) < 2 {
+		return endpoints
+	}
+	var order []string
+	groups := make(map[string][]string, 2)
+	for _, endpoint := range endpoints {
+		block := endpointBlock(endpoint)
+		if _, ok := groups[block]; !ok {
+			order = append(order, block)
+		}
+		groups[block] = append(groups[block], endpoint)
+	}
+	if len(order) < 2 {
+		return endpoints
+	}
+	interleaved := make([]string, 0, len(endpoints))
+	for round := 0; ; round++ {
+		added := false
+		for _, block := range order {
+			if round < len(groups[block]) {
+				interleaved = append(interleaved, groups[block][round])
+				added = true
+			}
+		}
+		if !added {
+			return interleaved
+		}
+	}
 }
 
 func (e *exit) probeTarget(ctx context.Context, target probeTarget) (netip.Addr, error) {
