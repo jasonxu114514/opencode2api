@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md) | [Türkçe](README.tr.md)
 
 Gateway viết bằng Go cho OpenCode Zen và Zen Go. Client dùng OpenAI Chat Completions, OpenAI Responses hoặc Anthropic Messages; gateway chọn upstream khả dụng và chuyển đổi yêu cầu, phản hồi khi giao thức gốc khác nhau. Quyết định System One dùng endpoint chuyển tiếp riêng.
 

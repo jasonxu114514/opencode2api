@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md) | [Türkçe](README.tr.md)
 
 使用 Go 编写的 OpenCode Zen / Zen Go 网关。客户端调用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages，网关选择可用上游，并在原生协议不同时转换请求和响应。System One 决策使用独立透传接口。
 
