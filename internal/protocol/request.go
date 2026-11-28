@@ -530,6 +530,23 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 						CallID: jsonutil.StringAt(item, "call_id"),
 						Result: item["output"],
 					})
+				case "custom_tool_call":
+					// Codex declares apply_patch as a Responses custom tool, so its
+					// replayed history carries custom_tool_call items. Chat and
+					// Anthropic only carry JSON tool arguments, so the freeform input
+					// is preserved under an "input" key.
+					appendBridgeBlock(&request.Messages, "assistant", bridgeBlock{
+						Kind:          "tool_call",
+						ID:            jsonutil.FirstString(jsonutil.StringAt(item, "call_id"), jsonutil.StringAt(item, "id")),
+						Name:          jsonutil.StringAt(item, "name"),
+						ArgumentsJSON: customToolCallArguments(item["input"]),
+					})
+				case "custom_tool_call_output":
+					appendBridgeBlock(&request.Messages, "user", bridgeBlock{
+						Kind:   "tool_result",
+						CallID: jsonutil.StringAt(item, "call_id"),
+						Result: item["output"],
+					})
 				case "message", "":
 					role := jsonutil.StringAt(item, "role")
 					blocks, err := decodeOpenAIBlocksChecked(item["content"])
@@ -659,6 +676,21 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		}
 	}
 	return request, nil
+}
+
+// customToolCallArguments encodes a Responses custom tool call's freeform input
+// as JSON arguments. The Chat and Anthropic bridges only carry JSON tool
+// arguments, so the original text is preserved under an "input" key and the
+// turn stays meaningful when auto-compaction replays it.
+func customToolCallArguments(input any) string {
+	if input == nil {
+		return "{}"
+	}
+	encoded, err := jsonutil.Marshal(map[string]any{"input": input})
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
 
 // appendBridgeBlock adds blocks decoded from a standalone Responses item. It
