@@ -260,7 +260,8 @@ API Key 页面支持创建、命名、启用、停用、删除。自动 Key 使�
 | 配置及上一版本 | `config.json`、`config.json.bak`。 |
 | 模型及元数据缓存 | `config.json.models.catalog.json`、`config.json.models.dev.json`。 |
 | 可用性及轮转 | `config.json.<upstream-fingerprint>.availability.json`、`config.json.rotation.json`。 |
-| Session、用量、近期请求/尝试、日志环形缓冲、最近 Playground 结果 | 内存，进程重启清空。 |
+| Session、每 Key 最近一小时用量、近期请求/尝试、日志环形缓冲、最近 Playground 结果 | 内存，进程重启清空。 |
+| 每个 server key 的 lifetime 用量 | `usage.json` 与配置同目录：启动时加载，每 5 分钟及正常退出时写回；最近一小时窗口仍只在内存。 |
 | 结构化日志 | stdout JSON，需外部收集才能长期保存。 |
 
 文件名以实际配置路径为前缀。监控保留跨热重载数据，不跨进程共享；Token 只统计上游报告值，不估算缺失用量。完整请求结果与收到响应头为止的尝试指标是不同口径。Playground 用量单独归类。最近一小时最多保留 10,000 请求/20,000 尝试，接口各返回最多 500 条。
