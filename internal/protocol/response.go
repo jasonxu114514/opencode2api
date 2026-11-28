@@ -16,7 +16,12 @@ import (
 // the body is decoded into the bridge model and re-encoded for the target. An
 // upstream error envelope becomes an error, and so does a body the target
 // protocol cannot represent.
-func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
+//
+// renames carries the client tools the request declared, so a call to a
+// Responses custom tool (Codex's apply_patch) can be re-encoded as a
+// custom_tool_call with its freeform input instead of a function_call with
+// JSON arguments. A nil set means no tool was declared custom.
+func ConvertResponse(from, to Protocol, body []byte, renames *ToolRenames) ([]byte, error) {
 	if from == to {
 		return append([]byte(nil), body...), nil
 	}
@@ -31,7 +36,7 @@ func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
 	if response.Error != "" || response.Stop == "error" {
 		return nil, &StreamFailure{Message: response.Error, Type: "upstream_error"}
 	}
-	return json.Marshal(encodeBridgeResponse(to, response))
+	return json.Marshal(encodeBridgeResponse(to, response, renames))
 }
 
 // decodeBridgeResponse decodes a complete response body of the given protocol
@@ -109,6 +114,13 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 					Name:          jsonutil.StringAt(item, "name"),
 					ArgumentsJSON: jsonutil.StringAt(item, "arguments"),
 				})
+			case "custom_tool_call":
+				response.Tools = append(response.Tools, bridgeBlock{
+					Kind:          "tool_call",
+					ID:            jsonutil.FirstString(jsonutil.StringAt(item, "call_id"), jsonutil.StringAt(item, "id")),
+					Name:          jsonutil.StringAt(item, "name"),
+					ArgumentsJSON: customToolCallArguments(item["input"]),
+				})
 			default:
 				return response, fmt.Errorf("Responses response has unsupported output item type %q", jsonutil.StringAt(item, "type"))
 			}
@@ -155,7 +167,11 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 // body. A tool stop with no usable tool block is demoted to a plain stop first
 // (the reason is spelled out at the guard below), and an ID is synthesized when
 // the response has none.
-func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string]any {
+func encodeBridgeResponse(protocol Protocol, response bridgeResponse, renames ...*ToolRenames) map[string]any {
+	var custom *ToolRenames
+	if len(renames) > 0 {
+		custom = renames[0]
+	}
 	if response.ID == "" {
 		response.ID = identity.RandomID("resp", 12)
 	}
@@ -225,6 +241,21 @@ func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string
 			})
 		}
 		for _, tool := range response.Tools {
+			if custom.IsCustom(tool.Name) {
+				// The client declared this tool as a custom tool, so it expects
+				// a custom_tool_call whose input is the freeform text, not a
+				// function_call with JSON arguments it cannot match.
+				name, _ := custom.Resolve(tool.Name)
+				output = append(output, map[string]any{
+					"id":      identity.RandomID("ctc", 12),
+					"type":    "custom_tool_call",
+					"status":  "completed",
+					"call_id": tool.ID,
+					"name":    name,
+					"input":   freeformToolInput(bridgeArgumentsJSON(tool)),
+				})
+				continue
+			}
 			output = append(output, map[string]any{
 				"id":        identity.RandomID("fc", 12),
 				"type":      "function_call",
@@ -526,7 +557,7 @@ func mayCarryToolName(body []byte) bool {
 // cannot contain a tool name; every rewrite is a map lookup after decoding.
 // Names that map to nothing are left alone.
 func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []byte {
-	if renames.Empty() || len(body) == 0 {
+	if renames.Noop() || len(body) == 0 {
 		return body
 	}
 	if !mayCarryToolName(body) {
@@ -546,6 +577,38 @@ func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []
 	return encoded
 }
 
+// freeformToolInput recovers the freeform input text of a custom tool call from
+// the JSON arguments the model produced for it. A custom tool takes one text
+// argument, so an object holding a single string value ({"input": ...},
+// {"patchText": ...}) unwraps to that value; anything else is passed through as
+// the model wrote it.
+func freeformToolInput(arguments any) string {
+	raw, ok := arguments.(string)
+	if !ok || raw == "" {
+		if arguments == nil {
+			return ""
+		}
+		encoded, err := json.Marshal(arguments)
+		if err != nil {
+			return ""
+		}
+		raw = string(encoded)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return raw
+	}
+	if len(fields) != 1 {
+		return raw
+	}
+	for _, value := range fields {
+		if text, ok := value.(string); ok {
+			return text
+		}
+	}
+	return raw
+}
+
 // renameToolInMap rewrites aliased tool names in a decoded response or stream
 // event and reports whether anything changed. Every place a protocol reports a
 // tool call is visited: Chat message, delta and legacy function_call tool
@@ -558,16 +621,38 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 		if !ok {
 			return false
 		}
-		client, changed := renames.Resolve(name)
-		if !changed {
-			return false
+		changed := false
+		if transform, ok := renames.ArgumentTransform(name); ok {
+			if arguments, ok := container["arguments"].(string); ok {
+				if rewritten, err := transform(arguments); err == nil && rewritten != arguments {
+					container["arguments"] = rewritten
+					changed = true
+				}
+			}
 		}
-		container["name"] = client
-		return true
+		client, renamed := renames.Resolve(name)
+		if renamed {
+			container["name"] = client
+			changed = true
+		}
+		return changed
 	}
 	renameItem := func(item map[string]any) bool {
 		switch jsonutil.StringAt(item, "type") {
-		case "function_call", "custom_tool_call":
+		case "function_call":
+			renamed := rename(item)
+			// A tool the request declared as a Responses custom tool takes a
+			// freeform input, so its call has to go back as custom_tool_call
+			// with that input text; a function_call item with JSON arguments is
+			// a call the client cannot match to its tool.
+			if name, ok := item["name"].(string); ok && renames.IsCustom(name) {
+				item["input"] = freeformToolInput(item["arguments"])
+				delete(item, "arguments")
+				item["type"] = "custom_tool_call"
+				return true
+			}
+			return renamed
+		case "custom_tool_call":
 			return rename(item)
 		default:
 			return false

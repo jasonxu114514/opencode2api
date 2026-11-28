@@ -341,7 +341,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 			defer g.monitor.EndStream()
 		}
 		streamBody := wire.RenameStreamReader(resp.Body, route.Protocol, toolRenames)
-		usage, reported, committed, err := wire.RotationStream(original.Context(), w, streamBody, route.Protocol, external, alias, ready)
+		usage, reported, committed, err := wire.RotationStream(original.Context(), w, streamBody, route.Protocol, external, alias, toolRenames, ready)
 		if meta != nil {
 			meta.Usage = usage
 			meta.UsageReported = reported
@@ -406,7 +406,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		}
 	}
 	if err == nil && external != route.Protocol {
-		b, err = wire.ConvertResponse(route.Protocol, external, b)
+		b, err = wire.ConvertResponse(route.Protocol, external, b, toolRenames)
 	}
 	if err != nil {
 		result.err = err

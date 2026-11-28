@@ -384,17 +384,19 @@ func decodeChatToolChoice(value any) bridgeToolChoice {
 }
 
 // decodeResponsesToolChoice maps a Responses tool_choice onto the bridge. A
-// string is the mode as is; a function object is a named choice, whose name
-// sits at the top level rather than nested as in Chat.
+// string is the mode as is; a function or custom object is a named choice,
+// whose name sits at the top level rather than nested as in Chat.
 func decodeResponsesToolChoice(value any) bridgeToolChoice {
 	if mode, ok := value.(string); ok {
 		return bridgeToolChoice{Mode: mode}
 	}
 	choice, _ := value.(map[string]any)
-	if jsonutil.StringAt(choice, "type") == "function" {
+	switch jsonutil.StringAt(choice, "type") {
+	case "function", "custom":
 		return bridgeToolChoice{Mode: "named", Name: jsonutil.StringAt(choice, "name")}
+	default:
+		return bridgeToolChoice{}
 	}
-	return bridgeToolChoice{}
 }
 
 // decodeAnthropicToolChoice maps an Anthropic tool_choice onto the bridge,
